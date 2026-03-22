@@ -22,6 +22,8 @@ PATCHES APPLIED:
 [FIX #18] WS broadcast: iterate copy, catch all exceptions per-connection, discard dead sockets
 [FIX #23] log.exception() used throughout — no bare except or log.error for exceptions
 [FIX #24] entryTimerMins, exitTimerMins, signalTrailInitialSL, signalTrailInitialSLPoints added to strategy
+[FIX #25] Fallback actions: reconnect-market-feed, reconnect-telegram, resubscribe-signals,
+          restart-backend (pm2), clear-signal-tracker
 """
 import asyncio
 import json
@@ -683,6 +685,115 @@ async def test_signal(req: TestSignalRequest):
         sender=req.sender,
         timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
+
+
+# ── Fallback Action Endpoints [FIX #25] ──────────────────────────────────────
+
+@app.post("/api/reconnect-market-feed")
+async def reconnect_market_feed():
+    """Restart the LTP WebSocket market feed if it has dropped."""
+    try:
+        try:
+            manager.market_feed.stop()
+            log.info("reconnect_market_feed: market feed stopped")
+        except Exception:
+            log.exception("reconnect_market_feed: stop() failed (may already be stopped)")
+
+        manager.market_feed._started_once = False
+        manager.market_feed.start()
+        manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
+
+        await asyncio.sleep(3)
+        manager.market_feed.subscribe_batch([
+            {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+            {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+            {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+        ])
+        await manager.resubscribe_recent_signals(limit=20)
+
+        log.info("reconnect_market_feed: market feed restarted successfully")
+        await ws_manager.broadcast({"type": "status_update", "data": {"market_feed": True}})
+        return {"status": "ok", "message": "Market feed reconnected and subscriptions restored"}
+    except Exception:
+        log.exception("reconnect_market_feed: failed")
+        return {"status": "error", "message": "Market feed reconnect failed — see logs"}
+
+
+@app.post("/api/reconnect-telegram")
+async def reconnect_telegram():
+    """Stop and restart the Telegram bot listener."""
+    try:
+        log.info("reconnect_telegram: stopping Telegram...")
+        try:
+            await telegram.stop()
+        except Exception:
+            log.exception("reconnect_telegram: stop() failed")
+
+        await asyncio.sleep(2)
+        log.info("reconnect_telegram: restarting Telegram...")
+        asyncio.create_task(telegram.start())
+
+        log.info("reconnect_telegram: Telegram restart initiated")
+        return {"status": "ok", "message": "Telegram reconnect initiated — status will update in a few seconds"}
+    except Exception:
+        log.exception("reconnect_telegram: failed")
+        return {"status": "error", "message": "Telegram reconnect failed — see logs"}
+
+
+@app.post("/api/resubscribe-signals")
+async def resubscribe_signals():
+    """Re-send instrument subscriptions for recent signals to the market feed.
+    Lightweight fix for LTP showing '--' on signal cards even though the market
+    feed is running — subscriptions can silently drop after a WS reconnect.
+    Does NOT restart the feed; just re-sends the subscription list.
+    """
+    try:
+        await manager.resubscribe_recent_signals(limit=20)
+        active_subs = len(manager.market_feed._subscriptions)
+        log.info("resubscribe_signals: done (%d total subscriptions active)", active_subs)
+        return {
+            "status":  "ok",
+            "message": f"Re-subscribed recent signals ({active_subs} instruments active)",
+        }
+    except Exception:
+        log.exception("resubscribe_signals: failed")
+        return {"status": "error", "message": "Re-subscribe failed — see logs"}
+
+
+@app.post("/api/restart-backend")
+async def restart_backend():
+    """Trigger a PM2 restart of this backend process.
+    Fires after a 1.5s delay so the HTTP response can flush first.
+    WARNING: causes ~10s downtime; open positions resume being managed after restart.
+    """
+    import subprocess
+
+    async def _delayed_restart():
+        await asyncio.sleep(1.5)
+        try:
+            subprocess.Popen(["pm2", "restart", "kotak-trader"])
+            log.info("restart_backend: pm2 restart triggered")
+        except Exception:
+            log.exception("restart_backend: pm2 restart failed")
+
+    asyncio.create_task(_delayed_restart())
+    return {
+        "status":  "ok",
+        "message": "PM2 restart triggered — expect ~10s downtime. The page will reconnect automatically.",
+    }
+
+
+@app.post("/api/clear-signal-tracker")
+async def clear_signal_tracker():
+    """Reset _processed_signals in TradeManager so previously blocked signals can re-enter."""
+    count = len(manager._processed_signals)
+    manager._processed_signals.clear()
+    log.info("clear_signal_tracker: cleared %d entries from _processed_signals", count)
+    return {
+        "status":  "ok",
+        "message": f"Signal tracker cleared ({count} entr{'y' if count == 1 else 'ies'} removed). Valid signals will now be processed.",
+        "cleared": count,
+    }
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────

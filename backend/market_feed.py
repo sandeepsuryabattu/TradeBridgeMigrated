@@ -20,13 +20,20 @@ PATCHES APPLIED:
 [FIX #11] _heartbeat_watchdog uses ZoneInfo("Asia/Kolkata") — no hardcoded UTC offset
 [FIX #19] _flush_pending_subs_when_ready: on timeout re-queues subs instead of discarding
 [FIX #23] log.exception() used throughout — no bare except or log.error for exceptions
+[FIX #26] _heartbeat_watchdog: weekend + NSE holiday awareness.
+          _on_open sets _last_tick_time = time.time() which causes the watchdog to fire
+          147s later on days with no market ticks (Sundays, holidays). Fix: check
+          weekday >= 5 (Sat/Sun) or cached NSE holiday list before killing the feed.
+          Holiday list fetched once per day and cached in _nse_holidays_cache.
 """
 import asyncio
 import logging
 import threading
 import time
+import urllib.request
+import json
 from typing import Callable
-from datetime import datetime, timezone, time as dt_time
+from datetime import datetime, timezone, time as dt_time, date as dt_date
 from zoneinfo import ZoneInfo
 
 from . import database as db
@@ -58,6 +65,10 @@ class MarketFeed:
         self._last_tick_time:      float            = 0.0
         self._heartbeat_thread:    threading.Thread | None = None
         self._started_once         = False
+
+        # [FIX #26] NSE holiday cache — fetched once per day
+        self._nse_holidays_cache:  set[str]         = set()   # "YYYY-MM-DD" strings
+        self._nse_holidays_fetched_date: dt_date | None = None
 
     @property
     def is_running(self) -> bool:
@@ -299,16 +310,69 @@ class MarketFeed:
                 if (s["instrument_token"], s["exchange_segment"]) not in existing_keys:
                     self._pending_subs.append(s)
 
+    # ── Holiday helpers [FIX #26] ─────────────────────────────────────────────
+
+    def _is_market_holiday(self, today: dt_date) -> bool:
+        """Return True if today is a weekend or an NSE trading holiday.
+
+        Weekends (Sat=5, Sun=6) are checked locally — no network call needed.
+        NSE holidays are fetched from Upstox once per calendar day and cached
+        in _nse_holidays_cache so the watchdog thread never blocks on repeat calls.
+        """
+        # Weekends — Python weekday(): Mon=0 … Sat=5, Sun=6
+        if today.weekday() >= 5:
+            return True
+
+        # Refresh holiday cache once per day
+        if self._nse_holidays_fetched_date != today:
+            self._fetch_nse_holidays()
+            self._nse_holidays_fetched_date = today
+
+        return today.isoformat() in self._nse_holidays_cache
+
+    def _fetch_nse_holidays(self):
+        """Fetch NSE trading holidays from Upstox (no auth required) and
+        populate _nse_holidays_cache with 'YYYY-MM-DD' strings.
+        Silently swallows any network/parse errors — on failure the cache
+        stays empty and only weekend detection remains active.
+        """
+        url = "https://api.upstox.com/v2/market/holidays"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = json.loads(resp.read())
+            if data.get("status") == "success":
+                self._nse_holidays_cache = {
+                    h["date"]
+                    for h in data["data"]
+                    if h.get("holiday_type") == "TRADING_HOLIDAY"
+                    and "NSE" in h.get("closed_exchanges", [])
+                }
+                log.info(
+                    "NSE holiday cache refreshed — %d holidays loaded",
+                    len(self._nse_holidays_cache),
+                )
+            else:
+                log.warning("Upstox holiday API returned non-success status: %s", data.get("status"))
+        except Exception:
+            log.exception("Could not fetch NSE holidays — weekend check still active")  # [FIX #23]
+
     # ── Heartbeat Watchdog ────────────────────────────────────────────────────
 
     def _heartbeat_watchdog(self):
-        """[11][FIX #11] Periodically checks that ticks are still arriving.
+        """[11][FIX #11][FIX #26] Periodically checks that ticks are still arriving.
         If feed goes silent for HEARTBEAT_STALE_THRESHOLD seconds during market hours,
         closes the WS so the SDK's own reconnect=5 kicks in fresh.
 
         [FIX #11] Market hours now use ZoneInfo("Asia/Kolkata") instead of a hardcoded
-        UTC offset (3.5–10.1). The old offset was fragile: wrong on non-UTC servers,
-        incorrect at DST edges, and opaque to anyone reading the code.
+        UTC offset.
+
+        [FIX #26] Weekend + holiday guard added BEFORE the stale-tick check.
+        Root cause: _on_open sets _last_tick_time = time.time() so the watchdog
+        always sees "N seconds since last tick" even on days with zero market
+        activity (Sundays, public holidays). The old code only checked clock time
+        against _MARKET_OPEN/_MARKET_CLOSE — which is within range on a Sunday
+        morning — so it would fire and kill the WS every ~147s all day.
+        Fix: skip the stale check entirely on weekends/holidays.
         """
         log.info("Heartbeat watchdog running")
         while True:
@@ -319,6 +383,18 @@ class MarketFeed:
 
             if self._last_tick_time == 0:
                 continue  # No ticks received yet since startup
+
+            # [FIX #26] Skip on weekends and NSE holidays — no ticks expected
+            today_ist = datetime.now(_IST).date()
+            if self._is_market_holiday(today_ist):
+                log.debug(
+                    "Heartbeat watchdog: market closed today (%s) — skipping stale check",
+                    today_ist.isoformat(),
+                )
+                # Reset _last_tick_time so we don't accumulate stale seconds
+                # across the holiday into tomorrow's first check
+                self._last_tick_time = time.time()
+                continue
 
             # [FIX #11] Use explicit IST timezone — never rely on server's local clock
             now_ist = datetime.now(_IST).time()

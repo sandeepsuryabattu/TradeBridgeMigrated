@@ -199,15 +199,28 @@ header {
 }
 
 .badge-disconnected {
-    background: rgba(100, 116, 139, 0.1);
-    color: var(--text-muted);
-    border: 1px solid var(--border);
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--red);
+    border: 1px solid rgba(239, 68, 68, 0.2);
 }
 
 .badge-disconnected .badge-dot {
-    background: var(--text-muted);
+    background: var(--red);
+    box-shadow: 0 0 6px var(--red);
+    animation: pulse-dot 2s infinite;
 }
 
+
+.badge-warn {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.2);
+}
+.badge-warn .badge-dot {
+    background: #f59e0b;
+    box-shadow: 0 0 6px #f59e0b;
+    animation: pulse-dot 2s infinite;
+}
 @keyframes pulse-dot {
 
     0%,
@@ -1102,6 +1115,13 @@ header {
     .badge span.badge-dot {
         font-size: 10px; /* keep dot visible */
         margin-right: 0;
+    }
+    #badge-health {
+        font-size: 11px !important;
+        padding: 4px 8px !important;
+    }
+    #badge-health .badge-dot {
+        margin-right: 4px;
     }
 
     #badge-telegram::after { content: 'T'; font-size: 10px; font-weight: bold; margin-left: 4px; }

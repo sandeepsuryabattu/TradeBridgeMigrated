@@ -20,6 +20,8 @@
  * [FIX #20] loadStrategy() fetches from server first; localStorage only as offline fallback
  * [FIX #22] renderSignals() upserts by ID — no insertBefore on every render, timers no longer stutter
  * [FIX #24] entryTimerMins, exitTimerMins, signalTrailInitialSL, signalTrailInitialSLPoints added
+ * [FIX #25] Settings panel: 5 fallback actions — reconnect market feed, reconnect telegram,
+ *           resubscribe signals, restart backend (pm2), clear signal tracker
  */
 
 // ── Globals ──────────────────────────────────────────────────────────────────
@@ -95,6 +97,12 @@ document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket();
     startTimerTick();
     bindEventListeners();
+    fetchNSEHolidays();
+    setInterval(() => {
+        updateHealthBadge();
+        const panel = document.getElementById('health-panel');
+        if (panel && panel.style.display !== 'none') renderHealthChecks();
+    }, 10000);
 });
 
 // ── Event Listeners ───────────────────────────────────────────────────────────
@@ -196,6 +204,7 @@ function bindEventListeners() {
     bindStrategyModal();
     bindClearModal();
     bindStopTrading();
+    bindFallbackActions();  // [FIX #25]
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -207,11 +216,12 @@ function connectWebSocket() {
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ping' }));
         }
-    }, 20000);
+    }, 5000);
 
     ws.onopen = () => {
         state.wsConnected = true;
         updateBadge('badge-ws', true);
+        updateHealthBadge();
         toast('Connected to server', 'success');
         if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
     };
@@ -228,6 +238,7 @@ function connectWebSocket() {
         state.wsConnected = false;
         clearInterval(ws._pingInterval);
         updateBadge('badge-ws', false);
+        updateHealthBadge();
         if (!reconnectTimer) {
             reconnectTimer = setInterval(() => {
                 console.log('Reconnecting WebSocket...');
@@ -276,6 +287,7 @@ function handleWSMessage(msg) {
                 // Derive after ALL data (trades + signals) is merged
                 deriveSignalTradeStatuses();
                 renderAll();
+                updateHealthBadge();
                 break;
 
             case 'new_message':
@@ -343,12 +355,6 @@ function handleWSMessage(msg) {
                                 renderSignals();
                             }
                         }
-                    } else if (primaryTrade.status === 'pending' && primaryTrade.signal_id) {
-                        const sigIdx = state.signals.findIndex(s => s.id === primaryTrade.signal_id);
-                        if (sigIdx !== -1) {
-                            state.signals[sigIdx].trade_status = 'pending';
-                            renderSignals();
-                        }
                     }
 
                     renderTradesDebounced();
@@ -386,6 +392,7 @@ function handleWSMessage(msg) {
             }
 
             case 'instrument_ltp':
+                healthState.lastInstrumentTick = Date.now();
                 if (msg.data.symbol) {
                     const incomingSymbol = msg.data.symbol.toUpperCase();
                     state.signals.forEach(s => {
@@ -401,6 +408,7 @@ function handleWSMessage(msg) {
                 break;
 
             case 'index_ltp':
+                healthState.lastSensexTick = Date.now();
                 state.sensex_ltp = msg.data.ltp || 0;
                 document.querySelectorAll('.signal-sensex-ltp').forEach(el => {
                     el.textContent = (state.sensex_ltp || 0).toFixed(2);
@@ -437,6 +445,7 @@ function handleWSMessage(msg) {
                 break;
 
             case 'pong':
+                healthState.lastPong = Date.now();
                 break;
 
             default:
@@ -492,6 +501,7 @@ async function fetchInitialData() {
         if (posRes.ok) state.positions = await posRes.json();
 
         renderAll();
+        updateHealthBadge();
     } catch (e) {
         console.error('Failed to fetch initial data:', e);
     }
@@ -598,6 +608,129 @@ async function setLotSize() {
     } catch { toast('Failed to set lot size', 'error'); }
 }
 
+// ── Fallback Actions [FIX #25] ────────────────────────────────────────────────
+function setFallbackBtnState(btn, loading, label) {
+    if (!btn) return;
+    btn.disabled   = loading;
+    btn.textContent = loading ? '⏳ Working…' : label;
+}
+
+async function reconnectMarketFeed() {
+    const btn = $('#btn-reconnect-market-feed');
+    setFallbackBtnState(btn, true, '🔌 Reconnect Market Feed');
+    try {
+        const res  = await fetch(`${API_BASE}/api/reconnect-market-feed`, { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            toast(`✅ ${data.message}`, 'success');
+        } else {
+            toast(`❌ ${data.message}`, 'error');
+        }
+    } catch {
+        toast('Market feed reconnect request failed', 'error');
+    } finally {
+        setFallbackBtnState(btn, false, '🔌 Reconnect Market Feed');
+    }
+}
+
+async function reconnectTelegram() {
+    const btn = $('#btn-reconnect-telegram');
+    setFallbackBtnState(btn, true, '📡 Reconnect Telegram');
+    try {
+        const res  = await fetch(`${API_BASE}/api/reconnect-telegram`, { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            toast(`✅ ${data.message}`, 'success');
+        } else {
+            toast(`❌ ${data.message}`, 'error');
+        }
+    } catch {
+        toast('Telegram reconnect request failed', 'error');
+    } finally {
+        setFallbackBtnState(btn, false, '📡 Reconnect Telegram');
+    }
+}
+
+async function resubscribeSignals() {
+    const btn = $('#btn-resubscribe-signals');
+    setFallbackBtnState(btn, true, '🔔 Re-subscribe Signals');
+    try {
+        const res  = await fetch(`${API_BASE}/api/resubscribe-signals`, { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            toast(`✅ ${data.message}`, 'success');
+        } else {
+            toast(`❌ ${data.message}`, 'error');
+        }
+    } catch {
+        toast('Re-subscribe request failed', 'error');
+    } finally {
+        setFallbackBtnState(btn, false, '🔔 Re-subscribe Signals');
+    }
+}
+
+async function restartBackend() {
+    if (!confirm(
+        '⚠️ Restart Backend\n\n' +
+        'This will run: pm2 restart kotak-trader\n\n' +
+        '• Expect ~10 seconds of downtime\n' +
+        '• Open positions will resume being managed after restart\n' +
+        '• The page will reconnect automatically\n\n' +
+        'Continue?'
+    )) return;
+
+    const btn = $('#btn-restart-backend');
+    setFallbackBtnState(btn, true, '🔄 Restart Backend');
+    try {
+        const res  = await fetch(`${API_BASE}/api/restart-backend`, { method: 'POST' });
+        const data = await res.json();
+        toast(`🔄 ${data.message}`, 'warning');
+        // Close settings modal — it'll reopen cleanly after reconnect
+        $('#settings-modal').style.display = 'none';
+    } catch {
+        // Expected — server may go down before responding
+        toast('🔄 Backend restarting… reconnecting shortly', 'warning');
+        $('#settings-modal').style.display = 'none';
+    } finally {
+        // Re-enable after a delay (server will be back up by then)
+        setTimeout(() => setFallbackBtnState(btn, false, '🔄 Restart Backend'), 15000);
+    }
+}
+
+async function clearSignalTracker() {
+    if (!confirm(
+        '⚠️ Clear Signal Tracker\n\n' +
+        'This resets _processed_signals in TradeManager.\n\n' +
+        'Use this if valid signals are being blocked as duplicates.\n' +
+        'After clearing, the same strike/option can re-enter immediately.\n\n' +
+        'Continue?'
+    )) return;
+
+    const btn = $('#btn-clear-signal-tracker');
+    setFallbackBtnState(btn, true, '🧹 Clear Signal Tracker');
+    try {
+        const res  = await fetch(`${API_BASE}/api/clear-signal-tracker`, { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            toast(`✅ ${data.message}`, 'success');
+        } else {
+            toast(`❌ ${data.message}`, 'error');
+        }
+    } catch {
+        toast('Signal tracker clear request failed', 'error');
+    } finally {
+        setFallbackBtnState(btn, false, '🧹 Clear Signal Tracker');
+    }
+}
+
+function bindFallbackActions() {
+    $('#btn-reconnect-market-feed')?.addEventListener('click',  reconnectMarketFeed);
+    $('#btn-reconnect-telegram')?.addEventListener('click',     reconnectTelegram);
+    $('#btn-resubscribe-signals')?.addEventListener('click',    resubscribeSignals);
+    $('#btn-restart-backend')?.addEventListener('click',        restartBackend);
+    $('#btn-clear-signal-tracker')?.addEventListener('click',   clearSignalTracker);
+}
+
 // ── Rendering ─────────────────────────────────────────────────────────────────
 async function loadByDate(date) {
     try {
@@ -656,7 +789,6 @@ function deriveSignalTradeStatuses() {
         'cancelled': 'cancelled',
         'stopped':   'stopped',
         'ignored':   'ignored',
-        'pending':   'pending',
         'failed':    'failed',
     };
 
@@ -688,6 +820,195 @@ function deriveSignalTradeStatuses() {
     });
 }
 
+
+// ── Health Monitor ──────────────────────────────────────────────────────────
+const healthState = {
+    lastPong:        null,
+    lastSensexTick:  null,
+    lastInstrumentTick: null,
+    marketFeed:      false,
+    telegram:        false,
+    kotak:           false,
+};
+
+// NSE holidays fetched from Upstox — cached for the session
+let _nseHolidays = null;
+async function fetchNSEHolidays() {
+    try {
+        const res  = await fetch('https://api.upstox.com/v2/market/holidays');
+        const data = await res.json();
+        if (data.status === 'success') {
+            _nseHolidays = new Set(
+                data.data
+                    .filter(h => h.holiday_type === 'TRADING_HOLIDAY' && h.closed_exchanges.includes('NSE'))
+                    .map(h => h.date)
+            );
+            console.log('NSE holidays loaded:', _nseHolidays.size);
+        }
+    } catch (e) {
+        console.warn('Could not fetch NSE holidays:', e);
+    }
+}
+
+function isMarketHours() {
+    const now = new Date();
+    const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const day = ist.getDay(); // 0=Sun, 6=Sat
+    if (day === 0 || day === 6) return false;
+    const todayStr = ist.toLocaleDateString('en-CA'); // YYYY-MM-DD
+    if (_nseHolidays && _nseHolidays.has(todayStr)) return false;
+    const mins = ist.getHours() * 60 + ist.getMinutes();
+    return mins >= 540 && mins <= 935; // 9:00 to 15:35
+}
+
+function toggleHealthPanel() {
+    const panel = document.getElementById('health-panel');
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    if (panel.style.display === 'block') renderHealthChecks();
+}
+
+function getHealthChecks() {
+    const now      = Date.now();
+    const inMarket = isMarketHours();
+    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const checks   = [];
+
+    // 1. WebSocket
+    checks.push({
+        label:  'WebSocket',
+        ok:     state.wsConnected,
+        warn:   false,
+        detail: state.wsConnected ? 'Connected' : 'Disconnected — reconnecting',
+    });
+
+    // 2. Telegram
+    checks.push({
+        label:  'Telegram',
+        ok:     healthState.telegram,
+        warn:   false,
+        detail: healthState.telegram ? 'Running' : 'Not connected',
+    });
+
+    // 3. Kotak Neo
+    checks.push({
+        label:  'Kotak Neo',
+        ok:     healthState.kotak,
+        warn:   false,
+        detail: healthState.kotak ? 'Authenticated' : 'Not authenticated',
+    });
+
+    // 4. Market Feed
+    const mfWarn = !inMarket && !healthState.marketFeed;
+    checks.push({
+        label:  'Market Feed',
+        ok:     healthState.marketFeed || !inMarket,
+        warn:   mfWarn,
+        detail: healthState.marketFeed ? 'Running' : (inMarket ? 'Not running during market hours' : 'Off — outside market hours'),
+    });
+
+    // 5. SENSEX LTP freshness (streams 9:00–15:35)
+    const sensexAge  = healthState.lastSensexTick ? Math.floor((now - healthState.lastSensexTick) / 1000) : null;
+    const sensexOk   = sensexAge !== null && sensexAge < 60;
+    const sensexWarn = !inMarket;
+    checks.push({
+        label:  'SENSEX Feed',
+        ok:     sensexOk || sensexWarn,
+        warn:   sensexWarn,
+        detail: sensexWarn
+            ? 'Outside market hours'
+            : (sensexAge === null ? 'No tick received yet' : (sensexOk ? `Live — last tick ${sensexAge}s ago` : `Stale — ${sensexAge}s ago`)),
+    });
+
+    // 6. Instrument LTP
+    const activeSignals = state.signals.filter(s =>
+        s.status === 'valid' &&
+        !['filled','closed','expired','replaced','cancelled','stopped'].includes(s.trade_status || '')
+    );
+    const instrAge  = healthState.lastInstrumentTick ? Math.floor((now - healthState.lastInstrumentTick) / 1000) : null;
+    const instrOk   = instrAge !== null && instrAge < 60;
+    const noSignals = activeSignals.length === 0;
+    const instrWarn = !inMarket || noSignals;
+    checks.push({
+        label:  'Instrument LTP',
+        ok:     instrOk || instrWarn,
+        warn:   instrWarn,
+        detail: noSignals
+            ? 'No active signals to track'
+            : (!inMarket ? 'Outside market hours'
+                : (instrAge === null ? 'No tick yet'
+                    : (instrOk ? `Live — last tick ${instrAge}s ago` : `Stale — ${instrAge}s ago`))),
+    });
+
+    // 7. WS Heartbeat
+    const pongAge = healthState.lastPong ? Math.floor((now - healthState.lastPong) / 1000) : null;
+    const pongOk  = pongAge !== null && pongAge < 60;
+    checks.push({
+        label:  'WS Heartbeat',
+        ok:     pongOk,
+        warn:   false,
+        detail: pongAge === null ? 'No pong yet' : (pongOk ? `OK — last pong ${pongAge}s ago` : `Silent for ${pongAge}s`),
+    });
+
+    // 8. Signal feed today
+    const todaySignals = state.signals.filter(s => (s.created_at || s.timestamp || '').slice(0, 10) === todayStr);
+    checks.push({
+        label:  'Signal Feed',
+        ok:     todaySignals.length > 0,
+        warn:   todaySignals.length === 0 && !inMarket,
+        detail: todaySignals.length > 0
+            ? `${todaySignals.length} signal(s) today — last at ${formatTime(todaySignals[0].created_at || todaySignals[0].timestamp)}`
+            : (inMarket ? 'No signals received today' : 'No signals yet today'),
+    });
+
+    // 9. Trade activity today
+    const todayTrades = state.trades.filter(t => (t.created_at || t.fill_time || '').slice(0, 10) === todayStr);
+    checks.push({
+        label:  'Trade Activity',
+        ok:     true,
+        warn:   false,
+        detail: todayTrades.length > 0
+            ? `${todayTrades.length} trade(s) today — last at ${formatTime(todayTrades[0].created_at || todayTrades[0].fill_time)}`
+            : 'No trades today',
+    });
+
+    // 10. Stop Trading flag
+    checks.push({
+        label:  'Trading Active',
+        ok:     !state.stopTrading,
+        warn:   !!state.stopTrading,
+        detail: state.stopTrading ? 'Stop trading is ON — no new orders will be placed' : 'Enabled',
+    });
+
+    return checks;
+}
+
+function renderHealthChecks() {
+    const container = document.getElementById('health-checks');
+    if (!container) return;
+    const checks  = getHealthChecks();
+    container.innerHTML = checks.map(c => {
+        const color = c.warn ? 'var(--yellow, #f59e0b)' : (c.ok ? 'var(--green)' : 'var(--red)');
+        const icon  = c.warn ? '⚠️' : (c.ok ? '✅' : '❌');
+        return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg);border-radius:6px;border:1px solid var(--border)">
+            <span style="font-size:14px">${icon}</span>
+            <div>
+                <div style="font-size:11px;font-weight:600;color:var(--text-muted)">${c.label}</div>
+                <div style="font-size:12px;color:${color}">${c.detail}</div>
+            </div>
+        </div>`;
+    }).join('');
+    updateHealthBadge();
+}
+
+function updateHealthBadge() {
+    const checks  = getHealthChecks();
+    const anyFail = checks.some(c => !c.ok && !c.warn);
+    const anyWarn = checks.some(c => c.warn);
+    const badge   = document.getElementById('badge-health');
+    if (!badge) return;
+    badge.className = 'badge ' + (anyFail ? 'badge-disconnected' : anyWarn ? 'badge-warn' : 'badge-connected');
+}
+// ────────────────────────────────────────────────────────────────────────────
 function renderAll() {
     renderMessages();
     renderSignals();
@@ -977,9 +1298,13 @@ function updateStatusFromData(status) {
     state.mode = status.mode || 'paper';
     updateModeUI();
     updateBadge('badge-telegram', status.telegram);
+    healthState.telegram   = !!status.telegram;
+    healthState.marketFeed = !!status.market_feed;
+    if (status.stop_trading != null) state.stopTrading = status.stop_trading;
 
     const kotak      = status.kotak || {};
     const isAuth     = kotak.authenticated;
+    healthState.kotak = !!isAuth;
     updateBadge('badge-kotak', isAuth);
 
     const statusText = $('#kotak-auth-status');

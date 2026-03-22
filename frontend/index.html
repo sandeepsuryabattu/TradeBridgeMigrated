@@ -48,6 +48,64 @@
             #btn-stop-trading-header { display: none !important; }
             .btn-stop-trading-menu   { display: inline-flex; align-items: center; }
         }
+
+        /* ── Fallback Actions ── */
+        .fallback-actions-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        @media (max-width: 500px) {
+            .fallback-actions-grid { grid-template-columns: 1fr; }
+        }
+        .fallback-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 3px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1.5px solid var(--border);
+            background: var(--bg);
+            color: var(--text);
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            text-align: left;
+            transition: border-color 0.15s, background 0.15s;
+            line-height: 1.3;
+        }
+        .fallback-btn:hover:not(:disabled) {
+            border-color: var(--accent, #6366f1);
+            background: color-mix(in srgb, var(--accent, #6366f1) 8%, var(--bg));
+        }
+        .fallback-btn:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+        .fallback-btn .fallback-desc {
+            font-size: 10px;
+            font-weight: 400;
+            color: var(--text-muted);
+            white-space: normal;
+        }
+        .fallback-btn-danger {
+            border-color: color-mix(in srgb, var(--red, #ef4444) 40%, var(--border));
+            color: var(--red, #ef4444);
+        }
+        .fallback-btn-danger:hover:not(:disabled) {
+            border-color: var(--red, #ef4444);
+            background: color-mix(in srgb, var(--red, #ef4444) 10%, var(--bg));
+        }
+        .fallback-btn-warn {
+            border-color: color-mix(in srgb, #f59e0b 40%, var(--border));
+            color: #f59e0b;
+        }
+        .fallback-btn-warn:hover:not(:disabled) {
+            border-color: #f59e0b;
+            background: color-mix(in srgb, #f59e0b 10%, var(--bg));
+        }
     </style>
 </head>
 
@@ -60,15 +118,13 @@
                 <h1>TradeBridge</h1>
             </div>
             <div class="connection-badges">
-                <span id="badge-telegram" class="badge badge-disconnected">
-                    <span class="badge-dot"></span> Telegram
+
+                <span id="badge-health" class="badge badge-disconnected" style="cursor:pointer" onclick="toggleHealthPanel()">
+                    <span class="badge-dot"></span> Health
                 </span>
-                <span id="badge-kotak" class="badge badge-disconnected">
-                    <span class="badge-dot"></span> Kotak Neo
-                </span>
-                <span id="badge-ws" class="badge badge-disconnected">
-                    <span class="badge-dot"></span> Server
-                </span>
+            </div>
+            <div id="health-panel" style="display:none;position:absolute;top:52px;left:0;right:0;background:var(--bg-card);border-bottom:1px solid var(--border);padding:12px 20px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.3)">
+                <div id="health-checks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px"></div>
             </div>
             <!-- Stop Trading — always visible on desktop, hidden on mobile (shown in hamburger) -->
             <button class="btn btn-stop-trading" id="btn-stop-trading-header" title="Toggle stop trading">
@@ -390,6 +446,7 @@
                 <button class="modal-close" id="btn-close-settings">&times;</button>
             </div>
             <div class="modal-body">
+                <!-- Kotak Auth -->
                 <div class="settings-section">
                     <h3>Kotak Neo Authentication</h3>
                     <div class="settings-status" id="kotak-auth-status">Not connected</div>
@@ -399,12 +456,58 @@
                         <button class="btn btn-primary" id="btn-submit-otp">Submit OTP</button>
                     </div>
                 </div>
+
+                <!-- Test Signal -->
                 <div class="settings-section">
                     <h3>Test Signal</h3>
                     <textarea id="test-signal-input" class="input textarea" rows="4"
                         placeholder="Trading Floor&#10;Sensex 82500 CE&#10;Price @150-160"></textarea>
                     <button class="btn btn-secondary" id="btn-send-test">Send Test Signal</button>
                 </div>
+
+                <!-- ── Fallback Actions ── -->
+                <div class="settings-section">
+                    <h3>Fallback Actions</h3>
+                    <p style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">
+                        Manual recovery controls — use when the Health Monitor shows a failure.
+                    </p>
+                    <div class="fallback-actions-grid">
+
+                        <!-- 1. Reconnect Market Feed -->
+                        <button class="fallback-btn" id="btn-reconnect-market-feed">
+                            🔌 Reconnect Market Feed
+                            <span class="fallback-desc">Restart LTP WebSocket if ticks have stopped</span>
+                        </button>
+
+                        <!-- 2. Reconnect Telegram -->
+                        <button class="fallback-btn" id="btn-reconnect-telegram">
+                            📡 Reconnect Telegram
+                            <span class="fallback-desc">Stop &amp; restart the Telegram listener</span>
+                        </button>
+
+                        <!-- 3. Re-subscribe Signals -->
+                        <button class="fallback-btn" id="btn-resubscribe-signals">
+                            🔔 Re-subscribe Signals
+                            <span class="fallback-desc">Re-send instrument subscriptions — fixes LTP showing "--" when feed is running</span>
+                        </button>
+
+                        <!-- 4. Clear Signal Tracker -->
+                        <button class="fallback-btn fallback-btn-warn" id="btn-clear-signal-tracker">
+                            🧹 Clear Signal Tracker
+                            <span class="fallback-desc">Reset duplicate-signal block — allows re-entry on same strike</span>
+                        </button>
+
+                        <!-- 5. Restart Backend — full width, danger styling -->
+                        <button class="fallback-btn fallback-btn-danger" id="btn-restart-backend"
+                                style="grid-column: 1 / -1;">
+                            🔄 Restart Backend (PM2)
+                            <span class="fallback-desc">pm2 restart kotak-trader — ~10s downtime, page auto-reconnects</span>
+                        </button>
+
+                    </div>
+                </div>
+                <!-- ── End Fallback Actions ── -->
+
             </div>
         </div>
     </div>
@@ -463,7 +566,7 @@
     <!-- ── Toast Container ── -->
     <div id="toast-container"></div>
 
-    <script src="app.js?v=7"></script>
+    <script src="app.js?v=8"></script>
 </body>
 
 </html>
