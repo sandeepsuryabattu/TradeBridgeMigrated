@@ -21,7 +21,8 @@ TICKS_DB_PATH = Path(__file__).parent.parent / "data" / "ticks.db"
 _ALLOWED_TRADE_FIELDS = {
     "status", "fill_price", "fill_time", "pnl", "order_id",
     "notes", "trigger_price", "price", "quantity", "min_ltp",
-    "exit_price", "entry_label",
+    "exit_price", "entry_label", "closed_at", "exit_reason",
+    "kotak_order_id",
 }
 
 # [FIX #7, #2, #14] expanded to cover all SL state + price-side confirmation fields
@@ -30,7 +31,9 @@ _ALLOWED_POSITION_FIELDS = {
     "closed_at", "entry_price",
     # SL config fields (persisted so rehydrate_from_db can restore them)
     "sl_mode", "sl_gap", "sl_points", "signal_stoploss",
-    "activation_points", "trail_gap", "sl_activated",
+    "activation_points", "trail_gap", "sl_activated", "exit_reason",
+    # Real trading — Kotak order IDs for SL management
+    "kotak_entry_order_id", "sl_order_id",
 }
 
 _ALLOWED_PENDING_ORDER_FIELDS = {
@@ -136,6 +139,7 @@ async def init_db():
             exit_price       REAL,
             notes            TEXT,
             entry_label      TEXT,
+            exit_reason      TEXT,
             created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY (signal_id) REFERENCES signals(id)
         );
@@ -169,6 +173,7 @@ async def init_db():
             trail_gap               REAL    DEFAULT 0,
             -- [FIX #7] Trailing SL runtime state — written on every tick
             sl_activated            INTEGER DEFAULT 0,
+            exit_reason             TEXT,
             FOREIGN KEY (trade_id) REFERENCES trades(id)
         );
 
@@ -204,6 +209,8 @@ async def init_db():
         # trades table
         ("trades",    "exit_price",               "REAL"),
         ("trades",    "entry_label",              "TEXT"),
+        ("trades",    "closed_at",                "TEXT"),
+        ("trades",    "exit_reason",              "TEXT"),
         ("signals",   "last_ltp",                 "REAL"),
         # positions table — SL config fields
         ("positions", "sl_mode",                  "TEXT DEFAULT 'fixed'"),
@@ -214,9 +221,14 @@ async def init_db():
         ("positions", "trail_gap",                "REAL DEFAULT 0"),
         # positions table — trailing SL runtime state
         ("positions", "sl_activated",             "INTEGER DEFAULT 0"),
+        ("positions", "exit_reason",              "TEXT"),
         # pending_orders table — price-side confirmation state
         ("pending_orders", "price_side_candidate",     "TEXT"),
         ("pending_orders", "price_side_confirm_count", "INTEGER DEFAULT 0"),
+        # Real trading — Kotak order IDs
+        ("trades",          "kotak_order_id",           "TEXT"),
+        ("positions",       "kotak_entry_order_id",     "TEXT"),
+        ("positions",       "sl_order_id",              "TEXT"),
     ]
 
     for table, col, typedef in migrations:
@@ -419,8 +431,9 @@ async def save_trade(signal_id: int, trade_data: dict) -> int:
         """INSERT INTO trades
            (signal_id, mode, exchange_segment, trading_symbol, transaction_type,
             order_type, quantity, price, trigger_price, status, order_id, min_ltp,
-            notes, entry_label)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            "notes", "entry_label", "exit_reason"
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             signal_id,
             trade_data.get("mode", "paper"),
@@ -436,6 +449,7 @@ async def save_trade(signal_id: int, trade_data: dict) -> int:
             trade_data.get("min_ltp"),
             trade_data.get("notes"),
             trade_data.get("entry_label"),
+            trade_data.get("exit_reason"),
         ),
     )
     await db.commit()
@@ -483,9 +497,9 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
         """INSERT INTO positions
            (trade_id, mode, trading_symbol, strike, option_type,
             quantity, entry_price, max_ltp, trailing_sl, status,
-            sl_mode, sl_gap, sl_points, signal_stoploss,
-            activation_points, trail_gap, sl_activated)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            sl_gap, sl_points, signal_stoploss,
+            activation_points, trail_gap, sl_activated, exit_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             trade_id,
             pos_data.get("mode", "paper"),
@@ -504,6 +518,7 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
             pos_data.get("activation_points", 0),
             pos_data.get("trail_gap", 0),
             int(pos_data.get("sl_activated", False)),
+            pos_data.get("exit_reason"),
         ),
     )
     await db.commit()
@@ -525,10 +540,11 @@ async def update_position(position_id: int, updates: dict):
     await db.commit()
 
 
-async def get_positions(mode: str = None, status: str = "open") -> list[dict]:
+async def get_positions(mode: str = None, status: str = "open", date: str = None) -> list[dict]:
     """
     Fetch positions filtered by mode and/or status.
-    status=None returns open positions + today's closed (IST date).
+    status=None returns open positions + closed from the given date (or today if no date).
+    date param: 'YYYY-MM-DD' filters closed positions to that day; None = today (IST).
     """
     db = await _get_db()
     conditions: list[str] = []
@@ -537,11 +553,19 @@ async def get_positions(mode: str = None, status: str = "open") -> list[dict]:
         conditions.append("mode = ?")
         params.append(mode)
     if status is None:
-        conditions.append(
-            "(status = 'open' OR (status = 'closed' AND "
-            "date(datetime(closed_at, '+5 hours', '+30 minutes')) = "
-            "date(datetime('now', '+5 hours', '+30 minutes'))))"
-        )
+        if date:
+            conditions.append(
+                "(status = 'open' OR (status = 'closed' AND "
+                "date(datetime(closed_at, '+5 hours', '+30 minutes')) = ?))"
+            )
+            params.append(date)
+        else:
+            # Default: open positions + today's closed (IST date)
+            conditions.append(
+                "(status = 'open' OR (status = 'closed' AND "
+                "date(datetime(closed_at, '+5 hours', '+30 minutes')) = "
+                "date(datetime('now', '+5 hours', '+30 minutes'))))"
+            )
     else:
         conditions.append("status = ?")
         params.append(status)

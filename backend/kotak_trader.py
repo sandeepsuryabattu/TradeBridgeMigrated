@@ -212,6 +212,41 @@ class KotakTrader:
             log.error(f"Order placement failed: {e}")
             return {"status": "error", "message": str(e)}
 
+    def modify_order(
+        self,
+        order_id: str,
+        price: float = 0,
+        order_type: str = "SL",
+        quantity: int = 0,
+        validity: str = "DAY",
+        trigger_price: float = 0,
+        trading_symbol: str = "",
+        exchange_segment: str = "bse_fo",
+        product: str = "NRML",
+        transaction_type: str = "S",
+    ) -> dict:
+        """Modify an existing order (used to trail exchange SL orders)."""
+        if not self.client or not self.is_authenticated:
+            return {"status": "error", "message": "Not authenticated"}
+        try:
+            result = self.client.modify_order(
+                order_id=order_id,
+                price=str(price),
+                order_type=order_type,
+                quantity=str(quantity),
+                validity=validity,
+                trigger_price=str(trigger_price),
+                trading_symbol=trading_symbol,
+                exchange_segment=exchange_segment,
+                product=product,
+                transaction_type=transaction_type,
+            )
+            log.info(f"Order modified: {result}")
+            return {"status": "ok", "data": result}
+        except Exception as e:
+            log.error(f"Order modification failed: {e}")
+            return {"status": "error", "message": str(e)}
+
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an existing order."""
         if not self.client:
@@ -220,6 +255,28 @@ class KotakTrader:
             result = self.client.cancel_order(order_id=order_id)
             return {"status": "ok", "data": result}
         except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def order_history(self, order_id: str) -> dict:
+        """Get history/status of a specific order."""
+        if not self.client or not self.is_authenticated:
+            return {"status": "error", "message": "Not authenticated"}
+        try:
+            result = self.client.order_history(order_id=order_id)
+            return {"status": "ok", "data": result}
+        except Exception as e:
+            log.error(f"Order history failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def get_limits(self) -> dict:
+        """Get account balance/margin limits from Kotak."""
+        if not self.client or not self.is_authenticated:
+            return {"status": "error", "message": "Not authenticated"}
+        try:
+            result = self.client.limits(segment="ALL", exchange="ALL", product="ALL")
+            return {"status": "ok", "data": result}
+        except Exception as e:
+            log.error(f"Get limits failed: {e}")
             return {"status": "error", "message": str(e)}
 
     # ── Data Retrieval ──

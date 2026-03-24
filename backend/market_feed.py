@@ -75,10 +75,16 @@ class MarketFeed:
         return self._running
 
     def add_tick_callback(self, callback: Callable):
-        self._tick_callbacks.append(callback)
+        if callback not in self._tick_callbacks:
+            self._tick_callbacks.append(callback)
+
+    def remove_tick_callback(self, callback: Callable):
+        if callback in self._tick_callbacks:
+            self._tick_callbacks.remove(callback)
 
     def add_raw_tick_callback(self, callback: Callable):
-        self._raw_tick_callbacks.append(callback)
+        if callback not in self._raw_tick_callbacks:
+            self._raw_tick_callbacks.append(callback)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 

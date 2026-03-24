@@ -5,17 +5,15 @@ Handles mode switching, duplicate detection, and market hours validation.
 PATCHES APPLIED:
  [1] _cancel_pending_duplicate dead code removed; inline logic consolidated
  [2] get_status() now includes strategy and lot_size directly
- [3] _processed_signals keyed by date-strike-option_type to allow next-day reuse
  [4] entryAvgPick added to default strategy dict in __init__
  [5] _is_market_open() uses IST timezone explicitly instead of naive local time
  [6] complete_2fa offloads download_contracts to executor to avoid blocking event loop
- [7] sig_hash only added to _processed_signals after successful trade execution
  [8] Redundant int() casts removed in resubscribe_recent_signals
  [9] set_ws_broadcast comment clarified
 [10] new_message broadcast uses raw_text key for consistency with DB schema
 [11] compareMode added — spawns all 5 entry strategies simultaneously for comparison
 [14] signal_trail SL mode added to strategy defaults with activationPoints and trailGap
-[FIX #3 ] compare mode no longer bypasses dedup — sig_hash check AND open-position check
+[FIX #3 ] compare mode no longer bypasses dedup — open-position check
           both run unconditionally before the compare/live branch split
 [FIX #16] all datetime calls use explicit UTC (via _utc_now()) — no more naive datetimes
 [FIX #23] bare except: pass / except Exception as e: log.error replaced with log.exception()
@@ -24,13 +22,14 @@ PATCHES APPLIED:
 """
 import asyncio
 import logging
-from datetime import datetime, date, time, timezone
+from datetime import datetime, time, timezone
 from typing import Optional, Callable, Any, Dict
 from zoneinfo import ZoneInfo
 
 from .config import Config
 from .signal_parser import parse_signal
 from .paper_trader import PaperTrader
+from .real_trader import RealTrader
 from .kotak_trader import KotakTrader
 from .market_feed import MarketFeed
 from .contract_master import ContractMaster
@@ -58,51 +57,33 @@ class TradeManager:
         self.kotak = KotakTrader()
         self.market_feed = MarketFeed(self.kotak)
         self.paper_trader = PaperTrader(self.market_feed)
-        self.paper_trader._on_trade_expired = self.on_trade_expired
+        self.real_trader = RealTrader(self.kotak, self.market_feed)
         self.contract_master = ContractMaster()
         self.lot_size = int(Config.DEFAULT_LOT_SIZE)
+
+        # Background task handles for reconciliation + EOD
+        self._real_reconcile_task: Optional[asyncio.Task] = None
+        self._real_eod_task: Optional[asyncio.Task] = None
 
         # [FIX #25] Stop-trading flag — when True, signals are saved/broadcast
         # but no trade is placed. Set by main.py before every process_message call.
         self.stop_trading: bool = False
 
-        # [4] entryAvgPick always present — prevents KeyError downstream
-        # [11] compareMode: when True all 5 entry strategies run simultaneously
-        # [14] activationPoints / trailGap: used by signal_trail SL mode
+        # Strategy defaults — simplified to bounce-back entry + signal_trail SL
         self.strategy: Dict[str, Any] = {
             "lots":             1,
-            "entryLogic":       "code",
-            "entryAvgPick":     "avg",
-            "entryFixed":       None,
-            "trailingSL":       "code",
-            "slFixed":          None,
             "activationPoints": 5.0,
             "trailGap":         2.0,
-            "compareMode":      False,
+            "bouncePoints":     5,
+            "bufferEnabled":    False,
+            "bufferPoints":     2.0,
         }
 
-        # [3] Keyed as "YYYY-MM-DD-strike-option_type" — same strike allowed again next day
-        self._processed_signals: set[str] = set()
         self._ws_broadcast: Optional[Callable] = None
         self.kotak_login_state: str = "idle"
         self.kotak_last_login_error: Optional[str] = None
 
     # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def _sig_hash(self, strike, option_type: str) -> str:
-        """[3] Date-scoped dedup key — signals recur correctly on a new trading day."""
-        today = date.today().isoformat()
-        return f"{today}-{strike}-{option_type.upper()}"
-
-    def on_trade_expired(self, trading_symbol: str):
-        """Called by paper_trader when a pending order expires — unlock that strike."""
-        import re
-        m = re.search(r'(\d{4,6})(CE|PE)$', trading_symbol.upper())
-        if m:
-            strike, option_type = m.group(1), m.group(2)
-            sig_hash = self._sig_hash(strike, option_type)
-            self._processed_signals.discard(sig_hash)
-            log.info("Trade expired — unlocked %s for re-entry", sig_hash)
 
     def set_lot_size(self, lots: int):
         self.lot_size = max(1, int(lots))
@@ -113,6 +94,7 @@ class TradeManager:
         """Set the WebSocket broadcast function for real-time frontend updates."""
         self._ws_broadcast = broadcast_fn
         self.paper_trader.set_ws_broadcast(broadcast_fn)
+        self.real_trader.set_ws_broadcast(broadcast_fn)
 
     async def _broadcast(self, event_type: str, data: dict):
         if self._ws_broadcast:
@@ -174,6 +156,11 @@ class TradeManager:
                 )
                 self.market_feed.subscribe_instrument(token, symbol)
                 log.info("Subscribed market feed for %s (token: %s)", symbol, token)
+                # Attach contract lot_size so paper_trader can use it
+                try:
+                    signal_dict["contract_lot_size"] = int(float(lookup.get("lot_size") or 0)) or None
+                except (ValueError, TypeError):
+                    signal_dict["contract_lot_size"] = None
             else:
                 log.warning(
                     "Could not find instrument token for %s %s — ticks may not arrive",
@@ -228,7 +215,7 @@ class TradeManager:
                 "skipped":    "stop_trading",
             }
 
-        # ── [FIX #3] Dedup checks run unconditionally — BEFORE compare/live split ──
+        # ── [FIX #3] Dedup: block only if open position exists for this strike ──
 
         # 4a. Open-position duplicate check
         open_positions = await db.get_positions(mode=self.mode, status="open")
@@ -259,10 +246,17 @@ class TradeManager:
                     await db.update_trade(order["id"], {"status": "replaced"})
                 except Exception:
                     log.exception("process_message: failed to mark order as replaced")
-                self.paper_trader._pending_orders = [
-                    po for po in self.paper_trader._pending_orders
-                    if po.get("trade_id") != order["id"]
-                ]
+                # Remove from the active engine's pending list
+                if self.mode == "real":
+                    self.real_trader._pending_orders = [
+                        po for po in self.real_trader._pending_orders
+                        if po.get("trade_id") != order["id"]
+                    ]
+                else:
+                    self.paper_trader._pending_orders = [
+                        po for po in self.paper_trader._pending_orders
+                        if po.get("trade_id") != order["id"]
+                    ]
                 log.info("Cancelled old pending order %d for %s", order["id"], sig_suffix)
                 replaced_signal_id = order.get("signal_id")
                 await self._broadcast("order_update", {
@@ -274,16 +268,7 @@ class TradeManager:
                 order_replaced = True
                 break
 
-        # 4b. Sig-hash duplicate check (date-scoped) [FIX #3]
-        sig_hash = self._sig_hash(signal.strike, signal.option_type)
-        if sig_hash in self._processed_signals and not order_replaced:
-            log.info("Duplicate signal skipped (already processed today): %s", sig_hash)
-            return {
-                "message_id": msg_id,
-                "signal":     signal_dict,
-                "trade":      None,
-                "skipped":    "duplicate",
-            }
+        # 4b. (removed) — in-memory sig_hash dedup removed; DB checks above are sufficient
 
         # 5. Market hours check (blocks real trades only, warns for paper)
         if not self._is_market_open():
@@ -300,15 +285,6 @@ class TradeManager:
 
         # 6. Execute trade
         trade_result: Dict[str, Any] = await self._execute_trade(signal_dict, signal_id)
-
-        # [7] Only mark processed after successful execution — allows retry on error
-        if trade_result.get("status") not in ("error", None):
-            self._processed_signals.add(sig_hash)
-        else:
-            log.warning(
-                "Trade execution failed for %s — not marking as processed (retry allowed)",
-                sig_hash,
-            )
 
         order_dict    = trade_result.get("order")
         order_sym_out = order_dict.get("trading_symbol", "") if isinstance(order_dict, dict) else ""
@@ -338,10 +314,8 @@ class TradeManager:
         return {"status": "error", "message": f"Unknown mode: {self.mode}"}
 
     async def _execute_paper(self, signal: dict, signal_id: int) -> dict:
-        """Execute via paper trading engine."""
+        """Execute via paper trading engine — bounce-back entry + signal_trail SL."""
         try:
-            if self.strategy.get("compareMode"):
-                return await self._execute_paper_compare(signal, signal_id)
             result = await self.paper_trader.place_order(
                 signal, signal_id,
                 lot_size=self.lot_size,
@@ -353,90 +327,18 @@ class TradeManager:
             log.exception("Paper trade error")
             return {"status": "error", "message": "Paper trade failed — see logs"}
 
-    async def _execute_paper_compare(self, signal: dict, signal_id: int) -> dict:
-        """[11] Run all 5 entry modes simultaneously on the same signal for comparison."""
-        hi       = float(signal.get("entry_high") or 0)
-        live_ltp = float(signal.get("live_ltp")   or 0)
-
-        variants = [
-            {"entryLogic": "code",       "entryAvgPick": "avg",  "entryFixed": None,           "label": "code"},
-            {"entryLogic": "avg_signal", "entryAvgPick": "high", "entryFixed": None,           "label": "high"},
-            {"entryLogic": "avg_signal", "entryAvgPick": "low",  "entryFixed": None,           "label": "low"},
-            {"entryLogic": "avg_signal", "entryAvgPick": "avg",  "entryFixed": None,           "label": "avg"},
-            {"entryLogic": "fixed",      "entryAvgPick": "avg",  "entryFixed": live_ltp or hi, "label": "fixed"},
-        ]
-
-        results = []
-        for variant in variants:
-            strat        = {**self.strategy, **variant}
-            tagged_signal = {**signal, "entry_label": variant["label"]}
-            try:
-                result = await self.paper_trader.place_order(
-                    tagged_signal, signal_id,
-                    lot_size=self.lot_size,
-                    strategy=strat,
-                )
-                result["entry_label"] = variant["label"]
-                results.append(result)
-                log.info("Compare mode — placed [%s] order: %s", variant["label"], result.get("trade_id"))
-            except Exception:
-                log.exception("Compare mode error for [%s]", variant["label"])
-
-        return {
-            "status":       "pending",
-            "compare_mode": True,
-            "variants":     results,
-            "trade_id":     results[0]["trade_id"] if results else None,
-        }
-
     async def _execute_real(self, signal: dict, signal_id: int) -> dict:
-        """Execute via Kotak Neo real trading."""
+        """Execute via RealTrader — bounce-back entry + exchange SL."""
         if not self.kotak.is_authenticated:
             return {"status": "error", "message": "Kotak Neo not authenticated"}
-
         try:
-            scrip = self.kotak.search_scrip(
-                symbol="SENSEX",
-                option_type=signal["option_type"],
-                strike_price=signal["strike"],
+            result = await self.real_trader.place_order(
+                signal, signal_id,
+                lot_size=self.lot_size,
+                strategy=self.strategy,
             )
-
-            trading_symbol = ""
-            if scrip and isinstance(scrip, dict):
-                instruments = scrip.get("data", [])
-                if instruments:
-                    trading_symbol = instruments[0].get("pTrdSymbol", "")
-
-            if not trading_symbol:
-                trading_symbol = f"SENSEX{signal['strike']}{signal['option_type']}"
-                log.warning("Using constructed symbol: %s", trading_symbol)
-
-            entry_price = signal.get("entry_high", signal.get("entry_low", 0))
-            result = self.kotak.place_order(
-                exchange_segment="bse_fo",
-                trading_symbol=trading_symbol,
-                transaction_type="B",
-                order_type="L",
-                quantity=self.lot_size,
-                price=entry_price,
-            )
-
-            trade_data = {
-                "mode":             "real",
-                "exchange_segment": "bse_fo",
-                "trading_symbol":   trading_symbol,
-                "transaction_type": "B",
-                "order_type":       "L",
-                "quantity":         self.lot_size,
-                "price":            entry_price,
-                "status":           "placed" if result.get("status") == "ok" else "failed",
-                "order_id":         result.get("data", {}).get("nOrdNo", ""),
-                "notes":            f"Real BUY {signal['strike']} {signal['option_type']} @ {entry_price}",
-            }
-            trade_id = await db.save_trade(signal_id, trade_data)
-            trade_data["trade_id"] = trade_id
-
-            return {**trade_data, **result}
+            log.info("Real trade placed: %s", result)
+            return result
         except Exception:
             log.exception("Real trade error")
             return {"status": "error", "message": "Real trade failed — see logs"}
@@ -470,6 +372,16 @@ class TradeManager:
         old_mode  = self.mode
         self.mode = mode
         log.info("Trading mode changed: %s → %s", old_mode, mode)
+
+        # Swap tick callbacks for the active engine
+        if self.market_feed:
+            if old_mode == "paper" and mode == "real":
+                self.market_feed.remove_tick_callback(self.paper_trader.on_tick)
+                self.market_feed.add_tick_callback(self.real_trader.on_tick)
+            elif old_mode == "real" and mode == "paper":
+                self.market_feed.remove_tick_callback(self.real_trader.on_tick)
+                self.market_feed.add_tick_callback(self.paper_trader.on_tick)
+
         return {"status": "ok", "old_mode": old_mode, "new_mode": mode}
 
     # ── Kotak Auth ────────────────────────────────────────────────────────────
@@ -485,9 +397,16 @@ class TradeManager:
         if result.get("status") == "ok":
             self.market_feed.start()
             self.market_feed.add_tick_callback(self.paper_trader.on_tick)
+            # Also register real trader tick callback (harmless if not in real mode
+            # — it just won't have any pending orders / positions to process)
+            self.market_feed.add_tick_callback(self.real_trader.on_tick)
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self.download_contracts)
             await self.resubscribe_recent_signals(limit=20)
+            # Rehydrate real trader state from DB
+            await self.real_trader.rehydrate_from_db()
+            # Start background tasks for real trading
+            self._start_real_background_tasks()
         return result
 
     def download_contracts(self):
@@ -526,10 +445,44 @@ class TradeManager:
             "market_feed":  self.market_feed.is_running,
             "telegram":     True,   # overwritten by main.py with live value
             "paper_trader": self.paper_trader.get_pnl_summary(),
+            "real_trader":  self.real_trader.get_pnl_summary(),
             "lot_size":     self.lot_size,
             "strategy":     self.strategy,
         }
 
     def clear_duplicates(self):
-        """Reset duplicate signal tracker (e.g. for a new day)."""
-        self._processed_signals.clear()
+        """No-op — kept for API compatibility. Dedup is now fully DB-backed."""
+        pass
+
+    # ── Background Tasks ──────────────────────────────────────────────────────
+
+    def _start_real_background_tasks(self):
+        """Launch reconciliation and EOD-check loops for real trading."""
+        if self._real_reconcile_task is None or self._real_reconcile_task.done():
+            self._real_reconcile_task = asyncio.ensure_future(self._reconcile_loop())
+        if self._real_eod_task is None or self._real_eod_task.done():
+            self._real_eod_task = asyncio.ensure_future(self._eod_loop())
+
+    async def _reconcile_loop(self):
+        """Every 30s, verify exchange SL orders are intact."""
+        while True:
+            try:
+                await asyncio.sleep(30)
+                if self.mode == "real" and self.kotak.is_authenticated:
+                    await self.real_trader.reconcile_orders()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                log.exception("reconcile_loop error")
+
+    async def _eod_loop(self):
+        """Every 60s, check for EOD auto-close."""
+        while True:
+            try:
+                await asyncio.sleep(60)
+                if self.mode == "real":
+                    await self.real_trader.check_eod()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                log.exception("eod_loop error")

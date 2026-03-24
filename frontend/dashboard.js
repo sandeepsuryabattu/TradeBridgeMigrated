@@ -44,6 +44,7 @@ const state = {
     wsConnected:  false,
     sensex_ltp:   0,
     stopTrading:  false,
+    kotakBalance: null,
 };
 
 // ── DOM Helpers ───────────────────────────────────────────────────────────────
@@ -201,10 +202,48 @@ function bindEventListeners() {
         }
     });
 
+    // Panel Toggle Logic
+    $$('.panel-header').forEach(header => {
+        header.addEventListener('click', (e) => {
+            const panel = header.closest('.panel');
+            if (panel) {
+                panel.classList.toggle('collapsed');
+            }
+        });
+    });
+
     bindStrategyModal();
     bindClearModal();
     bindStopTrading();
     bindFallbackActions();  // [FIX #25]
+    setupMobileResizers();
+}
+
+// ── Mobile Resizers ───────────────────────────────────────────────────────────
+function setupMobileResizers() {
+    if (window.innerWidth > 768) return;
+    
+    $$('.panel').forEach(panel => {
+        const resizer = document.createElement('div');
+        resizer.className = 'panel-resizer';
+        panel.appendChild(resizer);
+
+        let startY, startHeight;
+
+        resizer.addEventListener('touchstart', (e) => {
+            startY = e.touches[0].clientY;
+            startHeight = parseInt(window.getComputedStyle(panel).height, 10) || 350;
+        }, { passive: true });
+
+        resizer.addEventListener('touchmove', (e) => {
+            if (panel.classList.contains('collapsed')) return;
+            const newHeight = startHeight + (e.touches[0].clientY - startY);
+            if (newHeight >= 150) {
+                panel.style.height = `${newHeight}px`;
+                panel.style.flex = 'none';
+            }
+        }, { passive: true });
+    });
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -259,21 +298,13 @@ function handleWSMessage(msg) {
 
         switch (msg.type) {
             case 'init':
-                if (msg.data.trades) {
-                    const existingTradeIds = new Set(state.trades.map(t => t.id || t.trade_id));
-                    const newTrades = (msg.data.trades || []).filter(t => !existingTradeIds.has(t.id || t.trade_id));
-                    state.trades = [...state.trades, ...newTrades];
-                }
-                if (msg.data.positions) state.positions = msg.data.positions;
-                if (msg.data.messages) {
-                    const existingMsgIds = new Set(state.messages.map(m => m.id));
-                    const newMsgs = (msg.data.messages || []).filter(m => !existingMsgIds.has(m.id));
-                    state.messages = [...newMsgs, ...state.messages];
-                }
+                // Server is the source of truth — replace local state on every reconnect
+                if (msg.data.trades)    state.trades    = msg.data.trades;
+                if (msg.data.positions) state.positions  = msg.data.positions;
+                if (msg.data.messages)  state.messages   = msg.data.messages;
                 if (msg.data.signals) {
-                    const existingSigIds = new Set(state.signals.map(s => s.id));
-                    const newSigs = (msg.data.signals || []).filter(s => !existingSigIds.has(s.id));
-                    state.signals = [...newSigs, ...state.signals];
+                    state.signals = msg.data.signals;
+                    state.signals.forEach(s => { if (s.last_ltp) s.live_ltp = s.last_ltp; });
                 }
                 updateStatusFromData(msg.data.status);
                 if (msg.data.strategy) {
@@ -284,7 +315,6 @@ function handleWSMessage(msg) {
                     state.stopTrading = msg.data.status.stop_trading;
                     updateStopTradingUI();
                 }
-                // Derive after ALL data (trades + signals) is merged
                 deriveSignalTradeStatuses();
                 renderAll();
                 updateHealthBadge();
@@ -422,9 +452,6 @@ function handleWSMessage(msg) {
                 } else if (msg.data.status === 'open') {
                     state.positions.unshift(msg.data);
                 }
-                if (msg.data.status === 'closed') {
-                    state.positions = state.positions.filter(p => p.id !== msg.data.id);
-                }
                 renderPositions();
                 break;
             }
@@ -462,10 +489,10 @@ async function fetchInitialData() {
         const today = new Date().toLocaleDateString('en-CA');
         const [statusRes, msgsRes, sigsRes, tradesRes, posRes] = await Promise.all([
             fetch(`${API_BASE}/api/status`),
-            fetch(`${API_BASE}/api/messages?date=all&limit=200`),
-            fetch(`${API_BASE}/api/signals?date=all&limit=200`),
+            fetch(`${API_BASE}/api/messages?date=${today}&limit=200`),
+            fetch(`${API_BASE}/api/signals?date=${today}&limit=200`),
             fetch(`${API_BASE}/api/trades?date=${today}&limit=200`),
-            fetch(`${API_BASE}/api/positions`),
+            fetch(`${API_BASE}/api/positions?status=`),
         ]);
 
         if (statusRes.ok) {
@@ -484,13 +511,12 @@ async function fetchInitialData() {
                 updateStopTradingUI();
             }
         }
-        if (msgsRes.ok)   { state.messages = await msgsRes.json(); state.messages.reverse(); }
+        if (msgsRes.ok)   state.messages  = await msgsRes.json();
         if (sigsRes.ok) {
             state.signals = await sigsRes.json();
             state.signals.forEach(s => { if (s.last_ltp) s.live_ltp = s.last_ltp; });
         }
-        if (tradesRes.ok) state.trades = await tradesRes.json();
-        // Derive signal trade statuses AFTER both signals and trades are loaded
+        if (tradesRes.ok) state.trades    = await tradesRes.json();
         deriveSignalTradeStatuses();
 
         if (!state.selectedDate) {
@@ -735,22 +761,25 @@ function bindFallbackActions() {
 async function loadByDate(date) {
     try {
         const dateParam = date === 'all' ? 'all' : date;
-        const [msgsRes, sigsRes, tradesRes] = await Promise.all([
+        const [msgsRes, sigsRes, tradesRes, posRes] = await Promise.all([
             fetch(`${API_BASE}/api/messages?date=${dateParam}&limit=200`),
             fetch(`${API_BASE}/api/signals?date=${dateParam}&limit=200`),
             fetch(`${API_BASE}/api/trades?date=${dateParam}&limit=500`),
+            fetch(`${API_BASE}/api/positions?status=&date=${dateParam === 'all' ? '' : dateParam}`),
         ]);
-        if (msgsRes.ok)   { state.messages = await msgsRes.json(); state.messages.reverse(); }
+        if (msgsRes.ok)   state.messages = await msgsRes.json();
         if (sigsRes.ok) {
             state.signals = await sigsRes.json();
             state.signals.forEach(s => { if (s.last_ltp) s.live_ltp = s.last_ltp; });
         }
         if (tradesRes.ok) state.trades = await tradesRes.json();
+        if (posRes.ok)    state.positions = await posRes.json();
         // Derive AFTER both signals and trades are loaded
         deriveSignalTradeStatuses();
         state.selectedDate = date;
         renderMessages();
         renderSignals();
+        renderPositions();
         renderTrades();
         toast(`Showing data for: ${date === 'all' ? 'all time' : date}`, 'info');
     } catch { toast('Failed to load data', 'error'); }
@@ -1033,7 +1062,7 @@ function renderMessages() {
     if (newItems.length === 0) return;
 
     const fragment = document.createDocumentFragment();
-    [...newItems].reverse().forEach(m => {
+    [...newItems].forEach(m => {
         const id  = m.id || m.timestamp;
         const div = document.createElement('div');
         div.className    = 'msg-bubble';
@@ -1168,19 +1197,35 @@ function renderPositions() {
     const pnlEl     = $('#pnl-value');
     if (!container || !count || !pnlEl) return;
 
+    // Closed position refs
+    const closedSection = $('#closed-positions-section');
+    const closedList    = $('#closed-positions-list');
+    const closedCount   = $('#closed-pos-count');
+
     const open     = state.positions.filter(p => p.status === 'open');
     count.textContent = open.length;
 
     const totalPnl = open.reduce((sum, p) => sum + (p.pnl || 0), 0);
     const realisedEl = $('#pnl-realised');
+    const closed = state.positions.filter(p => p.status === 'closed');
     if (realisedEl) {
-        const closed = state.positions.filter(p => p.status === 'closed');
         const realisedPnl = closed.reduce((sum, p) => sum + (p.pnl || 0), 0);
         realisedEl.textContent = `₹${realisedPnl.toFixed(2)}`;
         realisedEl.className = `pnl-value ${realisedPnl > 0 ? 'positive' : realisedPnl < 0 ? 'negative' : ''}`;
     }
     pnlEl.textContent = `₹${totalPnl.toFixed(2)}`;
     pnlEl.className   = `pnl-value ${totalPnl > 0 ? 'positive' : totalPnl < 0 ? 'negative' : ''}`;
+
+    // Update closed section visibility
+    if (closedSection && closedList && closedCount) {
+        if (closed.length > 0) {
+            closedSection.style.display = 'block';
+            closedCount.textContent = closed.length;
+            renderClosedPositions(closed, closedList);
+        } else {
+            closedSection.style.display = 'none';
+        }
+    }
 
     if (open.length === 0) {
         container.innerHTML = '<div class="empty-state">No open positions</div>';
@@ -1245,6 +1290,78 @@ function renderPositions() {
     });
 }
 
+function renderClosedPositions(closed, container) {
+    const existingIds = new Set([...container.querySelectorAll('.position-card')].map(c => c.dataset.posId));
+    
+    // Sort closed so newest closed is first
+    const sorted = [...closed].sort((a, b) => {
+        const ta = new Date(a.closed_at || a.created_at || 0).getTime();
+        const tb = new Date(b.closed_at || b.created_at || 0).getTime();
+        return tb - ta;
+    });
+
+    sorted.forEach(p => {
+        const posId = String(p.id);
+        if (existingIds.has(posId)) return; // Already rendered, don't re-render immutable snapshots
+
+        const pnl      = p.pnl || 0;
+        const pnlClass = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
+        const exitTime = formatTime(p.closed_at);
+        
+        const reasonLabels = {
+            'sl': 'Stop Loss Hit',
+            'timer': 'Timed Out',
+            'kill': 'Kill Switch',
+            'user': 'Closed By User'
+        };
+        
+        let reasonTag = '';
+        if (p.exit_reason) {
+            const label = reasonLabels[p.exit_reason] || p.exit_reason;
+            reasonTag = `<span class="exit-reason-tag ${p.exit_reason}">${label}</span>`;
+        } else {
+            reasonTag = `<span class="exit-reason-tag ignored">Closed</span>`;
+        }
+
+        const div           = document.createElement('div');
+        div.className       = 'position-card closed';
+        div.dataset.posId   = posId;
+        div.innerHTML       = `
+            <div class="pos-info">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <span class="pos-symbol">${esc(p.trading_symbol || '')} ${reasonTag}</span>
+                    <div style="font-size:10px; color:var(--text-muted); font-family:var(--font-mono);">${exitTime}</div>
+                </div>
+                <span class="pos-meta">
+                    Qty: ${p.quantity || 0} |
+                    In: ₹${(p.entry_price || 0).toFixed(2)} |
+                    Out: <span class="mono">₹${(p.exit_price || p.current_price || 0).toFixed(2)}</span>
+                </span>
+                <div class="pos-strategy">
+                    <span class="sl-tag">SL: ₹${(p.trailing_sl || 0).toFixed(2)}</span>
+                    ${p.max_ltp ? `<span class="max-tag">Max: ₹${p.max_ltp.toFixed(2)}</span>` : ''}
+                </div>
+            </div>
+            <div class="pos-pnl ${pnlClass}">${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(2)}</div>
+        `;
+        container.appendChild(div);
+    });
+}
+
+function toggleClosedPositions() {
+    const list = $('#closed-positions-list');
+    const chev = $('#closed-positions-chevron');
+    if (!list) return;
+    
+    if (list.style.display === 'none') {
+        list.style.display = 'block';
+        if (chev) chev.classList.add('open');
+    } else {
+        list.style.display = 'none';
+        if (chev) chev.classList.remove('open');
+    }
+}
+
 function renderTrades() {
     const container = $('#trades-list');
     const count     = $('#trade-count');
@@ -1264,17 +1381,16 @@ function renderTrades() {
         <table class="trade-table">
             <thead>
                 <tr>
-                    <th>Time</th><th>Symbol</th><th>Entry Mode</th><th>Side</th>
+                    <th>Symbol</th><th>Side</th>
                     <th>Qty</th><th>Price</th><th>Fill</th><th>Exit</th>
                     <th>P&L</th><th>Mode</th><th>Status</th>
+                    <th>Entered</th><th>Exited</th>
                 </tr>
             </thead>
             <tbody>
                 ${filtered.map(t => `
                     <tr>
-                        <td class="mono">${formatTime(t.created_at || t.fill_time)}</td>
                         <td class="mono">${esc(t.trading_symbol || '-')}</td>
-                        <td><span class="entry-label-tag ${t.entry_label || ''}">${t.entry_label || '-'}</span></td>
                         <td>${t.transaction_type === 'B' ? '🟢 BUY' : '🔴 SELL'}</td>
                         <td class="mono">${t.quantity || '-'}</td>
                         <td class="mono">₹${(t.price || 0).toFixed(2)}</td>
@@ -1285,6 +1401,8 @@ function renderTrades() {
                         </td>
                         <td>${t.mode === 'paper' ? '📄' : '🔴'} ${t.mode || '-'}</td>
                         <td><span class="trade-status ${t.status || ''}">${t.status || '-'}</span></td>
+                        <td class="mono">${formatTime(t.fill_time || t.opened_at)}</td>
+                        <td class="mono">${t.closed_at ? formatTime(t.closed_at) : '-'}</td>
                     </tr>
                 `).join('')}
             </tbody>
@@ -1342,6 +1460,71 @@ function updateStatusFromData(status) {
 function updateModeUI() {
     $('#btn-paper')?.classList.toggle('active', state.mode === 'paper');
     $('#btn-real')?.classList.toggle('active',  state.mode === 'real');
+
+    // Theme: light mode for real, dark for paper
+    document.body.classList.toggle('theme-light', state.mode === 'real');
+
+    // Balance: show in real mode
+    const balEl = $('#header-balance');
+    if (balEl) {
+        if (state.mode === 'real') {
+            balEl.style.display = 'inline-flex';
+            fetchBalance();
+        } else {
+            balEl.style.display = 'none';
+        }
+    }
+}
+
+async function fetchBalance() {
+    try {
+        const res = await fetch(`${API_BASE}/api/balance`);
+        const data = await res.json();
+        const balEl = $('#header-balance');
+        if (!balEl) return;
+        if (data.status === 'ok' && data.data) {
+            const limitsData = data.data;
+            // Check for Kotak bridge errors (limits() may not work outside market hours)
+            const bridgeErr = limitsData.errMsg || limitsData.stat || '';
+            if (bridgeErr.includes('bridge') || bridgeErr.includes('error out')) {
+                balEl.textContent = '✓ Authenticated';
+                balEl.title = 'Kotak authenticated. Balance unavailable outside market hours.';
+                return;
+            }
+            let available = null;
+            if (limitsData.Net) {
+                available = parseFloat(limitsData.Net);
+            } else if (limitsData.data && Array.isArray(limitsData.data)) {
+                const combined = limitsData.data.find(s => s.segment === 'ALL' || s.segment === 'COM');
+                if (combined) available = parseFloat(combined.Net || combined.availableMargin || 0);
+            } else if (typeof limitsData === 'object') {
+                available = parseFloat(
+                    limitsData.availableMargin ||
+                    limitsData.net ||
+                    limitsData.Net ||
+                    limitsData.cash_available ||
+                    limitsData.marginAvailable || 0
+                );
+            }
+            if (available !== null && !isNaN(available) && available > 0) {
+                state.kotakBalance = available;
+                balEl.textContent = `₹${available.toLocaleString('en-IN', {maximumFractionDigits: 0})}`;
+                balEl.title = 'Kotak Available Margin';
+            } else {
+                balEl.textContent = '✓ Authenticated';
+                balEl.title = 'Balance data not available in this session.';
+                console.log('Balance response:', limitsData);
+            }
+        } else if (data.status === 'error') {
+            balEl.textContent = '✗ Auth needed';
+            balEl.title = data.message || 'Not authenticated with Kotak';
+        } else {
+            balEl.textContent = '₹--';
+            balEl.title = 'Balance unavailable';
+        }
+    } catch(e) {
+        console.error('fetchBalance error:', e);
+    }
 }
 
 function updateBadge(id, connected) {
@@ -1451,6 +1634,8 @@ function bindClearModal() {
                 state.signals   = [];
                 state.trades    = [];
                 state.positions = [];
+                const cpList = $('#closed-positions-list');
+                if (cpList) cpList.innerHTML = '';
             } else {
                 // Date-specific — filter out records matching that date
                 const isSameDate = (ts) => {
@@ -1469,6 +1654,10 @@ function bindClearModal() {
                 state.positions = state.positions.filter(p =>
                     p.status === 'open' || !isSameDate(p.closed_at || p.created_at)
                 );
+                
+                // Clear the cached DOM elements for closed positions so they re-render
+                const cpList = $('#closed-positions-list');
+                if (cpList) cpList.innerHTML = '';
             }
 
             renderAll();
@@ -1528,18 +1717,15 @@ function bindStopTrading() {
 // ── Strategy ──────────────────────────────────────────────────────────────────
 const STRATEGY_DEFAULTS = {
     lots:                      1,
-    entryLogic:                'code',
-    entryAvgPick:              'avg',
-    entryFixed:                null,
-    trailingSL:                'code',
-    slFixed:                   null,
     activationPoints:          5.0,
     trailGap:                  2.0,
-    compareMode:               false,
-    entryTimerMins:            10,      // [FIX #24]
-    exitTimerMins:             10,      // [FIX #24]
-    signalTrailInitialSL:      'telegram',   // [FIX #24]
-    signalTrailInitialSLPoints: 5.0,    // [FIX #24]
+    bouncePoints:              5,
+    bufferEnabled:             false,
+    bufferPoints:              2.0,
+    entryTimerMins:            10,
+    exitTimerMins:             10,
+    signalTrailInitialSL:      'telegram',
+    signalTrailInitialSLPoints: 5.0,
 };
 
 async function loadStrategy() {
@@ -1588,25 +1774,17 @@ function persistStrategy() {
 function updateStrategyButtonBadge() {
     const btn = $('#btn-strategy');
     if (!btn) return;
+    const s = state.strategy;
     const isDefault = (
-        state.strategy.lots        === 1      &&
-        state.strategy.entryLogic  === 'code' &&
-        state.strategy.trailingSL  === 'code' &&
-        !state.strategy.compareMode
+        s.lots === 1 &&
+        (s.bouncePoints || 5) === 5 &&
+        !s.bufferEnabled
     );
     btn.classList.toggle('strategy-active', !isDefault);
-    const modeLabel = state.strategy.compareMode ? '🔬 Compare ALL' : state.strategy.entryLogic;
+    const bufLabel = s.bufferEnabled ? ` | Buffer: ±${s.bufferPoints || 2}` : '';
     btn.title = isDefault
         ? 'Strategy Setup'
-        : `Strategy: ${state.strategy.lots} lot(s) | Entry: ${modeLabel} | SL: ${state.strategy.trailingSL}`;
-}
-
-function toggleEntryLogicSection(compareOn) {
-    const section = $('#entry-logic-section');
-    if (section) {
-        section.style.opacity       = compareOn ? '0.4' : '1';
-        section.style.pointerEvents = compareOn ? 'none' : '';
-    }
+        : `Strategy: ${s.lots} lot(s) | Bounce: ${s.bouncePoints || 5}pts${bufLabel}`;
 }
 
 function syncStrategyModalToState() {
@@ -1617,47 +1795,35 @@ function syncStrategyModalToState() {
     if (sel) sel.value = s.lots;
     $$('input[name="lots-quick"]').forEach(r => { r.checked = parseInt(r.value) === s.lots; });
 
-    // [FIX #24] Timers
+    // Timers
     const entryTimerInput = $('#entry-timer-mins');
     if (entryTimerInput) entryTimerInput.value = s.entryTimerMins ?? 10;
     const exitTimerInput = $('#exit-timer-mins');
     if (exitTimerInput) exitTimerInput.value = s.exitTimerMins ?? 10;
 
-    // Entry logic
-    $$('input[name="entry-logic"]').forEach(r => { r.checked = r.value === s.entryLogic; });
-    const entryFixedRow = $('#entry-fixed-row');
-    if (entryFixedRow) entryFixedRow.style.display = s.entryLogic === 'fixed'       ? 'block' : 'none';
-    const entryAvgRow   = $('#entry-avg-row');
-    if (entryAvgRow)   entryAvgRow.style.display   = s.entryLogic === 'avg_signal'  ? 'block' : 'none';
-    const entryFixedInput = $('#entry-fixed-price');
-    if (entryFixedInput && s.entryFixed) entryFixedInput.value = s.entryFixed;
-    $$('input[name="entry-avg-pick"]').forEach(r => { r.checked = r.value === (s.entryAvgPick || 'avg'); });
+    // Bounce points
+    const bounceInput = $('#bounce-points-input');
+    if (bounceInput) bounceInput.value = s.bouncePoints ?? 5;
 
-    // Trailing SL
-    $$('input[name="trailing-sl"]').forEach(r => { r.checked = r.value === s.trailingSL; });
-    const slFixedRow = $('#sl-fixed-row');
-    if (slFixedRow) slFixedRow.style.display = s.trailingSL === 'fixed'        ? 'block' : 'none';
-    const slSignalTrailRow = $('#sl-signal-trail-row');
-    if (slSignalTrailRow) slSignalTrailRow.style.display = s.trailingSL === 'signal_trail' ? 'block' : 'none';
-    const slFixedInput = $('#sl-fixed-price');
-    if (slFixedInput && s.slFixed) slFixedInput.value = s.slFixed;
+    // Buffer points
+    const bufferToggle = $('#buffer-enabled-toggle');
+    if (bufferToggle) bufferToggle.checked = !!s.bufferEnabled;
+    const bufferInput = $('#buffer-points-input');
+    if (bufferInput) bufferInput.value = s.bufferPoints ?? 2;
+
+    // Signal trail SL
     const actInput = $('#sl-activation-points');
     if (actInput) actInput.value = s.activationPoints ?? 5;
     const gapInput = $('#sl-trail-gap');
     if (gapInput) gapInput.value = s.trailGap ?? 2;
 
-    // [FIX #24] Signal trail initial SL
+    // Signal trail initial SL source
     const initSL = s.signalTrailInitialSL || 'telegram';
     $$('input[name="signal-trail-initial-sl"]').forEach(r => { r.checked = r.value === initSL; });
     const initPointsRow = $('#sl-init-points-row');
     if (initPointsRow) initPointsRow.style.display = initSL === 'points_from_ltp' ? 'block' : 'none';
     const initPointsInput = $('#sl-init-points-value');
     if (initPointsInput) initPointsInput.value = s.signalTrailInitialSLPoints ?? 5;
-
-    // Compare mode
-    const compareToggle = $('#strategy-compare-mode');
-    if (compareToggle) compareToggle.checked = !!s.compareMode;
-    toggleEntryLogicSection(!!s.compareMode);
 }
 
 function populateLotDropdown() {
@@ -1699,34 +1865,12 @@ function bindStrategyModal() {
         });
     });
 
-    $$('input[name="entry-logic"]').forEach(radio => {
-        radio.addEventListener('change', () => {
-            const fixedRow = $('#entry-fixed-row');
-            const avgRow   = $('#entry-avg-row');
-            if (fixedRow) fixedRow.style.display = radio.value === 'fixed'      ? 'block' : 'none';
-            if (avgRow)   avgRow.style.display   = radio.value === 'avg_signal' ? 'block' : 'none';
-        });
-    });
-
-    $$('input[name="trailing-sl"]').forEach(radio => {
-        radio.addEventListener('change', () => {
-            const fixedRow       = $('#sl-fixed-row');
-            const signalTrailRow = $('#sl-signal-trail-row');
-            if (fixedRow)       fixedRow.style.display       = radio.value === 'fixed'        ? 'block' : 'none';
-            if (signalTrailRow) signalTrailRow.style.display  = radio.value === 'signal_trail' ? 'block' : 'none';
-        });
-    });
-
-    // [FIX #24] Show/hide points input under signal_trail initial SL
+    // Signal trail initial SL — show/hide points input
     $$('input[name="signal-trail-initial-sl"]').forEach(radio => {
         radio.addEventListener('change', () => {
             const row = $('#sl-init-points-row');
             if (row) row.style.display = radio.value === 'points_from_ltp' ? 'block' : 'none';
         });
-    });
-
-    $('#strategy-compare-mode')?.addEventListener('change', (e) => {
-        toggleEntryLogicSection(e.target.checked);
     });
 
     $('#btn-strategy-reset')?.addEventListener('click', () => {
@@ -1740,24 +1884,16 @@ function bindStrategyModal() {
     });
 
     $('#btn-strategy-save')?.addEventListener('click', async () => {
-        const lots         = parseInt($('#strategy-lots-select')?.value) || 1;
-        const entryRadio   = document.querySelector('input[name="entry-logic"]:checked');
-        const entryLogic   = entryRadio?.value || 'code';
-        const entryFixed   = entryLogic === 'fixed'      ? (parseFloat($('#entry-fixed-price')?.value) || null) : null;
-        const avgPickR     = document.querySelector('input[name="entry-avg-pick"]:checked');
-        const entryAvgPick = entryLogic === 'avg_signal' ? (avgPickR?.value || 'avg') : 'avg';
-        const slRadio      = document.querySelector('input[name="trailing-sl"]:checked');
-        const trailingSL   = slRadio?.value || 'code';
-        const slFixed      = trailingSL === 'fixed'        ? (parseFloat($('#sl-fixed-price')?.value) || null) : null;
-        const activationPoints = trailingSL === 'signal_trail' ? (parseFloat($('#sl-activation-points')?.value) || 5)  : null;
-        const trailGap         = trailingSL === 'signal_trail' ? (parseFloat($('#sl-trail-gap')?.value)         || 2)  : null;
-        const compareMode  = !!$('#strategy-compare-mode')?.checked;
+        const lots             = parseInt($('#strategy-lots-select')?.value) || 1;
+        const bouncePoints     = parseInt($('#bounce-points-input')?.value) || 5;
+        const bufferEnabled    = !!$('#buffer-enabled-toggle')?.checked;
+        const bufferPoints     = parseFloat($('#buffer-points-input')?.value) || 2;
+        const activationPoints = parseFloat($('#sl-activation-points')?.value) || 5;
+        const trailGap         = parseFloat($('#sl-trail-gap')?.value) || 2;
+        const entryTimerMins   = parseInt($('#entry-timer-mins')?.value) || 10;
+        const exitTimerMins    = parseInt($('#exit-timer-mins')?.value) || 10;
 
-        // [FIX #24] Timer values
-        const entryTimerMins = parseInt($('#entry-timer-mins')?.value) || 10;
-        const exitTimerMins  = parseInt($('#exit-timer-mins')?.value)  || 10;
-
-        // [FIX #24] Signal trail initial SL
+        // Signal trail initial SL
         const initSLRadio   = document.querySelector('input[name="signal-trail-initial-sl"]:checked');
         const signalTrailInitialSL = initSLRadio?.value || 'telegram';
         const signalTrailInitialSLPoints = signalTrailInitialSL === 'points_from_ltp'
@@ -1765,25 +1901,22 @@ function bindStrategyModal() {
             : null;
 
         // Validation
-        if (!compareMode && entryLogic === 'fixed' && !entryFixed) {
-            return toast('Please enter a fixed entry price', 'warning');
+        if (!activationPoints || !trailGap) {
+            return toast('Please enter activation pts and trail gap', 'warning');
         }
-        if (trailingSL === 'fixed' && !slFixed) {
-            return toast('Please enter a fixed SL price', 'warning');
-        }
-        if (trailingSL === 'signal_trail' && (!activationPoints || !trailGap)) {
-            return toast('Please enter activation pts and trail gap for Signal Trail', 'warning');
-        }
-        if (trailingSL === 'signal_trail' && signalTrailInitialSL === 'points_from_ltp' && !signalTrailInitialSLPoints) {
+        if (signalTrailInitialSL === 'points_from_ltp' && !signalTrailInitialSLPoints) {
             return toast('Please enter points below entry for initial SL', 'warning');
         }
         if (entryTimerMins < 1 || exitTimerMins < 1) {
             return toast('Timer values must be at least 1 minute', 'warning');
         }
+        if (bouncePoints < 1) {
+            return toast('Bounce-back points must be at least 1', 'warning');
+        }
 
         state.strategy = {
-            lots, entryLogic, entryAvgPick, entryFixed,
-            trailingSL, slFixed, activationPoints, trailGap, compareMode,
+            lots, bouncePoints, bufferEnabled, bufferPoints,
+            activationPoints, trailGap,
             entryTimerMins, exitTimerMins,
             signalTrailInitialSL, signalTrailInitialSLPoints,
         };
@@ -1808,8 +1941,8 @@ function bindStrategyModal() {
             });
         } catch { console.warn('Could not sync lot size to backend'); }
 
-        const modeLabel = compareMode ? '🔬 Compare ALL' : entryLogic;
-        toast(`Strategy saved: ${lots} lot(s) | Entry: ${modeLabel} | SL: ${trailingSL}`, 'success');
+        const bufLabel = bufferEnabled ? ` | Buffer: ±${bufferPoints}` : '';
+        toast(`Strategy saved: ${lots} lot(s) | Bounce: ${bouncePoints}pts${bufLabel}`, 'success');
         $('#strategy-modal').style.display = 'none';
     });
 }

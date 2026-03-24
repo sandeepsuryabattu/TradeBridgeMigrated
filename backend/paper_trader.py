@@ -43,16 +43,11 @@ log = logging.getLogger(__name__)
 ENTRY_TIMEOUT_MINS       = 10     # Default — overridden per-order by strategy.entryTimerMins
 POSITION_TIMEOUT_MINS    = 10     # Default — overridden per-position by strategy.exitTimerMins
 DEFAULT_BOUNCE_POINTS    = 5      # Default bounce threshold (overridable via strategy)
-DEFAULT_SL_POINTS        = 5.0    # Default fixed SL distance in points
-DEFAULT_SL_GAP           = 30.0   # Default signal-mode SL gap when not provided
 DEFAULT_ACTIVATION_PTS   = 5.0    # Default signal_trail activation threshold
 DEFAULT_TRAIL_GAP        = 2.0    # Default signal_trail trailing gap
-DEFAULT_LOT_MULTIPLIER   = 20     # Units per lot for SENSEX
-CODE_SL_PCT              = 0.03   # 'code' mode: 3% of entry price as initial SL offset
-CODE_SL_MIN              = 5.0    # 'code' mode: minimum SL offset in points
-CODE_TRAIL_STEP          = 2.0    # 'code' mode: trail step size in points
+DEFAULT_LOT_MULTIPLIER   = 20     # Fallback if contract master unavailable
 SIGNAL_TRAIL_FALLBACK    = 10.0   # signal_trail fallback SL when stoploss missing
-PRICE_SIDE_CONFIRM_TICKS = 3      # Ticks needed to lock price_side for fixed/avg fills
+DEFAULT_BUFFER_POINTS    = 2.0    # Default buffer points for entry band widening
 
 
 class _TimerState(Enum):
@@ -142,7 +137,7 @@ class PaperTrader:
             if (now - opened_at) > timedelta(minutes=exit_mins):
                 exit_price = pos.get("current_price", pos["entry_price"])
                 log.warning("TIMEOUT: Force-closing %s @ %s", pos["trading_symbol"], exit_price)
-                await self.close_position(pos["id"], exit_price=exit_price)
+                await self.close_position(pos["id"], exit_price=exit_price, exit_reason="timer")
 
     # ── Place order ───────────────────────────────────────────────────────────
 
@@ -153,17 +148,33 @@ class PaperTrader:
         lot_size: int = None,
         strategy: dict = None,
     ) -> dict:
-        """Place a paper order that fills when LTP enters the entry range."""
+        """Place a paper order that fills when LTP enters the entry range.
+        Entry: bounce-back only.  SL: signal_trail only.
+        Buffer points optionally widen the entry band and extend the SL.
+        """
         from .config import Config
-        qty      = (lot_size or int(Config.DEFAULT_LOT_SIZE)) * DEFAULT_LOT_MULTIPLIER
+        # Use contract master lot_size if available, else fallback
+        contract_lot = signal.get("contract_lot_size")
+        lot_multiplier = contract_lot if contract_lot else DEFAULT_LOT_MULTIPLIER
+        qty      = (lot_size or int(Config.DEFAULT_LOT_SIZE)) * lot_multiplier
         strategy = strategy or {}
 
-        sl_mode   = strategy.get("trailingSL", "code")
-        sl_points = float(strategy.get("slFixed") or DEFAULT_SL_POINTS)
-
         signal_stoploss = signal.get("stoploss")
-        entry_low       = signal.get("entry_low", 0)
-        entry_high      = signal.get("entry_high", 0)
+        entry_low       = float(signal.get("entry_low", 0))
+        entry_high      = float(signal.get("entry_high", 0))
+
+        # ── Buffer points: widen entry band + extend SL ──
+        buffer_enabled = bool(strategy.get("bufferEnabled", False))
+        buffer_points  = float(strategy.get("bufferPoints") or DEFAULT_BUFFER_POINTS)
+        if buffer_enabled and buffer_points > 0:
+            entry_low  -= buffer_points
+            entry_high += buffer_points
+            if signal_stoploss is not None:
+                signal_stoploss = float(signal_stoploss) - buffer_points
+            log.info(
+                "Buffer points applied (±%.1f): entry=%s-%s, SL=%s",
+                buffer_points, entry_low, entry_high, signal_stoploss,
+            )
 
         activation_points = float(strategy.get("activationPoints") or DEFAULT_ACTIVATION_PTS)
         trail_gap         = float(strategy.get("trailGap")         or DEFAULT_TRAIL_GAP)
@@ -172,43 +183,11 @@ class PaperTrader:
         signal_trail_initial_sl        = strategy.get("signalTrailInitialSL", "telegram")
         signal_trail_initial_sl_points = float(strategy.get("signalTrailInitialSLPoints") or 5.0)
 
-        sl_gap = None
-        if sl_mode == "signal_trail":
-            sl_gap = None
-        elif sl_mode == "signal" and signal_stoploss and entry_low:
-            sl_gap = float(entry_low) - float(signal_stoploss)
-            if sl_gap <= 0:
-                log.warning("Signal SL gap <= 0 (%s), falling back to code mode", sl_gap)
-                sl_mode = "code"
-                sl_gap  = None
-
-        entry_logic = strategy.get("entryLogic", "code")
-        avg_pick    = strategy.get("entryAvgPick", "avg")
-
-        if entry_logic == "fixed":
-            if strategy.get("entryFixed"):
-                order_price = float(strategy["entryFixed"])
-                log.info("Entry mode=fixed: price=%s", order_price)
-            else:
-                live_ltp    = float(signal.get("live_ltp") or 0)
-                order_price = live_ltp if live_ltp > 0 else float(entry_high or entry_low or 0)
-                log.info("Entry mode=fixed: no entryFixed — using live LTP %s", order_price)
-        elif entry_logic == "avg_signal":
-            hi = float(entry_high or 0)
-            lo = float(entry_low  or 0)
-            if avg_pick == "low":
-                order_price = lo
-            elif avg_pick == "high":
-                order_price = hi
-            else:
-                order_price = (lo + hi) / 2.0 if (lo and hi) else (lo or hi)
-            log.info("Entry mode=avg_signal (%s): price=%s", avg_pick, order_price)
-        else:
-            order_price = float(entry_high or entry_low or 0)
-            log.info("Entry mode=code: price=%s", order_price)
-
-        bounce_points  = float(strategy.get("bouncePoints") or DEFAULT_BOUNCE_POINTS)
+        order_price   = float(entry_high or entry_low or 0)
+        bounce_points = float(strategy.get("bouncePoints") or DEFAULT_BOUNCE_POINTS)
         trading_symbol = f"SENSEX{int(signal['strike'])}{str(signal.get('option_type', '')).upper()}"
+
+        log.info("Entry mode=bounce-back: range=%s-%s, bounce=%spts", entry_low, entry_high, bounce_points)
 
         # [FIX #26] Per-order timer values from strategy — fall back to module constants
         entry_timer_mins = int(strategy.get("entryTimerMins") or ENTRY_TIMEOUT_MINS)
@@ -226,25 +205,19 @@ class PaperTrader:
             "trigger_price":     0,
             "status":            "pending",
             "order_id":          f"PAPER-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{signal_id}",
-            "notes":             f"Paper BUY {signal['strike']} {signal.get('option_type')} @ {entry_low}-{entry_high} [{entry_logic}]",
+            "notes":             f"Paper BUY {signal['strike']} {signal.get('option_type')} @ {entry_low}-{entry_high} [bounce-back]",
             "entry_low":         entry_low,
             "entry_high":        entry_high,
             "strike":            signal.get("strike"),
             "option_type":       signal.get("option_type"),
             "created_at":        datetime.now(timezone.utc),
-            "sl_mode":           sl_mode,
-            "sl_gap":            sl_gap,
-            "sl_points":         sl_points,
+            "sl_mode":           "signal_trail",
             "signal_stoploss":   float(signal_stoploss) if signal_stoploss else None,
             "activation_points": activation_points,
             "trail_gap":         trail_gap,
             "bounce_points":     bounce_points,
-            "entry_logic":       entry_logic,
-            "avg_pick":          avg_pick,
-            "price_side":        None,
+            "entry_logic":       "code",
             "entry_label":       signal.get("entry_label"),
-            "price_side_candidate":    None,
-            "price_side_confirm_count": 0,
             # [FIX #26] Store timer values on the order so check_timeouts uses them
             "entry_timer_mins":  entry_timer_mins,
             "exit_timer_mins":   exit_timer_mins,
@@ -264,8 +237,8 @@ class PaperTrader:
 
         self._pending_orders.append(order)
         log.info(
-            "Paper order pending: %s — Entry: %s — SL: %s — EntryTimer: %dmin — ExitTimer: %dmin",
-            order["trading_symbol"], entry_logic, sl_mode, entry_timer_mins, exit_timer_mins,
+            "Paper order pending: %s — Entry: bounce-back — SL: signal_trail — EntryTimer: %dmin — ExitTimer: %dmin",
+            order["trading_symbol"], entry_timer_mins, exit_timer_mins,
         )
 
         if not self.market_feed or not self.market_feed.is_running:
@@ -317,7 +290,7 @@ class PaperTrader:
                 exit_mins = float(pos.get("exit_timer_mins", POSITION_TIMEOUT_MINS))
                 if (now - opened_at) > timedelta(minutes=exit_mins):
                     log.warning("TIMEOUT: Force-selling %s @ %s", pos["trading_symbol"], ltp)
-                    await self.close_position(pos["id"], exit_price=ltp)
+                    await self.close_position(pos["id"], exit_price=ltp, exit_reason="timer")
                     continue
 
             await self._process_position_tick(pos, ltp)
@@ -355,93 +328,37 @@ class PaperTrader:
                 if not self._symbol_matches(order["trading_symbol"], tick_symbol, data):
                     continue
 
-                entry_logic       = order.get("entry_logic", "code")
-                fill_price_target = order.get("price")
+                # ── Bounce-back entry logic (only mode) ──
+                in_range = order["entry_low"] <= ltp <= order["entry_high"]
+                if in_range or order.get("min_ltp") is not None:
+                    if order.get("min_ltp") is None or ltp < order["min_ltp"]:
+                        order["min_ltp"] = ltp
+                        try:
+                            await db.update_trade(order["trade_id"], {"min_ltp": ltp})
+                        except Exception:
+                            log.exception("on_tick: update min_ltp failed")
+                        log.info("New low for %s: %s", order["trading_symbol"], ltp)
+                        await self._broadcast("order_update", {
+                            "id":          order["trade_id"],
+                            "signal_id":   order.get("signal_id"),
+                            "min_ltp":     ltp,
+                            "status_note": f"Tracking bounce from {ltp}",
+                        })
 
-                if entry_logic == "code":
-                    in_range = order["entry_low"] <= ltp <= order["entry_high"]
-                    if in_range or order.get("min_ltp") is not None:
-                        if order.get("min_ltp") is None or ltp < order["min_ltp"]:
-                            order["min_ltp"] = ltp
-                            try:
-                                await db.update_trade(order["trade_id"], {"min_ltp": ltp})
-                            except Exception:
-                                log.exception("on_tick: update min_ltp failed")
-                            log.info("New low for %s: %s", order["trading_symbol"], ltp)
-                            await self._broadcast("order_update", {
-                                "id":          order["trade_id"],
-                                "signal_id":   order.get("signal_id"),
-                                "min_ltp":     ltp,
-                                "status_note": f"Tracking bounce from {ltp}",
-                            })
-
-                    bounce_points = order.get("bounce_points", DEFAULT_BOUNCE_POINTS)
-                    if (order.get("min_ltp") is not None and
-                            ltp >= order["min_ltp"] + bounce_points):
-                        async with self._timer_lock:
-                            if self._timer_state == _TimerState.WAITING_ENTRY:
-                                self._timer_state = _TimerState.IN_TRADE
-                        result = await self._fill_order(order, ltp)
-                        filled.append(order)
-                        log.info(
-                            "Paper order FILLED (Bounce-back): %s @ %s (Min was %s)",
-                            order["trading_symbol"], ltp, order["min_ltp"],
-                        )
-                        result["signal_id"] = order.get("signal_id")
-                        await self._broadcast("new_trade", result)
-
-                else:
-                    if fill_price_target:
-                        this_side = (
-                            "above" if ltp > fill_price_target else
-                            "below" if ltp < fill_price_target else
-                            "touch"
-                        )
-
-                        if order.get("price_side") is None:
-                            if this_side == order.get("price_side_candidate"):
-                                order["price_side_confirm_count"] += 1
-                            else:
-                                order["price_side_candidate"]     = this_side
-                                order["price_side_confirm_count"] = 1
-
-                            if order.get("pending_order_id"):
-                                try:
-                                    await db.update_pending_order(
-                                        order["pending_order_id"],
-                                        {
-                                            "price_side_candidate":    order["price_side_candidate"],
-                                            "price_side_confirm_count": order["price_side_confirm_count"],
-                                        },
-                                    )
-                                except Exception:
-                                    log.exception("on_tick: update price_side failed")
-
-                            if order["price_side_confirm_count"] >= PRICE_SIDE_CONFIRM_TICKS:
-                                order["price_side"] = order["price_side_candidate"]
-                                log.info(
-                                    "price_side locked as [%s] for %s after %d ticks",
-                                    order["price_side"], order["trading_symbol"],
-                                    PRICE_SIDE_CONFIRM_TICKS,
-                                )
-
-                        price_side = order.get("price_side")
-                        if price_side:
-                            touched = (
-                                price_side == "touch" or
-                                (price_side == "above" and ltp <= fill_price_target) or
-                                (price_side == "below" and ltp >= fill_price_target)
-                            )
-                            if touched:
-                                result = await self._fill_order(order, ltp)
-                                filled.append(order)
-                                log.info(
-                                    "Paper order FILLED (%s/%s): %s @ %s (Target=%s, side=%s)",
-                                    entry_logic, order.get("avg_pick", "-"),
-                                    order["trading_symbol"], ltp, fill_price_target, price_side,
-                                )
-                                result["signal_id"] = order.get("signal_id")
-                                await self._broadcast("new_trade", result)
+                bounce_points = order.get("bounce_points", DEFAULT_BOUNCE_POINTS)
+                if (order.get("min_ltp") is not None and
+                        ltp >= order["min_ltp"] + bounce_points):
+                    async with self._timer_lock:
+                        if self._timer_state == _TimerState.WAITING_ENTRY:
+                            self._timer_state = _TimerState.IN_TRADE
+                    result = await self._fill_order(order, ltp)
+                    filled.append(order)
+                    log.info(
+                        "Paper order FILLED (Bounce-back): %s @ %s (Min was %s)",
+                        order["trading_symbol"], ltp, order["min_ltp"],
+                    )
+                    result["signal_id"] = order.get("signal_id")
+                    await self._broadcast("new_trade", result)
 
             for order in filled + expired:
                 if order in self._pending_orders:
@@ -450,74 +367,48 @@ class PaperTrader:
     # ── Position tick processor ───────────────────────────────────────────────
 
     async def _process_position_tick(self, pos: dict, ltp: float):
+        """Process a tick for an open position — signal_trail SL only."""
         if ltp <= 0:
             return
 
         pos["current_price"] = ltp
         pos["pnl"]           = (ltp - pos["entry_price"]) * pos["quantity"]
-        sl_mode              = pos.get("sl_mode", "code")
         new_sl               = None
 
-        if sl_mode == "signal_trail":
-            entry_price       = pos["entry_price"]
-            activation_points = pos.get("activation_points", DEFAULT_ACTIVATION_PTS)
-            trail_gap         = pos.get("trail_gap", DEFAULT_TRAIL_GAP)
+        # ── signal_trail SL logic (only mode) ──
+        entry_price       = pos["entry_price"]
+        activation_points = pos.get("activation_points", DEFAULT_ACTIVATION_PTS)
+        trail_gap         = pos.get("trail_gap", DEFAULT_TRAIL_GAP)
 
-            if not pos.get("sl_activated") and ltp >= entry_price + activation_points:
-                pos["sl_activated"] = True
-                pos["max_ltp"]      = ltp
-                new_sl              = ltp
-                try:
-                    await db.update_position(pos["id"], {"sl_activated": 1, "max_ltp": ltp})
-                except Exception:
-                    log.exception("_process_position_tick: persist sl_activated failed")
-            elif pos.get("sl_activated"):
-                if ltp > pos.get("max_ltp", 0):
-                    pos["max_ltp"] = ltp
-                    new_sl         = ltp - trail_gap
-
-        elif sl_mode == "ltp":
-            new_sl          = pos.get("prev_ltp", pos["entry_price"])
-            pos["prev_ltp"] = ltp
+        if not pos.get("sl_activated") and ltp >= entry_price + activation_points:
+            pos["sl_activated"] = True
+            pos["max_ltp"]      = ltp
+            new_sl              = ltp
+            try:
+                await db.update_position(pos["id"], {"sl_activated": 1, "max_ltp": ltp})
+            except Exception:
+                log.exception("_process_position_tick: persist sl_activated failed")
+        elif pos.get("sl_activated"):
             if ltp > pos.get("max_ltp", 0):
                 pos["max_ltp"] = ltp
-
-        elif sl_mode == "signal":
-            sl_gap = pos.get("sl_gap") or DEFAULT_SL_GAP
-            if ltp > pos.get("max_ltp", 0):
-                pos["max_ltp"] = ltp
-                new_sl         = ltp - sl_gap
-
-        elif sl_mode == "fixed":
-            sl_points = pos.get("sl_points", DEFAULT_SL_POINTS)
-            if ltp > pos.get("max_ltp", 0):
-                pos["max_ltp"] = ltp
-                new_sl         = ltp - sl_points
-
-        else:  # 'code'
-            if ltp > pos.get("max_ltp", 0):
-                pos["max_ltp"] = ltp
-                steps = int((ltp - pos["entry_price"]) // CODE_TRAIL_STEP)
-                if steps > 0:
-                    offset = max(CODE_SL_MIN, CODE_SL_PCT * pos["entry_price"])
-                    new_sl = (pos["entry_price"] - offset) + (steps * CODE_TRAIL_STEP)
+                new_sl         = ltp - trail_gap
 
         if new_sl is not None and new_sl > pos.get("trailing_sl", 0):
             pos["trailing_sl"] = new_sl
-            log.info("[%s] SL → %.2f for %s", sl_mode, new_sl, pos["trading_symbol"])
+            log.info("[signal_trail] SL → %.2f for %s", new_sl, pos["trading_symbol"])
             await self._broadcast("position_update", {
                 "id":          pos["id"],
                 "trailing_sl": new_sl,
                 "max_ltp":     pos.get("max_ltp", ltp),
-                "status_note": f"SL trailed to {new_sl:.2f} [{sl_mode}]",
+                "status_note": f"SL trailed to {new_sl:.2f} [signal_trail]",
             })
 
         if ltp <= pos.get("trailing_sl", 0):
             log.warning(
-                "STOP LOSS HIT [%s]: %s @ %s (SL was %.2f)",
-                sl_mode, pos["trading_symbol"], ltp, pos["trailing_sl"],
+                "STOP LOSS HIT [signal_trail]: %s @ %s (SL was %.2f)",
+                pos["trading_symbol"], ltp, pos["trailing_sl"],
             )
-            await self.close_position(pos["id"], exit_price=ltp)
+            await self.close_position(pos["id"], exit_price=ltp, exit_reason="sl")
         else:
             try:
                 await db.update_position(pos["id"], {
@@ -538,51 +429,33 @@ class PaperTrader:
     # ── Fill order ────────────────────────────────────────────────────────────
 
     async def _fill_order(self, order: dict, fill_price: float) -> dict:
-        """Fill a paper order and open a position with correct initial SL.
+        """Fill a paper order and open a position with signal_trail initial SL.
         [FIX #27] signal_trail initial SL respects signalTrailInitialSL strategy setting.
         """
         trade_id  = order.get("trade_id")
-        sl_mode   = order.get("sl_mode", "code")
-        sl_gap    = order.get("sl_gap")
-        sl_points = order.get("sl_points", DEFAULT_SL_POINTS)
 
-        if sl_mode == "signal_trail":
-            initial_sl_source = order.get("signal_trail_initial_sl", "telegram")
-            if initial_sl_source == "points_from_ltp":
-                # [FIX #27] Initial SL = fill price minus user-specified points
-                pts        = float(order.get("signal_trail_initial_sl_points") or 5.0)
-                initial_sl = fill_price - pts
-                log.info(
-                    "SL mode=signal_trail: initial SL=%.2f (fill %.2f − %.1fpts)",
-                    initial_sl, fill_price, pts,
-                )
-            else:
-                # Default: use telegram signal's stoploss
-                signal_stoploss = order.get("signal_stoploss")
-                initial_sl = (
-                    float(signal_stoploss)
-                    if signal_stoploss and float(signal_stoploss) < fill_price
-                    else fill_price - SIGNAL_TRAIL_FALLBACK
-                )
-                log.info(
-                    "SL mode=signal_trail: initial SL=%.2f (telegram), activation=+%.1fpts, trail_gap=%.1fpts",
-                    initial_sl,
-                    order.get("activation_points", DEFAULT_ACTIVATION_PTS),
-                    order.get("trail_gap", DEFAULT_TRAIL_GAP),
-                )
-        elif sl_mode == "signal" and sl_gap is not None:
-            initial_sl = fill_price - sl_gap
-            log.info("SL mode=signal: gap=%.2f, initial SL=%.2f", sl_gap, initial_sl)
-        elif sl_mode == "ltp":
-            initial_sl = fill_price
-            log.info("SL mode=ltp: SL starts at fill price %.2f", fill_price)
-        elif sl_mode == "fixed":
-            initial_sl = fill_price - sl_points
-            log.info("SL mode=fixed (%.1fpts): initial SL=%.2f", sl_points, initial_sl)
-        else:  # 'code'
-            offset     = max(CODE_SL_MIN, CODE_SL_PCT * fill_price)
-            initial_sl = fill_price - offset
-            log.info("SL mode=code: initial SL=%.2f", initial_sl)
+        # ── signal_trail initial SL (only mode) ──
+        initial_sl_source = order.get("signal_trail_initial_sl", "telegram")
+        if initial_sl_source == "points_from_ltp":
+            pts        = float(order.get("signal_trail_initial_sl_points") or 5.0)
+            initial_sl = fill_price - pts
+            log.info(
+                "SL mode=signal_trail: initial SL=%.2f (fill %.2f − %.1fpts)",
+                initial_sl, fill_price, pts,
+            )
+        else:
+            signal_stoploss = order.get("signal_stoploss")
+            initial_sl = (
+                float(signal_stoploss)
+                if signal_stoploss and float(signal_stoploss) < fill_price
+                else fill_price - SIGNAL_TRAIL_FALLBACK
+            )
+            log.info(
+                "SL mode=signal_trail: initial SL=%.2f (telegram), activation=+%.1fpts, trail_gap=%.1fpts",
+                initial_sl,
+                order.get("activation_points", DEFAULT_ACTIVATION_PTS),
+                order.get("trail_gap", DEFAULT_TRAIL_GAP),
+            )
 
         try:
             await db.update_trade(trade_id, {
@@ -604,10 +477,7 @@ class PaperTrader:
             "entry_price":       fill_price,
             "max_ltp":           fill_price,
             "trailing_sl":       initial_sl,
-            "sl_mode":           sl_mode,
-            "sl_gap":            sl_gap,
-            "sl_points":         sl_points,
-            "prev_ltp":          fill_price,
+            "sl_mode":           "signal_trail",
             "signal_stoploss":   order.get("signal_stoploss"),
             "activation_points": order.get("activation_points", DEFAULT_ACTIVATION_PTS),
             "trail_gap":         order.get("trail_gap", DEFAULT_TRAIL_GAP),
@@ -643,8 +513,8 @@ class PaperTrader:
             self._timer_state = _TimerState.IN_TRADE
 
         log.info(
-            "Position opened | mode=%s | Entry=%.2f | Initial SL=%.2f",
-            sl_mode, fill_price, initial_sl,
+            "Position opened | mode=signal_trail | Entry=%.2f | Initial SL=%.2f",
+            fill_price, initial_sl,
         )
 
         trade = {**order, "status": "filled", "fill_price": fill_price}
@@ -664,13 +534,15 @@ class PaperTrader:
 
     # ── Close position ────────────────────────────────────────────────────────
 
-    async def close_position(self, position_id: int, exit_price: float = None) -> dict:
+    async def close_position(self, position_id: int, exit_price: float = None, exit_reason: str = None) -> dict:
         for pos in self._open_positions:
             if pos["id"] != position_id:
                 continue
             if pos.get("status") == "closed":
                 return {"status": "error", "message": "Already closed"}
             pos["status"] = "closed"
+            if exit_reason:
+                pos["exit_reason"] = exit_reason
 
             price = exit_price or pos.get("current_price", pos["entry_price"])
             pnl   = (price - pos["entry_price"]) * pos["quantity"]
@@ -681,8 +553,14 @@ class PaperTrader:
                     "current_price": price,
                     "pnl":           pnl,
                     "closed_at":     datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    **({"exit_reason": exit_reason} if exit_reason else {})
                 })
-                await db.update_trade(pos["trade_id"], {"pnl": pnl, "exit_price": price})
+                await db.update_trade(pos["trade_id"], {
+                    "pnl": pnl,
+                    "exit_price": price,
+                    "closed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    **({"exit_reason": exit_reason} if exit_reason else {})
+                })
             except Exception:
                 log.exception("close_position: db update failed")
 
@@ -692,14 +570,26 @@ class PaperTrader:
             async with self._timer_lock:
                 self._timer_state = _TimerState.IDLE
 
+            closed_at_str = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
             await self._broadcast("position_update", {
-                "id":         position_id,
-                "status":     "closed",
-                "pnl":        pnl,
-                "exit_price": price,
+                "id":          position_id,
+                "status":      "closed",
+                "pnl":         pnl,
+                "exit_price":  price,
+                "exit_reason": exit_reason,
             })
 
-            return {"status": "closed", "pnl": pnl, "exit_price": price}
+            await self._broadcast("order_update", {
+                "id":          pos["trade_id"],
+                "status":      "closed",
+                "pnl":         pnl,
+                "exit_price":  price,
+                "closed_at":   closed_at_str,
+                "exit_reason": exit_reason,
+            })
+
+            return {"status": "closed", "pnl": pnl, "exit_price": price, "exit_reason": exit_reason}
 
         return {"status": "error", "message": "Position not found"}
 
@@ -740,20 +630,14 @@ class PaperTrader:
                 "option_type":       "",
                 "created_at":        datetime.now(timezone.utc),
                 "min_ltp":           t.get("min_ltp"),
-                "sl_mode":           "code",
-                "sl_gap":            None,
-                "sl_points":         DEFAULT_SL_POINTS,
+                "sl_mode":           "signal_trail",
                 "signal_stoploss":   None,
                 "activation_points": DEFAULT_ACTIVATION_PTS,
                 "trail_gap":         DEFAULT_TRAIL_GAP,
                 "bounce_points":     DEFAULT_BOUNCE_POINTS,
                 "entry_logic":       "code",
-                "avg_pick":          "avg",
                 "entry_label":       t.get("entry_label"),
-                "price_side":        None,
-                "price_side_candidate":    po.get("price_side_candidate"),
-                "price_side_confirm_count": po.get("price_side_confirm_count", 0),
-                # [FIX #26] Rehydrate with defaults — original strategy not persisted here
+                # [FIX #26] Rehydrate with defaults
                 "entry_timer_mins":  ENTRY_TIMEOUT_MINS,
                 "exit_timer_mins":   POSITION_TIMEOUT_MINS,
                 # [FIX #27] Rehydrate initial SL config defaults
@@ -769,25 +653,10 @@ class PaperTrader:
                 log.info("Rehydrated entry range for trade %s: %s-%s",
                          t["id"], order["entry_low"], order["entry_high"])
 
-            notes_match = re.search(r'\[([a-z_]+)\]', notes_str)
-            if notes_match:
-                parsed_logic = notes_match.group(1)
-                if parsed_logic in ("code", "avg_signal", "fixed"):
-                    order["entry_logic"] = parsed_logic
-
-            label = t.get("entry_label", "")
-            if label in ("high", "low", "avg"):
-                order["avg_pick"]    = label
-                order["entry_logic"] = "avg_signal"
-
             sym_match = re.match(r'^[A-Z]+?(\d{5})(CE|PE)$', t.get("trading_symbol", "").upper())
             if sym_match:
                 order["strike"]      = sym_match.group(1)
                 order["option_type"] = sym_match.group(2)
-
-            if (order["price_side_confirm_count"] >= PRICE_SIDE_CONFIRM_TICKS and
-                    order["price_side_candidate"]):
-                order["price_side"] = order["price_side_candidate"]
 
             self._pending_orders.append(order)
             restored_orders += 1
@@ -811,14 +680,12 @@ class PaperTrader:
                 "trailing_sl":   p.get("trailing_sl", 0),
                 "status":        "open",
                 "opened_at":     p.get("opened_at", ""),
-                "sl_mode":           p.get("sl_mode")           or "code",
-                "sl_gap":            p.get("sl_gap"),
-                "sl_points":         p.get("sl_points")         or DEFAULT_SL_POINTS,
+                "sl_mode":           "signal_trail",
                 "signal_stoploss":   p.get("signal_stoploss"),
                 "activation_points": p.get("activation_points") or DEFAULT_ACTIVATION_PTS,
                 "trail_gap":         p.get("trail_gap")          or DEFAULT_TRAIL_GAP,
                 "sl_activated":      bool(p.get("sl_activated", 0)),
-                "prev_ltp":          p.get("current_price", p.get("entry_price", 0)),
+                "exit_reason":       p.get("exit_reason"),
                 # [FIX #26] Exit timer defaults on rehydrate
                 "exit_timer_mins":   POSITION_TIMEOUT_MINS,
             }
@@ -855,7 +722,7 @@ class PaperTrader:
             if pos.get("status") == "closed":
                 continue
             price  = pos.get("current_price", pos.get("entry_price", 0))
-            result = await self.close_position(pos["id"], exit_price=price)
+            result = await self.close_position(pos["id"], exit_price=price, exit_reason="kill")
             if result.get("status") == "closed":
                 results.append({
                     "position_id": pos["id"],

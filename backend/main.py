@@ -56,14 +56,11 @@ STRATEGY_FILE = os.path.join(os.path.dirname(__file__), "..", "strategy.json")
 
 STRATEGY_DEFAULTS = {
     "lots":                      1,
-    "entryLogic":                "code",
-    "entryAvgPick":              "avg",
-    "entryFixed":                None,
-    "trailingSL":                "code",
-    "slFixed":                   None,
     "activationPoints":          5.0,
     "trailGap":                  2.0,
-    "compareMode":               False,
+    "bouncePoints":              5,
+    "bufferEnabled":             False,
+    "bufferPoints":              2.0,
     "entryTimerMins":            10,
     "exitTimerMins":             10,
     "signalTrailInitialSL":      "telegram",
@@ -98,6 +95,9 @@ telegram = TelegramListener()
 
 # [4][11] Load persisted strategy immediately on import
 manager.strategy = load_strategy()
+# Sync lot_size from persisted strategy so it survives restarts
+if manager.strategy.get("lots"):
+    manager.lot_size = max(1, int(manager.strategy["lots"]))
 
 # Stop-trading flag — when True, incoming signals are NOT traded.
 # Existing positions and pending orders continue to be managed normally.
@@ -222,6 +222,8 @@ async def lifespan(app: FastAPI):
                     "Tick queue at %d/5000 (%.0f%%) — consider increasing maxsize",
                     qsize, qsize / 5000 * 100,
                 )
+        except RuntimeError:
+            pass  # Event loop is closed during shutdown — safe to ignore
         except asyncio.QueueFull:
             log.warning(
                 "Tick queue full — tick dropped (token=%s ltp=%s). "
@@ -469,6 +471,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def add_cache_control(request, call_next):
+    """Force browsers to revalidate JS/CSS on every load — no stale cache."""
+    response = await call_next(request)
+    path = request.url.path
+    if path.endswith((".js", ".css")):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
 
@@ -499,14 +511,11 @@ class StopTradingRequest(BaseModel):
 
 class StrategyRequest(BaseModel):
     lots:                      int             = 1
-    entryLogic:                str             = "code"
-    entryAvgPick:              str             = "avg"
-    entryFixed:                Optional[float] = None
-    trailingSL:                str             = "code"
-    slFixed:                   Optional[float] = None
-    compareMode:               bool            = False
     activationPoints:          Optional[float] = 5.0
     trailGap:                  Optional[float] = 2.0
+    bouncePoints:              Optional[int]   = 5
+    bufferEnabled:             bool            = False
+    bufferPoints:              Optional[float] = 2.0
     entryTimerMins:            int             = 10
     exitTimerMins:             int             = 10
     signalTrailInitialSL:      str             = "telegram"
@@ -562,8 +571,11 @@ async def get_trades(
 
 
 @app.get("/api/positions")
-async def get_positions(mode: Optional[str] = None, status: str = "open"):
-    return await db.get_positions(mode=mode, status=status)
+async def get_positions(mode: Optional[str] = None, status: Optional[str] = "open", date: Optional[str] = Query(None)):
+    # Empty string from query param ?status= means "all" (open + today's closed)
+    if status is not None and status.strip() == "":
+        status = None
+    return await db.get_positions(mode=mode, status=status, date=date)
 
 
 @app.get("/api/pnl")
@@ -581,13 +593,32 @@ async def set_mode(req: ModeRequest):
 @app.post("/api/positions/{position_id}/exit")
 async def exit_position(position_id: int):
     """[FIX #1] close_position() already broadcasts position_update — no duplicate here."""
-    result = await manager.paper_trader.close_position(position_id)
+    if manager.mode == "real":
+        result = await manager.real_trader.close_position(position_id, exit_reason="manual")
+    else:
+        result = await manager.paper_trader.close_position(position_id, exit_reason="user")
     return result
+
+
+@app.get("/api/balance")
+async def get_balance():
+    """Fetch Kotak account balance/margin limits."""
+    if not manager.kotak.is_authenticated:
+        return {"status": "error", "message": "Not authenticated"}
+    try:
+        result = manager.kotak.get_limits()
+        return result
+    except Exception:
+        log.exception("get_balance failed")
+        return {"status": "error", "message": "Failed to fetch balance"}
 
 
 @app.post("/api/kill")
 async def kill_switch():
-    result  = await manager.paper_trader.square_off_all()
+    if manager.mode == "real":
+        result = await manager.real_trader.square_off_all()
+    else:
+        result = await manager.paper_trader.square_off_all()
     _today  = _today_ist()
     await ws_manager.broadcast({"type": "init", "data": {
         "status":    manager.get_status(),
@@ -652,7 +683,7 @@ async def clear_data(req: ClearRequest):
     await db.clear_all_data(date=req.date)
     if req.date is None:
         # Full clear — reset in-memory state too
-        manager._processed_signals.clear()
+        manager.clear_duplicates()  # no-op now, dedup is DB-backed
         manager.paper_trader._pending_orders.clear()
         if hasattr(manager.paper_trader, "_open_positions"):
             manager.paper_trader._open_positions.clear()
@@ -702,6 +733,7 @@ async def reconnect_market_feed():
         manager.market_feed._started_once = False
         manager.market_feed.start()
         manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
+        manager.market_feed.add_raw_tick_callback(enqueue_tick)
 
         await asyncio.sleep(3)
         manager.market_feed.subscribe_batch([
@@ -785,14 +817,13 @@ async def restart_backend():
 
 @app.post("/api/clear-signal-tracker")
 async def clear_signal_tracker():
-    """Reset _processed_signals in TradeManager so previously blocked signals can re-enter."""
-    count = len(manager._processed_signals)
-    manager._processed_signals.clear()
-    log.info("clear_signal_tracker: cleared %d entries from _processed_signals", count)
+    """No-op — dedup is now fully DB-backed via open-position and pending-order checks."""
+    manager.clear_duplicates()
+    log.info("clear_signal_tracker: no-op — dedup is now DB-backed")
     return {
         "status":  "ok",
-        "message": f"Signal tracker cleared ({count} entr{'y' if count == 1 else 'ies'} removed). Valid signals will now be processed.",
-        "cleared": count,
+        "message": "Signal dedup is now DB-backed — no in-memory tracker to clear. Signals are only blocked if an open position exists for that strike.",
+        "cleared": 0,
     }
 
 
@@ -807,8 +838,8 @@ async def websocket_endpoint(ws: WebSocket):
             "type": "init",
             "data": {
                 "status":    manager.get_status(),
-                "messages":  await db.get_messages(limit=200, date=None),
-                "signals":   await db.get_signals(limit=200, date=None),
+                "messages":  await db.get_messages(limit=200, date=today),
+                "signals":   await db.get_signals(limit=200, date=today),
                 "trades":    await db.get_trades(limit=50, date=today),
                 "positions": await db.get_positions(status=None),
             },
