@@ -201,6 +201,7 @@ async def lifespan(app: FastAPI):
         while True:
             try:
                 await manager.paper_trader.check_timeouts()
+                await manager.real_trader.check_timeouts()   # [FIX #29]
             except Exception:
                 log.exception("Timeout checker error")  # [FIX #23]
             await asyncio.sleep(10)
@@ -286,6 +287,7 @@ async def lifespan(app: FastAPI):
 
                 manager.market_feed.start()
                 manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
+                manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
                 manager.market_feed.add_raw_tick_callback(enqueue_tick)
 
                 task = asyncio.create_task(tick_consumer())
@@ -305,6 +307,10 @@ async def lifespan(app: FastAPI):
                 ])
                 await loop.run_in_executor(None, manager.download_contracts)
                 await manager.resubscribe_recent_signals(limit=20)
+
+                # [FIX #29] Rehydrate real trader state + background tasks on auto-login
+                await manager.real_trader.rehydrate_from_db()
+                manager._start_real_background_tasks()
             else:
                 manager.kotak_login_state      = "login_failed"
                 manager.kotak_last_login_error = login_result.get("message")
@@ -371,6 +377,7 @@ async def lifespan(app: FastAPI):
                     manager.market_feed._started_once = False
                     manager.market_feed.start()
                     manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
+                    manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
                     manager.market_feed.add_raw_tick_callback(enqueue_tick)
 
                     new_task = asyncio.create_task(tick_consumer())
@@ -492,6 +499,8 @@ async def serve_index():
 # ── Pydantic Models ───────────────────────────────────────────────────────────
 class ModeRequest(BaseModel):
     mode: str
+    totp: Optional[str] = None
+    force: bool = False
 
 class OTPRequest(BaseModel):
     otp: Optional[str] = None
@@ -585,6 +594,37 @@ async def get_pnl():
 
 @app.post("/api/mode")
 async def set_mode(req: ModeRequest):
+    # TOTP gate: require valid code when switching to real trading
+    if req.mode == "real":
+        secret = Config.KOTAK_TOTP_SECRET
+        if secret:
+            import pyotp
+            if not req.totp or not pyotp.TOTP(secret).verify(req.totp, valid_window=1):
+                return {"status": "error", "message": "Invalid TOTP code"}
+
+    # Safety gate: block real → paper/other when real trades are active
+    if manager.mode == "real" and req.mode != "real":
+        open_pos  = len(manager.real_trader.get_open_positions())
+        pending   = len(manager.real_trader.get_pending_orders())
+        if (open_pos + pending) > 0 and not req.force:
+            return {
+                "status":          "blocked",
+                "message":         "Active real trades exist",
+                "open_positions":  open_pos,
+                "pending_orders":  pending,
+            }
+        if req.force and (open_pos + pending) > 0:
+            log.warning("Force mode switch: killing %d positions + %d pending orders", open_pos, pending)
+            await manager.real_trader.square_off_all(exit_reason="mode_switch")
+            _today = _today_ist()
+            await ws_manager.broadcast({"type": "init", "data": {
+                "status":    manager.get_status(),
+                "messages":  await db.get_messages(limit=200, date=None),
+                "signals":   await db.get_signals(limit=200, date=None),
+                "trades":    await db.get_trades(limit=50, date=_today),
+                "positions": await db.get_positions(status=None),
+            }})
+
     result = manager.set_mode(req.mode)
     await ws_manager.broadcast({"type": "mode_change", "data": result})
     return result
@@ -597,6 +637,19 @@ async def exit_position(position_id: int):
         result = await manager.real_trader.close_position(position_id, exit_reason="manual")
     else:
         result = await manager.paper_trader.close_position(position_id, exit_reason="user")
+    return result
+
+
+@app.post("/api/orders/{trade_id}/cancel")
+async def cancel_pending_order(trade_id: int):
+    """Cancel a single pending entry order.
+    Routes to the active engine's cancel_pending_order() which acquires
+    _expiry_lock — preventing race conditions with on_tick() fill logic.
+    """
+    if manager.mode == "real":
+        result = await manager.real_trader.cancel_pending_order(trade_id)
+    else:
+        result = await manager.paper_trader.cancel_pending_order(trade_id)
     return result
 
 
@@ -733,6 +786,7 @@ async def reconnect_market_feed():
         manager.market_feed._started_once = False
         manager.market_feed.start()
         manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
+        manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
         manager.market_feed.add_raw_tick_callback(enqueue_tick)
 
         await asyncio.sleep(3)

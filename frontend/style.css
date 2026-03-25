@@ -517,6 +517,37 @@ header {
     border-left-color: var(--amber);
 }
 
+.signal-card.cancelled {
+    border-left-color: var(--red);
+    opacity: 0.7;
+}
+
+.signal-status.cancelled {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+}
+
+.btn-cancel-pending {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    background: transparent;
+    color: #ef4444;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.btn-cancel-pending:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: #ef4444;
+}
+.btn-cancel-pending:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .signal-details {
     display: grid;
     grid-template-columns: 1fr 1fr;

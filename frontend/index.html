@@ -468,9 +468,33 @@
             <div class="modal-body">
                 <p>This will place <strong>actual orders</strong> on Kotak Neo with <strong>real money</strong>.</p>
                 <p>Make sure Kotak Neo is authenticated and you understand the risks.</p>
+                <div style="margin: 16px 0; text-align: center;">
+                    <label for="totp-real-input" style="display:block; font-size:13px; color:var(--text-muted); margin-bottom:8px; font-weight:500;">🔐 Enter TOTP code from your authenticator app:</label>
+                    <input type="text" id="totp-real-input" maxlength="6" inputmode="numeric"
+                           pattern="[0-9]*" placeholder="000000" autocomplete="one-time-code"
+                           style="width:140px; text-align:center; font-size:24px; font-family:'JetBrains Mono',monospace; letter-spacing:6px; padding:10px 12px; border-radius:8px; border:1.5px solid var(--border); background:var(--bg); color:var(--text);">
+                </div>
                 <div class="modal-actions">
                     <button class="btn btn-secondary" id="btn-cancel-real">Cancel</button>
                     <button class="btn btn-danger" id="btn-confirm-real">Yes, Switch to Real</button>
+                </div>
+            </div>
+        </div>
+
+    <!-- ── Blocked Mode Switch Modal ── -->
+    <div class="modal-overlay" id="blocked-mode-modal" style="display:none;">
+        <div class="modal modal-sm">
+            <div class="modal-header modal-header-danger">
+                <h2>⚠️ Active Real Trades</h2>
+            </div>
+            <div class="modal-body">
+                <p id="blocked-mode-msg">You have open positions and pending orders in Real mode.</p>
+                <p style="color:var(--text-muted); font-size:12px; margin-top:8px;">
+                    Switching will leave real trades <strong>unmanaged</strong> on the exchange (no SL monitoring).
+                </p>
+                <div class="modal-actions" style="margin-top:16px;">
+                    <button class="btn btn-secondary" id="btn-stay-real">Stay in Real</button>
+                    <button class="btn btn-danger" id="btn-kill-and-switch">🛑 Kill All & Switch</button>
                 </div>
             </div>
         </div>

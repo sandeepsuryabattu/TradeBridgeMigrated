@@ -1,12 +1,12 @@
 {
   "lots": 1,
-  "activationPoints": 5.0,
-  "trailGap": 5.0,
-  "bouncePoints": 5,
+  "activationPoints": 3.0,
+  "trailGap": 2.0,
+  "bouncePoints": 3,
   "bufferEnabled": false,
   "bufferPoints": 2.0,
-  "entryTimerMins": 10,
-  "exitTimerMins": 10,
-  "signalTrailInitialSL": "telegram",
-  "signalTrailInitialSLPoints": null
+  "entryTimerMins": 7,
+  "exitTimerMins": 7,
+  "signalTrailInitialSL": "points_from_ltp",
+  "signalTrailInitialSLPoints": 10.0
 }

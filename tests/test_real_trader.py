@@ -30,6 +30,21 @@ def mock_kotak():
             {"nOrdNo": "SL001", "ordSt": "trigger pending"},
         ]
     }
+
+    # Default: order_history returns a successfully traded order
+    # NOTE: kotak_trader.order_history() wraps the SDK result:
+    # {"status": "ok", "data": {"data": [...]}}
+    k.order_history.return_value = {
+        "status": "ok",
+        "data": {
+            "data": [{
+                "nOrdNo": "ORD001",
+                "ordSt": "traded",
+                "flPrc": "153.50",
+                "flQty": "20",
+            }],
+        },
+    }
     return k
 
 
@@ -73,6 +88,23 @@ def make_trader(mock_kotak, mock_market_feed):
     rt = RealTrader(kotak_trader=mock_kotak, market_feed=mock_market_feed)
     rt._ws_broadcast = AsyncMock()
     return rt
+
+
+def _set_order_history_fill(mock_kotak, price=153.5, qty=20, status="traded"):
+    """Helper to configure order_history mock for fill verification.
+    Uses the real kotak_trader.order_history() wrapper format.
+    """
+    mock_kotak.order_history.return_value = {
+        "status": "ok",
+        "data": {
+            "data": [{
+                "nOrdNo": "ORD001",
+                "ordSt": status,
+                "flPrc": str(price),
+                "flQty": str(qty),
+            }],
+        },
+    }
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -140,13 +172,17 @@ class TestBounceBackEntry:
         await rt.on_tick("12345", 148.0, tick)
         assert rt._pending_orders[0]["min_ltp"] == 148.0
 
-        # Price bounces up by 5 pts (148 + 5 = 153) → fill
+        # Price bounces up by 5 pts (148 + 5 = 153) → triggers BUY + fill verification
+        _set_order_history_fill(mock_kotak, price=153.5, qty=20)
         await rt.on_tick("12345", 153.0, tick)
 
         # Kotak place_order should have been called (the BUY)
         assert mock_kotak.place_order.called
-        call_kwargs = mock_kotak.place_order.call_args
-        assert call_kwargs is not None
+        # order_history should have been called for fill verification
+        assert mock_kotak.order_history.called
+        # Position should be created with verified fill price
+        assert len(rt._open_positions) == 1
+        assert rt._open_positions[0]["entry_price"] == 153.5
 
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
@@ -165,6 +201,7 @@ class TestBounceBackEntry:
         tick = {"symbol": symbol, "tk": "12345"}
 
         # Enter range → bounce
+        _set_order_history_fill(mock_kotak, price=153.5, qty=20)
         await rt.on_tick("12345", 148.0, tick)
         await rt.on_tick("12345", 153.0, tick)
 
@@ -196,6 +233,96 @@ class TestBounceBackEntry:
         assert not mock_kotak.place_order.called
 
 
+class TestFillVerification:
+    """Tests for IOC fill verification via order_history polling."""
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_rejected_buy_no_phantom_position(self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy):
+        """When IOC BUY is rejected, no position should be created."""
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+        mock_db.delete_pending_order = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
+
+        symbol = rt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        # Set order_history to return rejected
+        _set_order_history_fill(mock_kotak, status="rejected")
+
+        # Bounce triggers BUY → but fill verification sees rejected
+        await rt.on_tick("12345", 148.0, tick)
+        await rt.on_tick("12345", 153.0, tick)
+
+        # BUY was placed on exchange
+        assert mock_kotak.place_order.called
+        # But NO position should have been created
+        assert len(rt._open_positions) == 0
+        # Trade should be marked expired
+        mock_db.update_trade.assert_called()
+        # Check the last update_trade call was status='expired'
+        last_call = mock_db.update_trade.call_args_list[-1]
+        assert last_call.args[1]["status"] == "expired"
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_verified_fill_uses_exchange_price(self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy):
+        """Position should use the actual exchange fill price, not the bounce LTP."""
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+        mock_db.save_position = AsyncMock(return_value=100)
+        mock_db.delete_pending_order = AsyncMock()
+        mock_db.update_position = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
+
+        symbol = rt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        # Exchange filled at 152.75 (different from bounce LTP of 153)
+        _set_order_history_fill(mock_kotak, price=152.75, qty=20)
+
+        await rt.on_tick("12345", 148.0, tick)
+        await rt.on_tick("12345", 153.0, tick)  # bounce LTP = 153
+
+        assert len(rt._open_positions) == 1
+        # entry_price should be the verified exchange price, not the LTP
+        assert rt._open_positions[0]["entry_price"] == 152.75
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_unconfirmed_fill_no_position(self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy):
+        """When order_history never returns traded status, no position is created."""
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+        mock_db.delete_pending_order = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
+
+        symbol = rt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        # order_history always returns 'pending' — IOC should not stay pending
+        _set_order_history_fill(mock_kotak, status="pending")
+
+        await rt.on_tick("12345", 148.0, tick)
+        await rt.on_tick("12345", 153.0, tick)
+
+        # No position created
+        assert len(rt._open_positions) == 0
+        # Trade marked expired
+        last_call = mock_db.update_trade.call_args_list[-1]
+        assert last_call.args[1]["status"] == "expired"
+
+
 class TestSLOrder:
     """Tests for exchange-level SL order placement and trailing."""
 
@@ -218,6 +345,7 @@ class TestSLOrder:
             return {"status": "ok", "data": {"nOrdNo": "ORD001"}}
 
         mock_kotak.place_order.side_effect = mock_place
+        _set_order_history_fill(mock_kotak, price=153.0, qty=20)
 
         rt = make_trader(mock_kotak, mock_market_feed)
         await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
@@ -542,3 +670,203 @@ class TestRetryLogic:
         sl_id = await rt._place_sl_order(pos, 140.0)
         assert sl_id == "SL001"
         assert mock_kotak.place_order.call_count == 2
+
+
+class TestDoubleNestedOrderHistory:
+    """Regression tests for BUG 1: verify_fill with real kotak_trader wrapper format."""
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_verify_fill_with_wrapper_format(self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy):
+        """_verify_fill must correctly unwrap {status:ok, data:{data:[...]}}."""
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+        mock_db.save_position = AsyncMock(return_value=100)
+        mock_db.delete_pending_order = AsyncMock()
+        mock_db.update_position = AsyncMock()
+
+        # Explicitly set the double-nested format (as kotak_trader.order_history returns)
+        mock_kotak.order_history.return_value = {
+            "status": "ok",
+            "data": {
+                "data": [{
+                    "nOrdNo": "ORD001",
+                    "ordSt": "traded",
+                    "flPrc": "152.00",
+                    "flQty": "20",
+                }],
+            },
+        }
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
+
+        symbol = rt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        await rt.on_tick("12345", 148.0, tick)
+        await rt.on_tick("12345", 153.0, tick)
+
+        # Position must be created with the verified fill price
+        assert len(rt._open_positions) == 1
+        assert rt._open_positions[0]["entry_price"] == 152.00
+
+
+class TestRehydrateCreatedAt:
+    """Regression test for BUG 3: rehydrated orders must preserve DB created_at."""
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_rehydrate_preserves_created_at(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.get_pending_orders = AsyncMock(return_value=[
+            {"id": 10, "trade_id": 1}
+        ])
+        mock_db.get_trades = AsyncMock(return_value=[
+            {"id": 1, "signal_id": 42, "status": "pending",
+             "trading_symbol": "SENSEX82000CE",
+             "notes": "Real BUY 82000 CE @ 145-155",
+             "quantity": 20, "price": 155.0,
+             "created_at": "2026-03-25T05:00:00Z"}
+        ])
+        mock_db.get_positions = AsyncMock(return_value=[])
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.rehydrate_from_db()
+
+        assert len(rt._pending_orders) == 1
+        # Must use the DB timestamp, not datetime.now()
+        assert rt._pending_orders[0]["created_at"] == "2026-03-25T05:00:00Z"
+
+
+class TestSLCancelSkip:
+    """Regression test for BUG 4: close_position skips SL cancel when exit_reason='sl'."""
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_sl_exit_does_not_cancel_sl_order(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 140.0,
+            "quantity": 20, "pnl": -200.0,
+            "max_ltp": 155.0, "trailing_sl": 140.0,
+            "sl_activated": True, "activation_points": 5.0,
+            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "exit_timer_mins": 10, "exit_slippage": 1.0,
+            "opened_at": datetime.now(timezone.utc),
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+
+        result = await rt.close_position(100, exit_price=139.5, exit_reason="sl")
+
+        assert result["status"] == "closed"
+        # cancel_order should NOT be called when SL already triggered
+        mock_kotak.cancel_order.assert_not_called()
+
+
+class TestTripleNestedProductionFormat:
+    """Regression test for the actual Kotak production response format.
+
+    Real order_history returns TRIPLE-nested:
+    {"status":"ok","data":{"data":{"stat":"Ok","data":[{ordSt:"complete",avgPrc:"349.75",fldQty:20,...}]}}}
+    """
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_verify_fill_triple_nested_complete(self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy):
+        """_verify_fill parses triple-nested response with ordSt='complete'."""
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+        mock_db.save_position = AsyncMock(return_value=100)
+        mock_db.delete_pending_order = AsyncMock()
+        mock_db.update_position = AsyncMock()
+
+        # Exact production format (trimmed to relevant fields)
+        mock_kotak.order_history.return_value = {
+            "status": "ok",
+            "data": {
+                "data": {
+                    "stat": "Ok",
+                    "stCode": 200,
+                    "data": [
+                        {
+                            "trdSym": "SENSEX26MAR76000PE",
+                            "prc": "355.50",
+                            "qty": 20,
+                            "ordSt": "complete",
+                            "trnsTp": "B",
+                            "nOrdNo": "260325000470191",
+                            "avgPrc": "349.75",
+                            "fldQty": 20,
+                            "unFldSz": 0,
+                        },
+                        {
+                            "trdSym": "SENSEX26MAR76000PE",
+                            "ordSt": "open",
+                            "avgPrc": "0.00",
+                            "fldQty": 0,
+                            "nOrdNo": "260325000470191",
+                        },
+                        {
+                            "trdSym": "SENSEX26MAR76000PE",
+                            "ordSt": "open pending",
+                            "avgPrc": "0.00",
+                            "fldQty": 0,
+                            "nOrdNo": "260325000470191",
+                        },
+                    ],
+                },
+            },
+        }
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
+
+        symbol = rt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        await rt.on_tick("12345", 148.0, tick)
+        await rt.on_tick("12345", 153.0, tick)
+
+        # Must create position with avgPrc from production response
+        assert len(rt._open_positions) == 1
+        assert rt._open_positions[0]["entry_price"] == 349.75
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_verify_fill_direct_triple_nested(self, mock_db, mock_kotak, mock_market_feed):
+        """Direct _verify_fill call with triple-nested production format."""
+        from backend.real_trader import RealTrader
+
+        mock_kotak.order_history.return_value = {
+            "status": "ok",
+            "data": {
+                "data": {
+                    "stat": "Ok",
+                    "data": [{
+                        "nOrdNo": "260325000470191",
+                        "ordSt": "complete",
+                        "avgPrc": "349.75",
+                        "fldQty": 20,
+                    }],
+                },
+            },
+        }
+
+        rt = RealTrader(kotak_trader=mock_kotak)
+        rt._ws_broadcast = AsyncMock()
+
+        order = {"trading_symbol": "SENSEX76000PE", "quantity": 20, "price": 355.50}
+        result = await rt._verify_fill("260325000470191", order)
+
+        assert result is not None
+        assert result["status"] == "traded"
+        assert result["fill_price"] == 349.75
+        assert result["fill_qty"] == 20

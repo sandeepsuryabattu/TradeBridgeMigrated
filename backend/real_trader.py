@@ -41,6 +41,8 @@ MAX_ORDER_RETRIES        = 2
 ORDER_RETRY_DELAY_S      = 0.5
 RECONCILE_INTERVAL_S     = 30
 EOD_EXIT_MINUTES_BEFORE  = 5      # Close positions N minutes before market close
+FILL_VERIFY_POLLS        = 5      # Number of order_history polls to confirm fill
+FILL_VERIFY_INTERVAL_S   = 0.2    # Seconds between polls (~1s total)
 
 _IST = ZoneInfo("Asia/Kolkata")
 _MARKET_CLOSE = dt_time(15, 30)
@@ -76,10 +78,32 @@ class RealTrader:
             except Exception:
                 log.exception("RealTrader broadcast error")
 
+    @staticmethod
+    def _extract_order_id(result: dict) -> str:
+        """Extract nOrdNo from Kotak wrapper: {status:ok, data:{data:{nOrdNo:...}}}.
+
+        The kotak_trader wrapper adds one level of {status, data} around the
+        SDK response, which itself returns {data: {nOrdNo: ...}}.  This helper
+        drills through both levels reliably.
+        """
+        if not isinstance(result, dict):
+            return ""
+        d = result.get("data", result)
+        if isinstance(d, dict):
+            inner = d.get("data", d)
+            if isinstance(inner, dict):
+                return str(inner.get("nOrdNo", ""))
+            return str(d.get("nOrdNo", ""))
+        return ""
+
     # ── Symbol Resolution ─────────────────────────────────────────────────────
 
     def _resolve_symbol(self, signal: dict) -> str:
-        """Resolve the exact pTrdSymbol via search_scrip, with day cache."""
+        """Resolve the exact pTrdSymbol via search_scrip, with day cache.
+
+        Falls back to market feed subscriptions (which use contract_master) if
+        search_scrip fails, and finally to a short fallback symbol.
+        """
         strike = str(signal.get("strike", ""))
         opt_type = str(signal.get("option_type", "")).upper()
         cache_key = f"{strike}{opt_type}"
@@ -89,27 +113,37 @@ class RealTrader:
 
         fallback = f"SENSEX{int(strike)}{opt_type}"
 
-        if not self.kotak or not self.kotak.is_authenticated:
-            log.warning("Kotak not authenticated — using fallback symbol: %s", fallback)
-            return fallback
+        # Try 1: search_scrip via Kotak API
+        if self.kotak and self.kotak.is_authenticated:
+            try:
+                scrip = self.kotak.search_scrip(
+                    symbol="SENSEX",
+                    option_type=opt_type,
+                    strike_price=strike,
+                )
+                log.info("search_scrip(%s): %s", cache_key, scrip)
+                if scrip and isinstance(scrip, dict):
+                    instruments = scrip.get("data", [])
+                    if isinstance(instruments, list) and instruments:
+                        resolved = instruments[0].get("pTrdSymbol", "")
+                        if resolved:
+                            self._symbol_cache[cache_key] = resolved
+                            log.info("Resolved symbol via search_scrip: %s → %s", cache_key, resolved)
+                            return resolved
+            except Exception:
+                log.exception("search_scrip failed for %s", cache_key)
 
-        try:
-            scrip = self.kotak.search_scrip(
-                symbol="SENSEX",
-                option_type=opt_type,
-                strike_price=strike,
-            )
-            if scrip and isinstance(scrip, dict):
-                instruments = scrip.get("data", [])
-                if instruments:
-                    resolved = instruments[0].get("pTrdSymbol", fallback)
-                    self._symbol_cache[cache_key] = resolved
-                    log.info("Resolved symbol: %s → %s", cache_key, resolved)
-                    return resolved
-        except Exception:
-            log.exception("search_scrip failed for %s", cache_key)
+        # Try 2: Look in market feed subscriptions (populated by contract_master)
+        if self.market_feed:
+            suffix = f"{strike}{opt_type}".upper()
+            for _tk, info in self.market_feed._subscriptions.items():
+                sym = (info.get("symbol") or "").upper()
+                if sym.startswith("SENSEX") and sym.endswith(suffix):
+                    self._symbol_cache[cache_key] = info["symbol"]
+                    log.info("Resolved symbol via market_feed: %s → %s", cache_key, info["symbol"])
+                    return info["symbol"]
 
-        log.warning("Using fallback symbol: %s", fallback)
+        log.warning("Using fallback symbol: %s (search_scrip and market_feed both failed)", fallback)
         return fallback
 
     # ── Place Order (Pending — no Kotak call yet) ─────────────────────────────
@@ -218,6 +252,11 @@ class RealTrader:
                     raise Exception(result.get("message", "Unknown error"))
                 if isinstance(result, dict) and (result.get("Error") or result.get("Error Message")):
                     raise Exception(str(result.get("Error") or result.get("Error Message")))
+                # Detect Kotak's {"stat": "Not_Ok", "errMsg": "..."} error format
+                if isinstance(result, dict):
+                    inner = result.get("data", result)
+                    if isinstance(inner, dict) and inner.get("stat") == "Not_Ok":
+                        raise Exception(inner.get("errMsg") or "Kotak returned Not_Ok")
                 return result
             except Exception as e:
                 log.error("%s failed (attempt %d/%d): %s", description, attempt, MAX_ORDER_RETRIES, e)
@@ -255,11 +294,7 @@ class RealTrader:
                 validity="IOC",
             )
 
-            kotak_order_id = ""
-            if isinstance(result, dict):
-                data = result.get("data", result)
-                if isinstance(data, dict):
-                    kotak_order_id = data.get("nOrdNo", "")
+            kotak_order_id = self._extract_order_id(result)
 
             await db.update_trade(order["trade_id"], {"kotak_order_id": kotak_order_id})
 
@@ -286,6 +321,113 @@ class RealTrader:
             })
             return None
 
+    # ── Verify IOC Fill ───────────────────────────────────────────────────────
+
+    async def _verify_fill(self, kotak_order_id: str, order: dict) -> Optional[dict]:
+        """Poll order_history to confirm IOC fill. Returns fill data or None.
+
+        IOC orders resolve instantly on the exchange, but the place_order API
+        only confirms acceptance — not fill.  This method polls order_history
+        in a tight loop (~200ms × 5 = ~1s) to get the actual fill status.
+
+        Returns:
+            {"status": "traded", "fill_price": float, "fill_qty": int}
+            or None if rejected / cancelled / timed-out / partial fill.
+        """
+        if not kotak_order_id or not self.kotak or not self.kotak.is_authenticated:
+            log.warning("_verify_fill: cannot verify — missing order_id or auth")
+            return None
+
+        for attempt in range(1, FILL_VERIFY_POLLS + 1):
+            await asyncio.sleep(FILL_VERIFY_INTERVAL_S)
+            try:
+                hist = self.kotak.order_history(order_id=kotak_order_id)
+                log.info(
+                    "_verify_fill poll %d/%d for %s: raw response = %s",
+                    attempt, FILL_VERIFY_POLLS, kotak_order_id, hist,
+                )
+                if not hist or not isinstance(hist, dict):
+                    continue
+
+                # Actual Kotak response is TRIPLE nested:
+                # {"status":"ok","data":{"data":{"stat":"Ok","data":[{...},{...}]}}}
+                # Level 1: kotak_trader wrapper  → hist["data"]
+                # Level 2: SDK wrapper           → ["data"]["data"]
+                # Level 3: inner stat+data       → ["data"]["data"]["data"] = [order entries]
+                raw_l1 = hist.get("data", {})
+                raw_l2 = raw_l1.get("data", raw_l1) if isinstance(raw_l1, dict) else raw_l1
+                if isinstance(raw_l2, dict):
+                    data_list = raw_l2.get("data", [])
+                else:
+                    data_list = raw_l2
+                if isinstance(data_list, dict):
+                    data_list = [data_list]
+                if not isinstance(data_list, list) or not data_list:
+                    continue
+
+                # First entry [0] is the MOST RECENT status (newest first)
+                latest = data_list[0]
+                status = str(latest.get("ordSt", "")).lower().strip()
+
+                log.info(
+                    "_verify_fill poll %d/%d: ordSt=%s, avgPrc=%s, fldQty=%s",
+                    attempt, FILL_VERIFY_POLLS, status,
+                    latest.get("avgPrc"), latest.get("fldQty"),
+                )
+
+                if status in ("traded", "complete"):
+                    # avgPrc = actual exchange fill price, fldQty = filled quantity
+                    fill_price = float(latest.get("avgPrc", 0) or latest.get("flPrc", 0) or 0)
+                    fill_qty   = int(latest.get("fldQty", 0) or latest.get("flQty", 0) or 0)
+
+                    if fill_price <= 0:
+                        fill_price = float(latest.get("prc", 0)) or order.get("price", 0)
+                    if fill_qty <= 0:
+                        fill_qty = order["quantity"]
+
+                    log.info(
+                        "Fill VERIFIED: %s — status=%s, fill_price=%.2f, fill_qty=%d (poll %d/%d)",
+                        order["trading_symbol"], status, fill_price, fill_qty,
+                        attempt, FILL_VERIFY_POLLS,
+                    )
+                    return {
+                        "status":     "traded",
+                        "fill_price": fill_price,
+                        "fill_qty":   fill_qty,
+                    }
+
+                if status in ("rejected", "cancelled"):
+                    reason = latest.get("rejRsn", "Unknown")
+                    log.error(
+                        "BUY order %s for %s: %s — %s (poll %d/%d)",
+                        status.upper(), order["trading_symbol"], kotak_order_id, reason,
+                        attempt, FILL_VERIFY_POLLS,
+                    )
+                    await self._broadcast("order_alert", {
+                        "level":   "error",
+                        "message": f"❌ BUY {status.upper()}: {order['trading_symbol']} — {reason}",
+                    })
+                    return None
+
+                # "open", "open pending", "validation pending", etc. — keep polling
+
+            except Exception:
+                log.exception("_verify_fill poll %d failed for %s", attempt, kotak_order_id)
+
+        # Exhausted polls — IOC should have resolved by now, treat as failed
+        log.error(
+            "_verify_fill: unable to confirm fill for %s after %d polls — treating as UNFILLED",
+            kotak_order_id, FILL_VERIFY_POLLS,
+        )
+        await self._broadcast("order_alert", {
+            "level":   "warning",
+            "message": (
+                f"⚠️ BUY fill unconfirmed for {order['trading_symbol']} "
+                f"(order #{kotak_order_id}) — check order book manually"
+            ),
+        })
+        return None
+
     # ── Place SL Order on Exchange ────────────────────────────────────────────
 
     async def _place_sl_order(self, pos: dict, trigger_price: float) -> Optional[str]:
@@ -309,11 +451,7 @@ class RealTrader:
                 validity="DAY",
             )
 
-            sl_order_id = ""
-            if isinstance(result, dict):
-                data = result.get("data", result)
-                if isinstance(data, dict):
-                    sl_order_id = data.get("nOrdNo", "")
+            sl_order_id = self._extract_order_id(result)
 
             await db.update_position(pos["id"], {"sl_order_id": sl_order_id})
             pos["sl_order_id"] = sl_order_id
@@ -517,8 +655,9 @@ class RealTrader:
             await self._process_position_tick(pos, ltp)
 
         # 2. Check pending orders — bounce-back logic
+        # Phase 1: Under _expiry_lock — expiry checks + bounce detection (fast)
+        orders_to_fill = []  # (order, ltp) pairs needing Kotak BUY
         async with self._expiry_lock:
-            filled  = []
             expired = []
 
             for order in list(self._pending_orders):
@@ -550,8 +689,9 @@ class RealTrader:
                     continue
 
                 # Bounce-back entry logic
+                # [FIX #28] Only track min_ltp while LTP is inside entry range.
                 in_range = order["entry_low"] <= ltp <= order["entry_high"]
-                if in_range or order.get("min_ltp") is not None:
+                if in_range:
                     if order.get("min_ltp") is None or ltp < order["min_ltp"]:
                         order["min_ltp"] = ltp
                         try:
@@ -566,24 +706,122 @@ class RealTrader:
                         })
 
                 bounce_points = order.get("bounce_points", DEFAULT_BOUNCE_POINTS)
+                # [FIX #28] Fill guard: bounce must land at or above entry_low
                 if (order.get("min_ltp") is not None and
-                        ltp >= order["min_ltp"] + bounce_points):
-                    # Bounce confirmed — place real BUY on Kotak
-                    async with self._order_lock:
-                        entry_result = await self._place_entry_order(order, ltp)
-                        if entry_result:
-                            # IOC — assume filled at limit price for now
-                            # Order feed will confirm actual fill
-                            result = await self._fill_order(order, ltp)
-                            filled.append(order)
-                            log.info(
-                                "Real order FILLED (Bounce-back): %s @ %s (Min was %s)",
-                                order["trading_symbol"], ltp, order["min_ltp"],
-                            )
+                        ltp >= order["min_ltp"] + bounce_points and
+                        ltp >= order["entry_low"]):
+                    # Bounce confirmed — mark for fill OUTSIDE the lock
+                    orders_to_fill.append((order, ltp))
 
-            for order in filled + expired:
+            for order in expired:
                 if order in self._pending_orders:
                     self._pending_orders.remove(order)
+
+        # Phase 2: Outside _expiry_lock — BUY + verify (slow, ~1s per order)
+        # _order_lock still serializes concurrent BUY attempts.
+        for order, fill_ltp in orders_to_fill:
+            async with self._order_lock:
+                entry_result = await self._place_entry_order(order, fill_ltp)
+                if entry_result:
+                    kotak_oid = entry_result.get("kotak_order_id", "")
+
+                    # Verify fill via order_history polling
+                    fill_data = await self._verify_fill(kotak_oid, order)
+
+                    if fill_data and fill_data["status"] == "traded":
+                        verified_price = fill_data["fill_price"]
+                        verified_qty   = fill_data["fill_qty"]
+                        result = await self._fill_order(
+                            order, verified_price, filled_qty=verified_qty,
+                        )
+                        log.info(
+                            "Real order FILLED (verified): %s @ %.2f qty=%d (Min was %s)",
+                            order["trading_symbol"], verified_price,
+                            verified_qty, order["min_ltp"],
+                        )
+                    else:
+                        # Fill not confirmed — SAFETY: try to cancel on Kotak
+                        # If cancel succeeds → order wasn't filled, safe to expire
+                        # If cancel fails → order was filled, MUST track it
+                        log.warning(
+                            "BUY not confirmed for %s — attempting cancel on Kotak (order %s)",
+                            order["trading_symbol"], kotak_oid,
+                        )
+                        cancelled = False
+                        if kotak_oid and self.kotak and self.kotak.is_authenticated:
+                            try:
+                                cancel_result = self.kotak.cancel_order(order_id=kotak_oid)
+                                log.info("Cancel result for %s: %s", kotak_oid, cancel_result)
+                                if isinstance(cancel_result, dict) and cancel_result.get("status") == "ok":
+                                    cancelled = True
+                            except Exception:
+                                log.exception("Cancel attempt failed for order %s", kotak_oid)
+
+                        if cancelled:
+                            # Successfully cancelled — safe to mark expired
+                            log.info("Order %s cancelled on Kotak — marking trade expired", kotak_oid)
+                            try:
+                                await db.update_trade(order["trade_id"], {"status": "expired"})
+                                if order.get("pending_order_id"):
+                                    await db.delete_pending_order(order["pending_order_id"])
+                            except Exception:
+                                log.exception("cleanup after cancel failed")
+                            await self._broadcast("order_update", {
+                                "id":          order["trade_id"],
+                                "signal_id":   order.get("signal_id"),
+                                "status":      "expired",
+                                "status_note": "BUY cancelled — order not filled",
+                            })
+                            await self._broadcast("order_alert", {
+                                "level":   "warning",
+                                "message": f"⚠️ BUY cancelled on Kotak: {order['trading_symbol']} (fill unconfirmed)",
+                            })
+                        else:
+                            # Could NOT cancel — order is likely FILLED on exchange
+                            # Re-verify: wait longer and poll order_history again
+                            log.warning(
+                                "Cannot cancel order %s — re-verifying fill for %s",
+                                kotak_oid, order["trading_symbol"],
+                            )
+                            await asyncio.sleep(2)  # Give Kotak API time to settle
+                            fill_data_retry = await self._verify_fill(kotak_oid, order)
+
+                            if fill_data_retry and fill_data_retry["status"] == "traded":
+                                verified_price = fill_data_retry["fill_price"]
+                                verified_qty   = fill_data_retry["fill_qty"]
+                                result = await self._fill_order(
+                                    order, verified_price, filled_qty=verified_qty,
+                                )
+                                log.info(
+                                    "VERIFIED on retry: %s @ %.2f qty=%d — position tracked, SL placed",
+                                    order["trading_symbol"], verified_price, verified_qty,
+                                )
+                                await self._broadcast("order_alert", {
+                                    "level":   "success",
+                                    "message": f"✅ Fill VERIFIED (retry): {order['trading_symbol']} @ ₹{verified_price:.2f}",
+                                })
+                            else:
+                                # Still can't verify — alert user, do NOT abandon
+                                log.error(
+                                    "CRITICAL: Order %s for %s — cannot cancel AND cannot verify. "
+                                    "CHECK KOTAK APP IMMEDIATELY.",
+                                    kotak_oid, order["trading_symbol"],
+                                )
+                                await self._broadcast("order_alert", {
+                                    "level":   "error",
+                                    "message": f"🚨 UNVERIFIED ORDER: {order['trading_symbol']} (#{kotak_oid}) — CHECK KOTAK APP NOW",
+                                })
+                                # Mark as needs_review, NOT expired — so it stays visible
+                                await self._broadcast("order_update", {
+                                    "id":          order["trade_id"],
+                                    "signal_id":   order.get("signal_id"),
+                                    "status_note": f"🚨 Unverified — check Kotak order #{kotak_oid}",
+                                })
+
+                # Remove from pending list (re-acquire lock briefly)
+                async with self._expiry_lock:
+                    if order in self._pending_orders:
+                        self._pending_orders.remove(order)
 
     # ── Position Tick Processor ───────────────────────────────────────────────
 
@@ -667,9 +905,9 @@ class RealTrader:
             price = exit_price or pos.get("current_price", pos["entry_price"])
             pnl   = (price - pos["entry_price"]) * pos["quantity"]
 
-            # 1. Cancel exchange SL order
+            # 1. Cancel exchange SL order (skip if SL already triggered — it's already filled)
             sl_order_id = pos.get("sl_order_id")
-            if sl_order_id:
+            if sl_order_id and exit_reason != "sl":
                 try:
                     await self._kotak_call_with_retry(
                         self.kotak.cancel_order,
@@ -901,6 +1139,47 @@ class RealTrader:
         except Exception:
             log.exception("reconcile_orders failed")
 
+    # ── Cancel a single pending order ─────────────────────────────────────────
+
+    async def cancel_pending_order(self, trade_id: int) -> dict:
+        """Cancel a single pending entry order by trade_id.
+
+        Acquires _expiry_lock — same lock held by on_tick() during the entire
+        pending-order loop (including _place_entry_order + _verify_fill).
+        This guarantees no Kotak BUY can be placed for this order while we
+        are cancelling it.
+        """
+        async with self._expiry_lock:
+            target = None
+            for order in self._pending_orders:
+                if order.get("trade_id") == trade_id:
+                    target = order
+                    break
+
+            if target is None:
+                return {"status": "error", "message": "Pending order not found — may already be filled or expired"}
+
+            # Remove from in-memory list while holding the lock
+            self._pending_orders.remove(target)
+
+        # Outside lock: DB + broadcast (safe — order already removed from list)
+        try:
+            await db.update_trade(trade_id, {"status": "cancelled"})
+            if target.get("pending_order_id"):
+                await db.delete_pending_order(target["pending_order_id"])
+        except Exception:
+            log.exception("cancel_pending_order: db update failed for trade %d", trade_id)
+
+        await self._broadcast("order_update", {
+            "id":          trade_id,
+            "signal_id":   target.get("signal_id"),
+            "status":      "cancelled",
+            "status_note": "Cancelled by user",
+        })
+
+        log.info("Pending order cancelled (real): trade_id=%d symbol=%s", trade_id, target.get("trading_symbol"))
+        return {"status": "ok", "trade_id": trade_id, "trading_symbol": target.get("trading_symbol")}
+
     # ── Kill Switch ───────────────────────────────────────────────────────────
 
     async def square_off_all(self, exit_reason: str = "kill") -> dict:
@@ -968,7 +1247,7 @@ class RealTrader:
                 "entry_high":        t.get("price", 0),
                 "strike":            "",
                 "option_type":       "",
-                "created_at":        datetime.now(timezone.utc),
+                "created_at":        t.get("created_at") or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "min_ltp":           t.get("min_ltp"),
                 "sl_mode":           "signal_trail",
                 "signal_stoploss":   None,

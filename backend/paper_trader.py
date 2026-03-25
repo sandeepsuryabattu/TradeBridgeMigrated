@@ -329,8 +329,11 @@ class PaperTrader:
                     continue
 
                 # ── Bounce-back entry logic (only mode) ──
+                # [FIX #28] Only track min_ltp while LTP is inside entry range.
+                # Previously min_ltp was tracked forever once set, causing fills
+                # at prices far outside the entry band.
                 in_range = order["entry_low"] <= ltp <= order["entry_high"]
-                if in_range or order.get("min_ltp") is not None:
+                if in_range:
                     if order.get("min_ltp") is None or ltp < order["min_ltp"]:
                         order["min_ltp"] = ltp
                         try:
@@ -346,8 +349,10 @@ class PaperTrader:
                         })
 
                 bounce_points = order.get("bounce_points", DEFAULT_BOUNCE_POINTS)
+                # [FIX #28] Fill guard: bounce must land at or above entry_low
                 if (order.get("min_ltp") is not None and
-                        ltp >= order["min_ltp"] + bounce_points):
+                        ltp >= order["min_ltp"] + bounce_points and
+                        ltp >= order["entry_low"]):
                     async with self._timer_lock:
                         if self._timer_state == _TimerState.WAITING_ENTRY:
                             self._timer_state = _TimerState.IN_TRADE
@@ -713,6 +718,46 @@ class PaperTrader:
             "pending_orders":       len(self._pending_orders),
             "total_unrealized_pnl": total_pnl,
         }
+
+    # ── Cancel a single pending order ─────────────────────────────────────────
+
+    async def cancel_pending_order(self, trade_id: int) -> dict:
+        """Cancel a single pending entry order by trade_id.
+
+        Acquires _expiry_lock to prevent race with on_tick() — either:
+        • cancel runs first → order removed → on_tick won't find it
+        • on_tick runs first → order filled/expired → cancel returns error
+        """
+        async with self._expiry_lock:
+            target = None
+            for order in self._pending_orders:
+                if order.get("trade_id") == trade_id:
+                    target = order
+                    break
+
+            if target is None:
+                return {"status": "error", "message": "Pending order not found — may already be filled or expired"}
+
+            # Remove from in-memory list
+            self._pending_orders.remove(target)
+
+        # Outside lock: DB + broadcast (safe — order already removed from list)
+        try:
+            await db.update_trade(trade_id, {"status": "cancelled"})
+            if target.get("pending_order_id"):
+                await db.delete_pending_order(target["pending_order_id"])
+        except Exception:
+            log.exception("cancel_pending_order: db update failed for trade %d", trade_id)
+
+        await self._broadcast("order_update", {
+            "id":          trade_id,
+            "signal_id":   target.get("signal_id"),
+            "status":      "cancelled",
+            "status_note": "Cancelled by user",
+        })
+
+        log.info("Pending order cancelled: trade_id=%d symbol=%s", trade_id, target.get("trading_symbol"))
+        return {"status": "ok", "trade_id": trade_id, "trading_symbol": target.get("trading_symbol")}
 
     # ── Kill switch ───────────────────────────────────────────────────────────
 

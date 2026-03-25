@@ -497,7 +497,7 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
         """INSERT INTO positions
            (trade_id, mode, trading_symbol, strike, option_type,
             quantity, entry_price, max_ltp, trailing_sl, status,
-            sl_gap, sl_points, signal_stoploss,
+            sl_mode, sl_gap, sl_points, signal_stoploss,
             activation_points, trail_gap, sl_activated, exit_reason)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (

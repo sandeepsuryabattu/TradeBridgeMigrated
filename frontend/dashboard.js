@@ -130,12 +130,37 @@ function bindEventListeners() {
     });
 
     $('#btn-confirm-real')?.addEventListener('click', () => {
-        setMode('real');
+        const totpInput = $('#totp-real-input');
+        const totp = totpInput?.value.trim() || '';
+        if (totp.length !== 6 || !/^\d{6}$/.test(totp)) {
+            toast('Enter a valid 6-digit TOTP code', 'warning');
+            if (totpInput) totpInput.focus();
+            return;
+        }
+        setMode('real', totp);
         $('#confirm-real-modal').style.display = 'none';
+        if (totpInput) totpInput.value = '';
     });
     $('#btn-cancel-real')?.addEventListener('click', () => {
         $('#confirm-real-modal').style.display = 'none';
+        const totpInput = $('#totp-real-input');
+        if (totpInput) totpInput.value = '';
     });
+
+    // Blocked mode switch modal buttons
+    let _blockedSwitchTarget = 'paper';
+    $('#btn-stay-real')?.addEventListener('click', () => {
+        $('#blocked-mode-modal').style.display = 'none';
+    });
+    $('#btn-kill-and-switch')?.addEventListener('click', async () => {
+        const btn = $('#btn-kill-and-switch');
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ Killing…'; }
+        await setMode(_blockedSwitchTarget, null, true);
+        $('#blocked-mode-modal').style.display = 'none';
+        if (btn) { btn.disabled = false; btn.textContent = '🛑 Kill All & Switch'; }
+    });
+    // Expose setter so setMode() can store the target mode
+    window._setBlockedSwitchTarget = (mode) => { _blockedSwitchTarget = mode; };
 
     $('#btn-clear')?.addEventListener('click', () => {
         // Reset modal state — no selection, confirm disabled
@@ -200,6 +225,19 @@ function bindEventListeners() {
         if (e.target.classList.contains('modal-overlay')) {
             e.target.style.display = 'none';
         }
+    });
+
+    // Cancel pending order — event delegation for dynamically rendered buttons
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('.btn-cancel-pending');
+        if (!btn) return;
+        e.stopPropagation();
+        const tradeId  = parseInt(btn.dataset.tradeId);
+        const signalId = parseInt(btn.dataset.signalId);
+        if (!tradeId) return;
+        btn.disabled    = true;
+        btn.textContent = '⏳';
+        cancelPendingOrder(tradeId, signalId);
     });
 
     // Panel Toggle Logic
@@ -387,6 +425,15 @@ function handleWSMessage(msg) {
                         }
                     }
 
+                    // Pending trade — show cancel button on the signal card
+                    if (primaryTrade.status === 'pending' && primaryTrade.signal_id) {
+                        const sigIdx = state.signals.findIndex(s => s.id === primaryTrade.signal_id);
+                        if (sigIdx !== -1) {
+                            state.signals[sigIdx].trade_status = 'pending';
+                            renderSignals();
+                        }
+                    }
+
                     renderTradesDebounced();
                     const tradeStatus = primaryTrade.status || 'pending';
                     toast(`Trade ${tradeStatus}: ${primaryTrade.trading_symbol || msg.data.trading_symbol || ''}`, tradeStatus === 'filled' ? 'success' : 'info');
@@ -471,6 +518,14 @@ function handleWSMessage(msg) {
                 toast(state.stopTrading ? '⏸ Trading STOPPED — signals ignored' : '▶ Trading RESUMED', state.stopTrading ? 'warning' : 'success');
                 break;
 
+            case 'order_alert': {
+                const level   = msg.data.level || 'info';
+                const alertMsg = msg.data.message || 'Order alert';
+                const typeMap = { error: 'error', warning: 'warning', success: 'success', info: 'info' };
+                toast(alertMsg, typeMap[level] || 'info');
+                break;
+            }
+
             case 'pong':
                 healthState.lastPong = Date.now();
                 break;
@@ -533,18 +588,27 @@ async function fetchInitialData() {
     }
 }
 
-async function setMode(mode) {
+async function setMode(mode, totp = null, force = false) {
     try {
+        const body = { mode, force };
+        if (totp) body.totp = totp;
         const res  = await fetch(`${API_BASE}/api/mode`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode }),
+            body: JSON.stringify(body),
         });
         const data = await res.json();
         if (data.status === 'ok') {
             state.mode = mode;
             updateModeUI();
             toast(`Switched to ${mode.toUpperCase()} mode`, mode === 'real' ? 'warning' : 'success');
+        } else if (data.status === 'blocked') {
+            // Show blocked modal with trade counts
+            const msg = `You have <strong>${data.open_positions}</strong> open position(s) and <strong>${data.pending_orders}</strong> pending order(s) in Real mode.`;
+            const msgEl = $('#blocked-mode-msg');
+            if (msgEl) msgEl.innerHTML = msg;
+            window._setBlockedSwitchTarget(mode);
+            $('#blocked-mode-modal').style.display = 'flex';
         } else {
             toast(data.message || 'Failed to switch mode', 'error');
         }
@@ -617,6 +681,27 @@ async function exitPosition(positionId) {
             toast(data.message || 'Failed to exit position', 'error');
         }
     } catch { toast('Exit failed', 'error'); }
+}
+
+async function cancelPendingOrder(tradeId, signalId) {
+    try {
+        const res  = await fetch(`${API_BASE}/api/orders/${tradeId}/cancel`, { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            toast(`Cancelled: ${data.trading_symbol || 'pending order'}`, 'info');
+            // Update local signal state immediately (WS broadcast will also arrive)
+            if (signalId) {
+                const sigIdx = state.signals.findIndex(s => s.id === signalId);
+                if (sigIdx !== -1) {
+                    state.signals[sigIdx].trade_status = 'cancelled';
+                    state.signals[sigIdx].status_note  = 'Cancelled by user';
+                    renderSignals();
+                }
+            }
+        } else {
+            toast(data.message || 'Cancel failed', 'error');
+        }
+    } catch { toast('Cancel request failed', 'error'); }
 }
 
 async function setLotSize() {
@@ -809,7 +894,9 @@ function deriveSignalTradeStatuses() {
     });
 
     // Map trade statuses → signal trade_status labels
+    // [FIX #30] Added 'pending' mapping so cancel button shows on page reload
     const TRADE_TO_SIGNAL = {
+        'pending':   'pending',
         'filled':    'filled',
         'open':      'filled',
         'closed':    'closed',
@@ -1127,12 +1214,20 @@ function renderSignals() {
             // (pending fill, filled, cancelled, stopped, replaced, etc.) — hide the timer.
             const showTimer = isValid && timerStart && !tradeStatus;
 
+            // Find the trade_id for this signal (needed for cancel button)
+            const signalTrade = state.trades.find(t => t.signal_id === s.id && t.status === 'pending');
+            const cancelTradeId = signalTrade ? (signalTrade.trade_id || signalTrade.id) : null;
+            const showCancel = tradeStatus === 'pending' && cancelTradeId;
+
             const cardHtml = `
                 <div style="display:flex;justify-content:space-between;align-items:start;">
                     <span class="signal-status ${status}">${status}</span>
                     <div style="display:flex;gap:6px;align-items:center;">
                         ${showTimer
                             ? `<span class="timer-tag" data-timer-start="${timerStart}" data-timer-mins="${entryMins}" data-timer-label="Entry" data-trade-status="${tradeStatus}">⏳ Entry: --:--</span>`
+                            : ''}
+                        ${showCancel
+                            ? `<button class="btn-cancel-pending" data-trade-id="${cancelTradeId}" data-signal-id="${s.id}" title="Cancel pending entry">✕ Cancel</button>`
                             : ''}
                         ${tradeStatus && tradeStatus !== 'valid' ? `<span class="signal-status ${tradeStatus}">${tradeStatus}</span>` : ''}
                     </div>
@@ -1487,8 +1582,16 @@ async function fetchBalance() {
             // Check for Kotak bridge errors (limits() may not work outside market hours)
             const bridgeErr = limitsData.errMsg || limitsData.stat || '';
             if (bridgeErr.includes('bridge') || bridgeErr.includes('error out')) {
-                balEl.textContent = '✓ Authenticated';
-                balEl.title = 'Kotak authenticated. Balance unavailable outside market hours.';
+                // Show cached balance if we have one, otherwise show market closed
+                const cached = localStorage.getItem('kotak_last_balance');
+                if (cached) {
+                    const amt = parseFloat(cached);
+                    balEl.textContent = `₹${amt.toLocaleString('en-IN', {maximumFractionDigits: 0})} 🔒`;
+                    balEl.title = `Last known balance: ₹${amt.toLocaleString('en-IN')}. Live balance unavailable — market closed.`;
+                } else {
+                    balEl.textContent = '✓ Market Closed';
+                    balEl.title = 'Kotak authenticated. Balance unavailable outside market hours.';
+                }
                 return;
             }
             let available = null;
@@ -1508,11 +1611,19 @@ async function fetchBalance() {
             }
             if (available !== null && !isNaN(available) && available > 0) {
                 state.kotakBalance = available;
+                localStorage.setItem('kotak_last_balance', String(available));
                 balEl.textContent = `₹${available.toLocaleString('en-IN', {maximumFractionDigits: 0})}`;
                 balEl.title = 'Kotak Available Margin';
             } else {
-                balEl.textContent = '✓ Authenticated';
-                balEl.title = 'Balance data not available in this session.';
+                const cached = localStorage.getItem('kotak_last_balance');
+                if (cached) {
+                    const amt = parseFloat(cached);
+                    balEl.textContent = `₹${amt.toLocaleString('en-IN', {maximumFractionDigits: 0})} 🔒`;
+                    balEl.title = `Last known: ₹${amt.toLocaleString('en-IN')}. Live data not available right now.`;
+                } else {
+                    balEl.textContent = '✓ Authenticated';
+                    balEl.title = 'Balance data not available in this session.';
+                }
                 console.log('Balance response:', limitsData);
             }
         } else if (data.status === 'error') {
