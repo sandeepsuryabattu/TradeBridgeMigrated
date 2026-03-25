@@ -32,6 +32,34 @@ class KotakTrader:
         self._last_login: Optional[datetime] = None
         self._last_error: Optional[str] = None
 
+
+    @staticmethod
+    def _iter_dicts(obj):
+        if isinstance(obj, dict):
+            yield obj
+            for v in obj.values():
+                yield from KotakTrader._iter_dicts(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                yield from KotakTrader._iter_dicts(item)
+
+    @classmethod
+    def _extract_error_message(cls, payload) -> Optional[str]:
+        if not isinstance(payload, (dict, list)):
+            return None
+
+        for d in cls._iter_dicts(payload):
+            if d.get("status") == "error":
+                return str(d.get("message") or "Unknown error")
+            if d.get("error") or d.get("Error") or d.get("Error Message"):
+                return str(d.get("error") or d.get("Error") or d.get("Error Message"))
+
+            stat = str(d.get("stat", "")).strip().lower()
+            if stat in ("not_ok", "not ok", "notok"):
+                return str(d.get("errMsg") or d.get("message") or "Kotak returned Not_Ok")
+
+        return None
+
     # ── Authentication ──
 
     def initialize(self):
@@ -170,6 +198,17 @@ class KotakTrader:
         except Exception as e:
             log.error(f"Unsubscribe failed: {e}")
 
+    def subscribe_order_feed(self) -> dict:
+        """Subscribe to Kotak order-feed websocket events."""
+        if not self.client or not self.is_authenticated:
+            return {"status": "error", "message": "Not authenticated"}
+        try:
+            self.client.subscribe_to_orderfeed()
+            return {"status": "ok"}
+        except Exception as e:
+            log.error(f"Order-feed subscribe failed: {e}")
+            return {"status": "error", "message": str(e)}
+
     # ── Order Management ──
 
     def place_order(
@@ -207,6 +246,9 @@ class KotakTrader:
                 tag=tag,
             )
             log.info(f"Order placed: {result}")
+            err = self._extract_error_message(result)
+            if err:
+                return {"status": "error", "message": err, "data": result}
             return {"status": "ok", "data": result}
         except Exception as e:
             log.error(f"Order placement failed: {e}")
@@ -242,6 +284,9 @@ class KotakTrader:
                 transaction_type=transaction_type,
             )
             log.info(f"Order modified: {result}")
+            err = self._extract_error_message(result)
+            if err:
+                return {"status": "error", "message": err, "data": result}
             return {"status": "ok", "data": result}
         except Exception as e:
             log.error(f"Order modification failed: {e}")
@@ -249,10 +294,13 @@ class KotakTrader:
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an existing order."""
-        if not self.client:
+        if not self.client or not self.is_authenticated:
             return {"status": "error", "message": "Not authenticated"}
         try:
             result = self.client.cancel_order(order_id=order_id)
+            err = self._extract_error_message(result)
+            if err:
+                return {"status": "error", "message": err, "data": result}
             return {"status": "ok", "data": result}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -263,6 +311,9 @@ class KotakTrader:
             return {"status": "error", "message": "Not authenticated"}
         try:
             result = self.client.order_history(order_id=order_id)
+            err = self._extract_error_message(result)
+            if err:
+                return {"status": "error", "message": err, "data": result}
             return {"status": "ok", "data": result}
         except Exception as e:
             log.error(f"Order history failed: {e}")
@@ -274,6 +325,9 @@ class KotakTrader:
             return {"status": "error", "message": "Not authenticated"}
         try:
             result = self.client.limits(segment="ALL", exchange="ALL", product="ALL")
+            err = self._extract_error_message(result)
+            if err:
+                return {"status": "error", "message": err, "data": result}
             return {"status": "ok", "data": result}
         except Exception as e:
             log.error(f"Get limits failed: {e}")

@@ -870,3 +870,147 @@ class TestTripleNestedProductionFormat:
         assert result["status"] == "traded"
         assert result["fill_price"] == 349.75
         assert result["fill_qty"] == 20
+
+
+class TestRealResponseSafety:
+    """Additional regressions for nested broker responses and safety paths."""
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_place_order_missing_nordno_is_treated_as_failure(self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy):
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+
+        # BUY accept response missing nOrdNo
+        mock_kotak.place_order.return_value = {"status": "ok", "data": {"stat": "Ok"}}
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
+
+        symbol = rt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        await rt.on_tick("12345", 148.0, tick)
+        await rt.on_tick("12345", 153.0, tick)
+
+        # No position must be created when broker order id is missing
+        assert len(rt._open_positions) == 0
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_cancel_not_ok_not_treated_as_cancelled(self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy):
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+
+        # BUY placement ok with order id
+        mock_kotak.place_order.return_value = {"status": "ok", "data": {"nOrdNo": "ORD001"}}
+        # Fill remains pending so cancel path triggers
+        mock_kotak.order_history.return_value = {
+            "status": "ok",
+            "data": {"data": [{"nOrdNo": "ORD001", "ordSt": "pending"}]},
+        }
+        # Cancel wrapper ok but broker says Not_Ok
+        mock_kotak.cancel_order.return_value = {
+            "status": "ok",
+            "data": {"stat": "Not_Ok", "errMsg": "Order already executed"},
+        }
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
+
+        symbol = rt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        await rt.on_tick("12345", 148.0, tick)
+        await rt.on_tick("12345", 153.0, tick)
+
+        # Should NOT mark expired via false "cancelled" assumption
+        expired_calls = [c for c in mock_db.update_trade.call_args_list if c.args[1].get("status") == "expired"]
+        assert len(expired_calls) == 0
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_order_feed_complete_closes_sl_position(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 140.0,
+            "quantity": 20, "pnl": -200.0,
+            "max_ltp": 155.0, "trailing_sl": 140.0,
+            "sl_activated": True, "activation_points": 5.0,
+            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "exit_timer_mins": 10, "exit_slippage": 1.0,
+            "opened_at": datetime.now(timezone.utc),
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+
+        await rt.handle_order_feed({
+            "data": {"nOrdNo": "SL001", "ordSt": "complete", "flPrc": "139.50"}
+        })
+
+        assert len(rt._open_positions) == 0
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_reconcile_orders_parses_nested_order_book(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.update_position = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 148.0,
+            "quantity": 20, "trailing_sl": 140.0,
+            "sl_order_id": "SL001",
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+
+        # Nested production-like order_report shape
+        mock_kotak.get_order_book.return_value = {
+            "stat": "Ok",
+            "data": {
+                "data": [
+                    {"nOrdNo": "SL001", "ordSt": "trigger pending"}
+                ]
+            }
+        }
+
+        await rt.reconcile_orders()
+
+        # SL exists; no replacement order should be placed
+        mock_kotak.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_close_position_marks_trade_closed(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 148.0,
+            "quantity": 20, "pnl": -40.0,
+            "max_ltp": 150.0, "trailing_sl": 140.0,
+            "sl_activated": False, "activation_points": 5.0,
+            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "exit_timer_mins": 10, "exit_slippage": 1.0,
+            "opened_at": datetime.now(timezone.utc),
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+
+        await rt.close_position(100, exit_price=148.0, exit_reason="timer")
+
+        assert mock_db.update_trade.called
+        payload = mock_db.update_trade.call_args_list[-1].args[1]
+        assert payload.get("status") == "closed"

@@ -58,6 +58,7 @@ class MarketFeed:
         self._subscriptions:       dict[str, dict]  = {}
         self._tick_callbacks:      list[Callable]   = []
         self._raw_tick_callbacks:  list[Callable]   = []
+        self._order_callbacks:     list[Callable]   = []
         self._running              = False
         self._tick_buffer:         list[dict]       = []
         self._loop:                asyncio.AbstractEventLoop | None = None
@@ -85,6 +86,10 @@ class MarketFeed:
     def add_raw_tick_callback(self, callback: Callable):
         if callback not in self._raw_tick_callbacks:
             self._raw_tick_callbacks.append(callback)
+
+    def add_order_callback(self, callback: Callable):
+        if callback not in self._order_callbacks:
+            self._order_callbacks.append(callback)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -117,6 +122,12 @@ class MarketFeed:
                 on_close=self._on_close,
                 on_open=self._on_open,
             )
+
+            # Also subscribe order-feed so SL triggers/rejections are handled live.
+            of_result = self.kotak.subscribe_order_feed()
+            if isinstance(of_result, dict) and of_result.get("status") != "ok":
+                log.warning("Order-feed subscribe issue: %s", of_result.get("message"))
+
             self._running = True
             log.info("Market feed: callbacks registered, SDK will maintain connection")
 
@@ -217,17 +228,40 @@ class MarketFeed:
 
     # ── Kotak SDK Callbacks ───────────────────────────────────────────────────
 
+    def _dispatch_order_event(self, payload: dict):
+        if not isinstance(payload, dict):
+            return
+        if not self._order_callbacks:
+            return
+        for cb in self._order_callbacks:
+            if self._loop and not self._loop.is_closed():
+                asyncio.run_coroutine_threadsafe(cb({"data": payload}), self._loop)
+
     def _on_message(self, message):
         try:
             if isinstance(message, list):
                 for tick in message:
                     self._process_tick(tick)
-            elif isinstance(message, dict):
-                if "data" in message and isinstance(message["data"], list):
-                    for tick in message["data"]:
-                        self._process_tick(tick)
-                else:
-                    self._process_tick(message)
+                return
+
+            if not isinstance(message, dict):
+                return
+
+            # Order-feed payloads: either top-level {nOrdNo, ordSt,...}
+            # or nested under {"data": {...}}.
+            data = message.get("data")
+            if isinstance(data, dict) and (data.get("nOrdNo") or data.get("ordSt")):
+                self._dispatch_order_event(data)
+                return
+            if message.get("nOrdNo") or message.get("ordSt"):
+                self._dispatch_order_event(message)
+                return
+
+            if isinstance(data, list):
+                for tick in data:
+                    self._process_tick(tick)
+            else:
+                self._process_tick(message)
         except Exception:
             log.exception("Error processing tick message")  # [FIX #23]
 

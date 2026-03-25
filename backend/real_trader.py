@@ -79,21 +79,61 @@ class RealTrader:
                 log.exception("RealTrader broadcast error")
 
     @staticmethod
-    def _extract_order_id(result: dict) -> str:
-        """Extract nOrdNo from Kotak wrapper: {status:ok, data:{data:{nOrdNo:...}}}.
+    def _iter_dicts(obj):
+        if isinstance(obj, dict):
+            yield obj
+            for v in obj.values():
+                yield from RealTrader._iter_dicts(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                yield from RealTrader._iter_dicts(item)
 
-        The kotak_trader wrapper adds one level of {status, data} around the
-        SDK response, which itself returns {data: {nOrdNo: ...}}.  This helper
-        drills through both levels reliably.
-        """
-        if not isinstance(result, dict):
+    @classmethod
+    def _extract_broker_error(cls, payload) -> Optional[str]:
+        if not isinstance(payload, (dict, list)):
+            return None
+
+        for d in cls._iter_dicts(payload):
+            if d.get("status") == "error":
+                return str(d.get("message") or "Unknown error")
+            if d.get("error") or d.get("Error") or d.get("Error Message"):
+                return str(d.get("error") or d.get("Error") or d.get("Error Message"))
+
+            stat = str(d.get("stat", "")).strip().lower()
+            if stat in ("not_ok", "not ok", "notok"):
+                return str(d.get("errMsg") or d.get("message") or "Kotak returned Not_Ok")
+
+        return None
+
+    @classmethod
+    def _extract_order_rows(cls, payload) -> list[dict]:
+        if not isinstance(payload, (dict, list)):
+            return []
+
+        for d in cls._iter_dicts(payload):
+            rows = d.get("data") if isinstance(d, dict) else None
+            if not isinstance(rows, list):
+                continue
+            if not rows:
+                continue
+            if not all(isinstance(r, dict) for r in rows):
+                continue
+            if any(("ordSt" in r) or ("nOrdNo" in r) for r in rows):
+                return rows
+
+        return []
+
+    @classmethod
+    def _extract_order_id(cls, result: dict) -> str:
+        """Extract the first non-empty broker order id from a nested payload."""
+        if not isinstance(result, (dict, list)):
             return ""
-        d = result.get("data", result)
-        if isinstance(d, dict):
-            inner = d.get("data", d)
-            if isinstance(inner, dict):
-                return str(inner.get("nOrdNo", ""))
-            return str(d.get("nOrdNo", ""))
+
+        for d in cls._iter_dicts(result):
+            oid = d.get("nOrdNo")
+            if oid is not None and str(oid).strip():
+                return str(oid).strip()
+
         return ""
 
     # ── Symbol Resolution ─────────────────────────────────────────────────────
@@ -248,15 +288,9 @@ class RealTrader:
         for attempt in range(1, MAX_ORDER_RETRIES + 1):
             try:
                 result = fn(**kwargs)
-                if isinstance(result, dict) and result.get("status") == "error":
-                    raise Exception(result.get("message", "Unknown error"))
-                if isinstance(result, dict) and (result.get("Error") or result.get("Error Message")):
-                    raise Exception(str(result.get("Error") or result.get("Error Message")))
-                # Detect Kotak's {"stat": "Not_Ok", "errMsg": "..."} error format
-                if isinstance(result, dict):
-                    inner = result.get("data", result)
-                    if isinstance(inner, dict) and inner.get("stat") == "Not_Ok":
-                        raise Exception(inner.get("errMsg") or "Kotak returned Not_Ok")
+                err = self._extract_broker_error(result)
+                if err:
+                    raise Exception(err)
                 return result
             except Exception as e:
                 log.error("%s failed (attempt %d/%d): %s", description, attempt, MAX_ORDER_RETRIES, e)
@@ -295,6 +329,8 @@ class RealTrader:
             )
 
             kotak_order_id = self._extract_order_id(result)
+            if not kotak_order_id:
+                raise Exception("Kotak place_order response missing nOrdNo")
 
             await db.update_trade(order["trade_id"], {"kotak_order_id": kotak_order_id})
 
@@ -349,24 +385,18 @@ class RealTrader:
                 if not hist or not isinstance(hist, dict):
                     continue
 
-                # Actual Kotak response is TRIPLE nested:
-                # {"status":"ok","data":{"data":{"stat":"Ok","data":[{...},{...}]}}}
-                # Level 1: kotak_trader wrapper  → hist["data"]
-                # Level 2: SDK wrapper           → ["data"]["data"]
-                # Level 3: inner stat+data       → ["data"]["data"]["data"] = [order entries]
-                raw_l1 = hist.get("data", {})
-                raw_l2 = raw_l1.get("data", raw_l1) if isinstance(raw_l1, dict) else raw_l1
-                if isinstance(raw_l2, dict):
-                    data_list = raw_l2.get("data", [])
-                else:
-                    data_list = raw_l2
-                if isinstance(data_list, dict):
-                    data_list = [data_list]
-                if not isinstance(data_list, list) or not data_list:
+                hist_err = self._extract_broker_error(hist)
+                if hist_err:
+                    log.warning("_verify_fill poll %d: order_history error: %s", attempt, hist_err)
                     continue
 
-                # First entry [0] is the MOST RECENT status (newest first)
-                latest = data_list[0]
+                data_list = self._extract_order_rows(hist)
+                if not data_list:
+                    continue
+
+                # Prefer entry matching this order id if present, else newest row.
+                matching = [r for r in data_list if str(r.get("nOrdNo", "")).strip() == str(kotak_order_id)]
+                latest = matching[0] if matching else data_list[0]
                 status = str(latest.get("ordSt", "")).lower().strip()
 
                 log.info(
@@ -375,7 +405,7 @@ class RealTrader:
                     latest.get("avgPrc"), latest.get("fldQty"),
                 )
 
-                if status in ("traded", "complete"):
+                if status in ("traded", "complete", "completed"):
                     # avgPrc = actual exchange fill price, fldQty = filled quantity
                     fill_price = float(latest.get("avgPrc", 0) or latest.get("flPrc", 0) or 0)
                     fill_qty   = int(latest.get("fldQty", 0) or latest.get("flQty", 0) or 0)
@@ -452,6 +482,8 @@ class RealTrader:
             )
 
             sl_order_id = self._extract_order_id(result)
+            if not sl_order_id:
+                raise Exception("Kotak SL place_order response missing nOrdNo")
 
             await db.update_position(pos["id"], {"sl_order_id": sl_order_id})
             pos["sl_order_id"] = sl_order_id
@@ -752,7 +784,10 @@ class RealTrader:
                             try:
                                 cancel_result = self.kotak.cancel_order(order_id=kotak_oid)
                                 log.info("Cancel result for %s: %s", kotak_oid, cancel_result)
-                                if isinstance(cancel_result, dict) and cancel_result.get("status") == "ok":
+                                cancel_err = self._extract_broker_error(cancel_result)
+                                if cancel_err:
+                                    log.warning("Cancel rejected for %s: %s", kotak_oid, cancel_err)
+                                else:
                                     cancelled = True
                             except Exception:
                                 log.exception("Cancel attempt failed for order %s", kotak_oid)
@@ -954,6 +989,7 @@ class RealTrader:
                     **({  "exit_reason": exit_reason} if exit_reason else {}),
                 })
                 await db.update_trade(pos["trade_id"], {
+                    "status":     "closed",
                     "pnl":        pnl,
                     "exit_price": price,
                     "closed_at":  closed_at,
@@ -1066,7 +1102,7 @@ class RealTrader:
             return
 
         # Check if this is an SL order that got triggered (traded)
-        if status == "traded":
+        if status in ("traded", "complete", "completed"):
             for pos in list(self._open_positions):
                 if pos.get("sl_order_id") == order_id and pos.get("status") != "closed":
                     fill_price = float(data.get("flPrc", pos.get("trailing_sl", 0)))
@@ -1109,14 +1145,20 @@ class RealTrader:
             if not order_book or not isinstance(order_book, dict):
                 return
 
-            orders = order_book.get("data", [])
+            orders = self._extract_order_rows(order_book)
+            if not orders and isinstance(order_book, dict):
+                raw_orders = order_book.get("data", [])
+                if isinstance(raw_orders, list):
+                    orders = raw_orders
             if not isinstance(orders, list):
                 return
 
             active_order_ids = {
                 str(o.get("nOrdNo", ""))
                 for o in orders
-                if str(o.get("ordSt", "")).lower() in ("pending", "trigger pending", "open")
+                if str(o.get("ordSt", "")).lower() in (
+                    "pending", "trigger pending", "open", "open pending", "validation pending"
+                )
             }
 
             for pos in list(self._open_positions):

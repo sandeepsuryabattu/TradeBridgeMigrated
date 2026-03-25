@@ -58,6 +58,7 @@ class TradeManager:
         self.market_feed = MarketFeed(self.kotak)
         self.paper_trader = PaperTrader(self.market_feed)
         self.real_trader = RealTrader(self.kotak, self.market_feed)
+        self.market_feed.add_order_callback(self.real_trader.handle_order_feed)
         self.contract_master = ContractMaster()
         self.lot_size = int(Config.DEFAULT_LOT_SIZE)
 
