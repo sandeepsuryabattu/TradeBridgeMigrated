@@ -300,16 +300,22 @@ class RealTrader:
         delay_s: float = ORDER_RETRY_DELAY_S,
         **kwargs,
     ) -> dict:
-        """Call a Kotak API function with retry + error broadcasting."""
+        """Call a Kotak API function with retry + error broadcasting.
+
+        Runs the sync broker function in a worker thread to avoid blocking the event loop.
+        """
         for attempt in range(1, retries + 1):
             try:
-                result = fn(**kwargs)
+                result = await asyncio.to_thread(fn, **kwargs)
                 err = self._extract_broker_error(result)
                 if err:
                     raise Exception(err)
                 return result
             except Exception as e:
-                log.error("%s failed (attempt %d/%d): %s", description, attempt, retries, e)
+                log.error(
+                    "%s failed (attempt %d/%d): %s",
+                    description, attempt, retries, e,
+                )
                 if attempt < retries:
                     await asyncio.sleep(delay_s)
                 else:
@@ -393,7 +399,9 @@ class RealTrader:
         for attempt in range(1, FILL_VERIFY_POLLS + 1):
             await asyncio.sleep(FILL_VERIFY_INTERVAL_S)
             try:
-                hist = self.kotak.order_history(order_id=kotak_order_id)
+                hist = await asyncio.to_thread(
+                    self.kotak.order_history, order_id=kotak_order_id
+                )
                 log.info(
                     "_verify_fill poll %d/%d for %s: raw response = %s",
                     attempt, FILL_VERIFY_POLLS, kotak_order_id, hist,
@@ -422,14 +430,18 @@ class RealTrader:
                 )
 
                 if status in ("traded", "complete", "completed"):
-                    # avgPrc = actual exchange fill price, fldQty = filled quantity
                     fill_price = float(latest.get("avgPrc", 0) or latest.get("flPrc", 0) or 0)
                     fill_qty   = int(latest.get("fldQty", 0) or latest.get("flQty", 0) or 0)
 
                     if fill_price <= 0:
                         fill_price = float(latest.get("prc", 0)) or order.get("price", 0)
+
                     if fill_qty <= 0:
-                        fill_qty = order["quantity"]
+                        log.error(
+                            "verify_fill: non-positive filled quantity for %s (order %s)",
+                            order["trading_symbol"], kotak_order_id,
+                        )
+                        return None
 
                     log.info(
                         "Fill VERIFIED: %s — status=%s, fill_price=%.2f, fill_qty=%d (poll %d/%d)",
@@ -473,7 +485,6 @@ class RealTrader:
             ),
         })
         return None
-
 
     def _resolve_entry_fill_waiter(self, order_id: str, payload: dict):
         fut = self._entry_fill_waiters.get(str(order_id))
@@ -585,9 +596,10 @@ class RealTrader:
             return poll_result
 
         finally:
-            current = self._entry_fill_waiters.get(str(kotak_order_id))
+            key = str(kotak_order_id)
+            current = self._entry_fill_waiters.get(key)
             if current is waiter:
-                self._entry_fill_waiters.pop(str(kotak_order_id), None)
+                self._entry_fill_waiters.pop(key, None)
             if not poll_task.done():
                 poll_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -695,7 +707,9 @@ class RealTrader:
     async def _fill_order(self, order: dict, fill_price: float, filled_qty: int = None) -> dict:
         """Open a position after entry fill, place exchange SL order."""
         trade_id = order.get("trade_id")
-        qty = filled_qty or order["quantity"]
+        if filled_qty is None or filled_qty <= 0:
+            raise ValueError(f"Invalid filled_qty for trade {trade_id}: {filled_qty}")
+        qty = filled_qty
 
         # Calculate initial SL
         initial_sl_source = order.get("signal_trail_initial_sl", "telegram")
@@ -902,7 +916,9 @@ class RealTrader:
                 if (order.get("min_ltp") is not None and
                         ltp >= order["min_ltp"] + bounce_points and
                         ltp >= order["entry_low"]):
-                    # Bounce confirmed — mark for fill OUTSIDE the lock
+                    # Bounce confirmed — remove from pending and mark for fill
+                    if order in self._pending_orders:
+                        self._pending_orders.remove(order)
                     orders_to_fill.append((order, ltp))
 
             for order in expired:
@@ -934,8 +950,6 @@ class RealTrader:
                         )
                     else:
                         # Fill not confirmed — SAFETY: try to cancel on Kotak
-                        # If cancel succeeds → order wasn't filled, safe to expire
-                        # If cancel fails → order was filled, MUST track it
                         log.warning(
                             "BUY not confirmed for %s — attempting cancel on Kotak (order %s)",
                             order["trading_symbol"], kotak_oid,
@@ -943,7 +957,9 @@ class RealTrader:
                         cancelled = False
                         if kotak_oid and self.kotak and self.kotak.is_authenticated:
                             try:
-                                cancel_result = self.kotak.cancel_order(order_id=kotak_oid)
+                                cancel_result = await asyncio.to_thread(
+                                    self.kotak.cancel_order, order_id=kotak_oid
+                                )
                                 log.info("Cancel result for %s: %s", kotak_oid, cancel_result)
                                 cancel_err = self._extract_broker_error(cancel_result)
                                 if cancel_err:
@@ -1014,21 +1030,17 @@ class RealTrader:
                                     "status_note": f"🚨 Unverified — check Kotak order #{kotak_oid}",
                                 })
 
-                # Remove from pending list (re-acquire lock briefly)
-                async with self._expiry_lock:
-                    if order in self._pending_orders:
-                        self._pending_orders.remove(order)
-
-
     async def _verify_exit_fill(self, kotak_order_id: str, pos: dict) -> Optional[dict]:
         """Verify IOC SELL fill before marking a position closed."""
         if not kotak_order_id or not self.kotak or not self.kotak.is_authenticated:
             return None
 
-        for _ in range(1, FILL_VERIFY_POLLS + 1):
+        for attempt in range(1, FILL_VERIFY_POLLS + 1):
             await asyncio.sleep(FILL_VERIFY_INTERVAL_S)
             try:
-                hist = self.kotak.order_history(order_id=kotak_order_id)
+                hist = await asyncio.to_thread(
+                    self.kotak.order_history, order_id=kotak_order_id
+                )
                 if not hist or not isinstance(hist, dict):
                     continue
 
@@ -1045,10 +1057,26 @@ class RealTrader:
                 status = str(latest.get('ordSt', '')).lower().strip()
 
                 if status in ('traded', 'complete', 'completed'):
-                    fill_price = float(latest.get('avgPrc', 0) or latest.get('flPrc', 0) or latest.get('prc', 0) or pos.get('current_price', 0) or 0)
-                    fill_qty = int(latest.get('fldQty', 0) or latest.get('flQty', 0) or latest.get('qty', 0) or pos.get('quantity', 0) or 0)
+                    fill_price = float(
+                        latest.get('avgPrc', 0)
+                        or latest.get('flPrc', 0)
+                        or latest.get('prc', 0)
+                        or pos.get('current_price', 0)
+                        or 0
+                    )
+                    fill_qty = int(
+                        latest.get('fldQty', 0)
+                        or latest.get('flQty', 0)
+                        or latest.get('qty', 0)
+                        or pos.get('quantity', 0)
+                        or 0
+                    )
                     if fill_qty <= 0:
-                        fill_qty = int(pos.get('quantity', 0) or 0)
+                        log.error(
+                            "verify_exit_fill: non-positive filled quantity for %s (order %s)",
+                            pos.get("trading_symbol"), kotak_order_id,
+                        )
+                        return None
                     return {
                         'status': 'traded',
                         'fill_price': fill_price,
@@ -1201,7 +1229,9 @@ class RealTrader:
                         return {"status": "error", "message": "Exit SELL unverified", "order_id": sell_order_id}
 
                     exchange_exit_confirmed = True
-                    price = float(sell_fill.get("fill_price", price) or price)
+                    fill_px = float(sell_fill.get("fill_price") or 0)
+                    if fill_px > 0:
+                        price = fill_px
                     pnl = (price - pos["entry_price"]) * pos["quantity"]
                     await self._broadcast("order_update", {
                         "id":          pos.get("trade_id"),
@@ -1216,6 +1246,10 @@ class RealTrader:
                     return {"status": "error", "message": "Exit SELL failed"}
 
             # 3. Update DB (only after exchange exit is confirmed)
+            if not exchange_exit_confirmed:
+                # Safety: do not mark DB closed if broker exit isn't confirmed
+                return {"status": "error", "message": "Exchange exit not confirmed"}
+
             closed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             await db.update_position(position_id, {
                 "status":        "closed",
@@ -1316,12 +1350,13 @@ class RealTrader:
 
     async def check_eod(self):
         """Auto-close all positions before market close (DAY SL orders expire at close)."""
-        now_ist = datetime.now(_IST).time()
-        eod_time = dt_time(
-            _MARKET_CLOSE.hour,
-            _MARKET_CLOSE.minute - EOD_EXIT_MINUTES_BEFORE,
+        now_ist_dt = datetime.now(_IST)
+        market_close_dt = now_ist_dt.replace(
+            hour=_MARKET_CLOSE.hour, minute=_MARKET_CLOSE.minute, second=0, microsecond=0
         )
-        if now_ist >= eod_time and now_ist < _MARKET_CLOSE:
+        eod_dt = market_close_dt - timedelta(minutes=EOD_EXIT_MINUTES_BEFORE)
+
+        if eod_dt.time() <= now_ist_dt.time() < _MARKET_CLOSE:
             if self._open_positions:
                 log.warning("EOD: Auto-closing %d positions before market close", len(self._open_positions))
                 await self.square_off_all(exit_reason="eod")
@@ -1359,6 +1394,13 @@ class RealTrader:
             for pos in list(self._open_positions):
                 if pos.get("sl_order_id") == order_id and pos.get("status") == "open":
                     fill_price = float(data.get("flPrc", pos.get("trailing_sl", 0)))
+                    if fill_price <= 0:
+                        fill_price = float(
+                            data.get("avgPrc")
+                            or data.get("prc")
+                            or pos.get("trailing_sl", 0)
+                            or pos.get("entry_price", 0)
+                        )
                     log.warning("SL TRIGGERED by exchange: %s @ %s", pos["trading_symbol"], fill_price)
                     await self._broadcast("order_update", {
                         "id":          pos.get("trade_id"),
@@ -1404,7 +1446,7 @@ class RealTrader:
             return
 
         try:
-            order_book = self.kotak.get_order_book()
+            order_book = await asyncio.to_thread(self.kotak.get_order_book)
             if not order_book or not isinstance(order_book, dict):
                 return
 
@@ -1508,21 +1550,22 @@ class RealTrader:
                 results.append({"position_id": pos["id"], "symbol": pos.get("trading_symbol"), **result})
 
         cancelled = 0
-        for order in list(self._pending_orders):
-            try:
-                await db.update_trade(order["trade_id"], {"status": "cancelled"})
-                if order.get("pending_order_id"):
-                    await db.delete_pending_order(order["pending_order_id"])
-            except Exception:
-                log.exception("square_off_all: db update failed")
-            cancelled += 1
-            await self._broadcast("order_update", {
-                "id":          order["trade_id"],
-                "signal_id":   order.get("signal_id"),
-                "status":      "cancelled",
-                "status_note": "Cancelled by kill switch",
-            })
-        self._pending_orders.clear()
+        async with self._expiry_lock:
+            for order in list(self._pending_orders):
+                try:
+                    await db.update_trade(order["trade_id"], {"status": "cancelled"})
+                    if order.get("pending_order_id"):
+                        await db.delete_pending_order(order["pending_order_id"])
+                except Exception:
+                    log.exception("square_off_all: db update failed")
+                cancelled += 1
+                await self._broadcast("order_update", {
+                    "id":          order["trade_id"],
+                    "signal_id":   order.get("signal_id"),
+                    "status":      "cancelled",
+                    "status_note": "Cancelled by kill switch",
+                })
+            self._pending_orders.clear()
 
         log.info("KILL SWITCH (real): Closed %d positions, cancelled %d pending orders", len(results), cancelled)
         return {"status": "ok", "positions_closed": len(results), "orders_cancelled": cancelled, "results": results}
@@ -1558,25 +1601,25 @@ class RealTrader:
                 "status":            "pending",
                 "order_id":          t.get("order_id", ""),
                 "notes":             t.get("notes", ""),
-                "entry_low":         t.get("price", 0),
-                "entry_high":        t.get("price", 0),
-                "strike":            "",
-                "option_type":       "",
+                "entry_low":         t.get("entry_low", t.get("price", 0)),
+                "entry_high":        t.get("entry_high", t.get("price", 0)),
+                "strike":            t.get("strike", ""),
+                "option_type":       t.get("option_type", ""),
                 "created_at":        t.get("created_at") or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "min_ltp":           t.get("min_ltp"),
-                "sl_mode":           "signal_trail",
-                "signal_stoploss":   None,
-                "activation_points": DEFAULT_ACTIVATION_PTS,
-                "trail_gap":         DEFAULT_TRAIL_GAP,
-                "bounce_points":     DEFAULT_BOUNCE_POINTS,
-                "entry_logic":       "code",
+                "sl_mode":           t.get("sl_mode", "signal_trail"),
+                "signal_stoploss":   t.get("signal_stoploss"),
+                "activation_points": float(t.get("activation_points") or DEFAULT_ACTIVATION_PTS),
+                "trail_gap":         float(t.get("trail_gap")          or DEFAULT_TRAIL_GAP),
+                "bounce_points":     float(t.get("bounce_points")      or DEFAULT_BOUNCE_POINTS),
+                "entry_logic":       t.get("entry_logic", "code"),
                 "entry_label":       t.get("entry_label"),
                 "entry_timer_mins":  int(t.get("entry_timer_mins") or ENTRY_TIMEOUT_MINS),
-                "exit_timer_mins":   int(t.get("exit_timer_mins") or POSITION_TIMEOUT_MINS),
+                "exit_timer_mins":   int(t.get("exit_timer_mins")  or POSITION_TIMEOUT_MINS),
                 "entry_slippage":    float(t.get("entry_slippage") or DEFAULT_ENTRY_SLIPPAGE),
-                "exit_slippage":     float(t.get("exit_slippage") or DEFAULT_EXIT_SLIPPAGE),
-                "signal_trail_initial_sl":        "telegram",
-                "signal_trail_initial_sl_points": 5.0,
+                "exit_slippage":     float(t.get("exit_slippage")  or DEFAULT_EXIT_SLIPPAGE),
+                "signal_trail_initial_sl":        t.get("signal_trail_initial_sl", "telegram"),
+                "signal_trail_initial_sl_points": float(t.get("signal_trail_initial_sl_points") or 5.0),
             }
 
             notes_str   = t.get("notes", "")
@@ -1612,7 +1655,7 @@ class RealTrader:
                 "trailing_sl":   p.get("trailing_sl", 0),
                 "status":        "open",
                 "opened_at":     p.get("opened_at", ""),
-                "sl_mode":           "signal_trail",
+                "sl_mode":           p.get("sl_mode", "signal_trail"),
                 "signal_stoploss":   p.get("signal_stoploss"),
                 "activation_points": p.get("activation_points") or DEFAULT_ACTIVATION_PTS,
                 "trail_gap":         p.get("trail_gap")          or DEFAULT_TRAIL_GAP,
