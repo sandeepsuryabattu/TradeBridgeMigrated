@@ -392,6 +392,7 @@ async def lifespan(app: FastAPI):
                     ])
                     await loop.run_in_executor(None, manager.download_contracts)
                     await manager.resubscribe_recent_signals(limit=20)
+                    manager.real_trader.reset_eod_flag()
                     log.info("Daily contract master refresh complete")
                 else:
                     log.warning("Daily refresh login failed: %s", login_result.get("message"))
