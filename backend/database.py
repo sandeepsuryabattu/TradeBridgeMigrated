@@ -22,7 +22,8 @@ _ALLOWED_TRADE_FIELDS = {
     "status", "fill_price", "fill_time", "pnl", "order_id",
     "notes", "trigger_price", "price", "quantity", "min_ltp",
     "exit_price", "entry_label", "closed_at", "exit_reason",
-    "kotak_order_id",
+    "kotak_order_id", "entry_timer_mins", "exit_timer_mins",
+    "entry_slippage", "exit_slippage",
 }
 
 # [FIX #7, #2, #14] expanded to cover all SL state + price-side confirmation fields
@@ -34,6 +35,8 @@ _ALLOWED_POSITION_FIELDS = {
     "activation_points", "trail_gap", "sl_activated", "exit_reason",
     # Real trading — Kotak order IDs for SL management
     "kotak_entry_order_id", "sl_order_id",
+    # Real trading runtime controls for restart-safe behavior
+    "exit_timer_mins", "exit_slippage",
 }
 
 _ALLOWED_PENDING_ORDER_FIELDS = {
@@ -140,6 +143,10 @@ async def init_db():
             notes            TEXT,
             entry_label      TEXT,
             exit_reason      TEXT,
+            entry_timer_mins INTEGER,
+            exit_timer_mins  INTEGER,
+            entry_slippage   REAL,
+            exit_slippage    REAL,
             created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY (signal_id) REFERENCES signals(id)
         );
@@ -174,6 +181,8 @@ async def init_db():
             -- [FIX #7] Trailing SL runtime state — written on every tick
             sl_activated            INTEGER DEFAULT 0,
             exit_reason             TEXT,
+            exit_timer_mins         INTEGER,
+            exit_slippage           REAL,
             FOREIGN KEY (trade_id) REFERENCES trades(id)
         );
 
@@ -227,8 +236,14 @@ async def init_db():
         ("pending_orders", "price_side_confirm_count", "INTEGER DEFAULT 0"),
         # Real trading — Kotak order IDs
         ("trades",          "kotak_order_id",           "TEXT"),
+        ("trades",          "entry_timer_mins",         "INTEGER"),
+        ("trades",          "exit_timer_mins",          "INTEGER"),
+        ("trades",          "entry_slippage",           "REAL"),
+        ("trades",          "exit_slippage",            "REAL"),
         ("positions",       "kotak_entry_order_id",     "TEXT"),
         ("positions",       "sl_order_id",              "TEXT"),
+        ("positions",       "exit_timer_mins",          "INTEGER"),
+        ("positions",       "exit_slippage",            "REAL"),
     ]
 
     for table, col, typedef in migrations:
@@ -431,9 +446,10 @@ async def save_trade(signal_id: int, trade_data: dict) -> int:
         """INSERT INTO trades
            (signal_id, mode, exchange_segment, trading_symbol, transaction_type,
             order_type, quantity, price, trigger_price, status, order_id, min_ltp,
-            "notes", "entry_label", "exit_reason"
+            "notes", "entry_label", "exit_reason",
+            "entry_timer_mins", "exit_timer_mins", "entry_slippage", "exit_slippage"
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             signal_id,
             trade_data.get("mode", "paper"),
@@ -450,6 +466,10 @@ async def save_trade(signal_id: int, trade_data: dict) -> int:
             trade_data.get("notes"),
             trade_data.get("entry_label"),
             trade_data.get("exit_reason"),
+            trade_data.get("entry_timer_mins"),
+            trade_data.get("exit_timer_mins"),
+            trade_data.get("entry_slippage"),
+            trade_data.get("exit_slippage"),
         ),
     )
     await db.commit()
@@ -498,8 +518,9 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
            (trade_id, mode, trading_symbol, strike, option_type,
             quantity, entry_price, max_ltp, trailing_sl, status,
             sl_mode, sl_gap, sl_points, signal_stoploss,
-            activation_points, trail_gap, sl_activated, exit_reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            activation_points, trail_gap, sl_activated, exit_reason,
+            exit_timer_mins, exit_slippage)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             trade_id,
             pos_data.get("mode", "paper"),
@@ -519,6 +540,8 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
             pos_data.get("trail_gap", 0),
             int(pos_data.get("sl_activated", False)),
             pos_data.get("exit_reason"),
+            pos_data.get("exit_timer_mins"),
+            pos_data.get("exit_slippage"),
         ),
     )
     await db.commit()

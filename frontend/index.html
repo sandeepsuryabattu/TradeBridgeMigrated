@@ -260,6 +260,10 @@
                 <button class="modal-close" id="btn-close-strategy">&times;</button>
             </div>
             <div class="modal-body">
+                <div class="strategy-current-box">
+                    <div class="strategy-current-title">Current Running Strategy</div>
+                    <div class="strategy-current-grid" id="strategy-current-summary"></div>
+                </div>
 
                 <!-- Lots Section -->
                 <div class="settings-section">
@@ -305,10 +309,15 @@
                     <p style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">
                         Waits for price to dip within the entry range, then enters when it bounces back by the specified points.
                     </p>
-                    <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
+                    <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; margin-bottom:8px;">
                         <span style="min-width:120px;">Bounce-back points:</span>
                         <input type="number" id="bounce-points-input" class="strategy-number-input" min="1" max="999" style="width:80px;" placeholder="5">
                         <span style="font-size:11px; color:var(--text-muted);">pts from lowest dip to trigger entry</span>
+                    </label>
+                    <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
+                        <span style="min-width:120px;">Entry slippage:</span>
+                        <input type="number" id="entry-slippage-input" class="strategy-number-input" min="0" max="50" step="0.05" style="width:80px;" placeholder="1.0" value="1.0">
+                        <span style="font-size:11px; color:var(--text-muted);">added to bounce trigger for real BUY limit</span>
                     </label>
                 </div>
 
@@ -537,7 +546,7 @@
     <!-- ── Toast Container ── -->
     <div id="toast-container"></div>
 
-    <script src="dashboard.js?v=10"></script>
+    <script src="dashboard.js?v=14"></script>
 </body>
 
 </html>

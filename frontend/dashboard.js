@@ -64,14 +64,14 @@ function startTimerTick() {
             const start       = el.dataset.timerStart;
             const mins        = parseFloat(el.dataset.timerMins  || 10);
             const label       = el.dataset.timerLabel            || '';
-            const tradeStatus = el.dataset.tradeStatus           || '';
-            if (tradeStatus) {
-                // Any trade action taken — hide the timer regardless of specific status.
-                // This includes 'pending' — once a trade is placed the entry timer
-                // is no longer meaningful (the order is already being tracked).
+            const tradeStatus = (el.dataset.tradeStatus || '').toLowerCase();
+            const hideTimerStatuses = new Set(['filled', 'open', 'closed', 'cancelled', 'rejected', 'failed', 'expired']);
+            if (tradeStatus && tradeStatus !== 'pending' && hideTimerStatuses.has(tradeStatus)) {
+                // Keep timer visible for pending orders; hide only once trade is executed/terminal.
                 el.style.display = 'none';
                 return;
             }
+            el.style.display = '';
             const remaining = getCountdown(start, mins);
             if (remaining === null) {
                 el.textContent  = `⌛ ${label}: expired`;
@@ -435,8 +435,12 @@ function handleWSMessage(msg) {
                     }
 
                     renderTradesDebounced();
-                    const tradeStatus = primaryTrade.status || 'pending';
-                    toast(`Trade ${tradeStatus}: ${primaryTrade.trading_symbol || msg.data.trading_symbol || ''}`, tradeStatus === 'filled' ? 'success' : 'info');
+                    const tradeStatus = String(primaryTrade.status || 'pending').toLowerCase();
+                    const tradeSymbol = primaryTrade.trading_symbol || msg.data.trading_symbol || '';
+                    const tradeToastType = ['filled', 'open'].includes(tradeStatus)
+                        ? 'success'
+                        : (['rejected', 'cancelled', 'expired', 'failed'].includes(tradeStatus) ? 'warning' : 'info');
+                    toast(`Trade ${tradeStatus}: ${tradeSymbol}`, tradeToastType);
                 }
                 break;
 
@@ -462,8 +466,16 @@ function handleWSMessage(msg) {
                     state.trades[trdIdx] = { ...state.trades[trdIdx], ...upd };
                     renderTradesDebounced();
                 }
-                if (upd.status === 'replaced') {
-                    toast(`Order replaced: ${upd.trading_symbol || 'trade #' + upd.id}`, 'info');
+                const orderStatus = String(upd.status || '').toLowerCase();
+                const orderLabel = upd.trading_symbol || ('trade #' + (upd.id ?? '?'));
+                if (orderStatus === 'replaced') {
+                    toast(`Order replaced: ${orderLabel}`, 'info');
+                } else if (orderStatus) {
+                    const orderToastType = ['filled', 'open'].includes(orderStatus)
+                        ? 'success'
+                        : (['rejected', 'cancelled', 'expired', 'failed'].includes(orderStatus) ? 'warning' : 'info');
+                    const suffix = upd.status_note ? ` (${upd.status_note})` : '';
+                    toast(`Order ${orderStatus}: ${orderLabel}${suffix}`, orderToastType);
                 }
                 break;
             }
@@ -500,6 +512,13 @@ function handleWSMessage(msg) {
                     state.positions.unshift(msg.data);
                 }
                 renderPositions();
+                const pStatus = String(msg.data.status || '').toLowerCase();
+                if (['closed', 'cancelled', 'rejected', 'failed'].includes(pStatus)) {
+                    const sym = msg.data.trading_symbol || msg.data.symbol || ('position #' + (msg.data.id ?? '?'));
+                    const pnl = msg.data.pnl != null ? ` | PnL: Rs${Number(msg.data.pnl).toFixed(2)}` : '';
+                    const pType = pStatus === 'closed' ? 'info' : 'warning';
+                    toast(`Position ${pStatus}: ${sym}${pnl}`, pType);
+                }
                 break;
             }
 
@@ -509,6 +528,13 @@ function handleWSMessage(msg) {
                     const lotInput = $('#lot-input');
                     if (lotInput) lotInput.value = msg.data.lot_size;
                     toast(`Lot size updated to ${msg.data.lot_size}`, 'info');
+                }
+                if (msg.data.strategy) {
+                    state.strategy = { ...STRATEGY_DEFAULTS, ...msg.data.strategy };
+                    persistStrategy();
+                    const s = state.strategy;
+                    const bufLabel = s.bufferEnabled ? ` | Buffer: +/-${s.bufferPoints || 2}` : '';
+                    toast(`Strategy updated: ${s.lots || 1} lot(s) | Bounce: ${s.bouncePoints || 5}pts${bufLabel}`, 'info');
                 }
                 break;
 
@@ -1209,10 +1235,8 @@ function renderSignals() {
                 } catch { /* leave as '--' */ }
             }
 
-            // Timer shows ONLY when no trade action has been taken yet (tradeStatus is empty).
-            // Any non-empty tradeStatus means the signal has been acted on in some way
-            // (pending fill, filled, cancelled, stopped, replaced, etc.) — hide the timer.
-            const showTimer = isValid && timerStart && !tradeStatus;
+            // Keep timer visible while trade is still pending. Hide once executed/terminal.
+            const showTimer = isValid && timerStart && (!tradeStatus || tradeStatus === 'pending');
 
             // Find the trade_id for this signal (needed for cancel button)
             const signalTrade = state.trades.find(t => t.signal_id === s.id && t.status === 'pending');
@@ -1672,14 +1696,70 @@ function getCountdown(isoStart, durationMinutes) {
     } catch { return null; }
 }
 
+function getNotifyRoot() {
+    let root = document.getElementById('notify-root');
+    if (!root) {
+        root = document.createElement('div');
+        root.id = 'notify-root';
+        root.style.position = 'fixed';
+        root.style.top = '72px';
+        root.style.right = '16px';
+        root.style.zIndex = '2147483647';
+        root.style.display = 'flex';
+        root.style.flexDirection = 'column';
+        root.style.gap = '8px';
+        root.style.pointerEvents = 'none';
+        root.style.maxWidth = 'min(92vw, 420px)';
+        document.body.appendChild(root);
+    }
+    return root;
+}
+
 function toast(message, type = 'info') {
-    const container = $('#toast-container');
-    if (!container) return;
-    const el       = document.createElement('div');
-    el.className   = `toast ${type}`;
-    el.textContent = message;
-    container.appendChild(el);
-    setTimeout(() => el.remove(), 4000);
+    const root = getNotifyRoot();
+    const el = document.createElement('div');
+    const text = String(message || '');
+
+    const bgByType = {
+        success: '#138a4f',
+        error: '#b42318',
+        warning: '#f59e0b',
+        info: '#334155',
+    };
+    const colorByType = {
+        warning: '#111827',
+    };
+
+    el.textContent = text;
+    el.style.pointerEvents = 'auto';
+    el.style.padding = '11px 14px';
+    el.style.borderRadius = '10px';
+    el.style.fontSize = '12px';
+    el.style.lineHeight = '1.35';
+    el.style.fontWeight = '600';
+    el.style.fontFamily = "'Inter', 'Segoe UI', Arial, sans-serif";
+    el.style.color = colorByType[type] || '#ffffff';
+    el.style.background = bgByType[type] || bgByType.info;
+    el.style.border = '1px solid rgba(255,255,255,0.18)';
+    el.style.boxShadow = '0 10px 28px rgba(0,0,0,0.35)';
+    el.style.transform = 'translateX(16px)';
+    el.style.opacity = '0';
+    el.style.transition = 'transform 140ms ease, opacity 140ms ease';
+
+    root.appendChild(el);
+
+    requestAnimationFrame(() => {
+        el.style.transform = 'translateX(0)';
+        el.style.opacity = '1';
+    });
+
+    setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transform = 'translateX(10px)';
+        setTimeout(() => {
+            if (el && el.parentNode) el.remove();
+        }, 170);
+    }, 3600);
 }
 
 // ── Clear Modal ───────────────────────────────────────────────────────────────
@@ -1837,6 +1917,7 @@ const STRATEGY_DEFAULTS = {
     exitTimerMins:             10,
     signalTrailInitialSL:      'telegram',
     signalTrailInitialSLPoints: 5.0,
+    entrySlippage:             1.0,
 };
 
 async function loadStrategy() {
@@ -1871,6 +1952,7 @@ async function loadStrategy() {
     }
 
     updateStrategyButtonBadge();
+    renderCurrentStrategySummary();
 }
 
 function persistStrategy() {
@@ -1880,6 +1962,32 @@ function persistStrategy() {
         console.warn('Could not persist strategy to localStorage:', e);
     }
     updateStrategyButtonBadge();
+    renderCurrentStrategySummary();
+}
+
+function formatInitialSLSummary(s) {
+    return s.signalTrailInitialSL === 'points_from_ltp'
+        ? `LTP - ${(s.signalTrailInitialSLPoints ?? 5)} pts`
+        : 'Telegram signal';
+}
+
+function renderCurrentStrategySummary() {
+    const box = $('#strategy-current-summary');
+    if (!box) return;
+    const s = { ...STRATEGY_DEFAULTS, ...state.strategy };
+    const rows = [
+        ['Lots', `${s.lots || 1}`],
+        ['Bounce', `${s.bouncePoints || 5} pts`],
+        ['Entry Timer', `${s.entryTimerMins ?? 10} min`],
+        ['Exit Timer', `${s.exitTimerMins ?? 10} min`],
+        ['Buffer', s.bufferEnabled ? `ON (+/-${s.bufferPoints || 2})` : 'OFF'],
+        ['Trail', `Act ${s.activationPoints ?? 5} / Gap ${s.trailGap ?? 2}`],
+        ['Entry Slippage', `${s.entrySlippage ?? 1} pts`],
+        ['Initial SL', formatInitialSLSummary(s)],
+    ];
+    box.innerHTML = rows.map(([k, v]) =>
+        `<div class="strategy-summary-item"><span class="strategy-summary-key">${k}</span><span class="strategy-summary-val">${v}</span></div>`
+    ).join('');
 }
 
 function updateStrategyButtonBadge() {
@@ -1922,6 +2030,10 @@ function syncStrategyModalToState() {
     const bufferInput = $('#buffer-points-input');
     if (bufferInput) bufferInput.value = s.bufferPoints ?? 2;
 
+    // Entry slippage
+    const entrySlipInput = $('#entry-slippage-input');
+    if (entrySlipInput) entrySlipInput.value = s.entrySlippage ?? 1;
+
     // Signal trail SL
     const actInput = $('#sl-activation-points');
     if (actInput) actInput.value = s.activationPoints ?? 5;
@@ -1935,6 +2047,8 @@ function syncStrategyModalToState() {
     if (initPointsRow) initPointsRow.style.display = initSL === 'points_from_ltp' ? 'block' : 'none';
     const initPointsInput = $('#sl-init-points-value');
     if (initPointsInput) initPointsInput.value = s.signalTrailInitialSLPoints ?? 5;
+
+    renderCurrentStrategySummary();
 }
 
 function populateLotDropdown() {
@@ -2003,6 +2117,7 @@ function bindStrategyModal() {
         const trailGap         = parseFloat($('#sl-trail-gap')?.value) || 2;
         const entryTimerMins   = parseInt($('#entry-timer-mins')?.value) || 10;
         const exitTimerMins    = parseInt($('#exit-timer-mins')?.value) || 10;
+        const entrySlippage    = parseFloat($('#entry-slippage-input')?.value);
 
         // Signal trail initial SL
         const initSLRadio   = document.querySelector('input[name="signal-trail-initial-sl"]:checked');
@@ -2024,12 +2139,16 @@ function bindStrategyModal() {
         if (bouncePoints < 1) {
             return toast('Bounce-back points must be at least 1', 'warning');
         }
+        if (!Number.isFinite(entrySlippage) || entrySlippage < 0) {
+            return toast('Entry slippage must be 0 or more', 'warning');
+        }
 
         state.strategy = {
             lots, bouncePoints, bufferEnabled, bufferPoints,
             activationPoints, trailGap,
             entryTimerMins, exitTimerMins,
             signalTrailInitialSL, signalTrailInitialSLPoints,
+            entrySlippage,
         };
         persistStrategy();
 
@@ -2052,8 +2171,8 @@ function bindStrategyModal() {
             });
         } catch { console.warn('Could not sync lot size to backend'); }
 
-        const bufLabel = bufferEnabled ? ` | Buffer: ±${bufferPoints}` : '';
-        toast(`Strategy saved: ${lots} lot(s) | Bounce: ${bouncePoints}pts${bufLabel}`, 'success');
+        const bufLabel = bufferEnabled ? ` | Buffer: +/-${bufferPoints}` : '';
+        toast(`Strategy saved: ${lots} lot(s) | Bounce: ${bouncePoints}pts${bufLabel} | Entry slip: ${entrySlippage}pt`, 'success');
         $('#strategy-modal').style.display = 'none';
     });
 }

@@ -1621,6 +1621,51 @@ header {
     border-radius: 4px;
 }
 
+.strategy-current-box {
+    margin-bottom: 14px;
+    padding: 12px;
+    border-radius: var(--radius);
+    border: 1px solid rgba(16, 185, 129, 0.28);
+    background: linear-gradient(145deg, rgba(16, 185, 129, 0.12), rgba(15, 23, 42, 0.55));
+}
+
+.strategy-current-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    font-weight: 700;
+    color: #86efac;
+    margin-bottom: 8px;
+}
+
+.strategy-current-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.strategy-summary-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 9px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(2, 6, 23, 0.35);
+}
+
+.strategy-summary-key {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.strategy-summary-val {
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+}
+
 .strategy-row {
     display: flex;
     align-items: center;
@@ -2068,4 +2113,9 @@ body.theme-light .trade-date-input::-webkit-calendar-picker-indicator {
 body.theme-light .header-balance {
     background: rgba(5, 150, 105, 0.08);
     border-color: rgba(5, 150, 105, 0.15);
+}
+@media (max-width: 840px) {
+    .strategy-current-grid {
+        grid-template-columns: 1fr;
+    }
 }

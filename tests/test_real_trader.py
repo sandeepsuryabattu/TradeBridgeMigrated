@@ -504,6 +504,40 @@ class TestClosePosition:
         assert len(rt._open_positions) == 0
 
 
+
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_close_position_unverified_exit_keeps_open(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+
+        # Exit order placed but never confirms traded
+        mock_kotak.order_history.return_value = {
+            "status": "ok",
+            "data": {"data": [{"nOrdNo": "ORD001", "ordSt": "pending"}]},
+        }
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 148.0,
+            "quantity": 20, "pnl": -40.0,
+            "max_ltp": 150.0, "trailing_sl": 140.0,
+            "sl_activated": False, "activation_points": 5.0,
+            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "exit_timer_mins": 10, "exit_slippage": 1.0,
+            "opened_at": datetime.now(timezone.utc),
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+
+        result = await rt.close_position(100, exit_price=148.0, exit_reason="timer")
+
+        assert result["status"] == "error"
+        assert any(p["id"] == 100 for p in rt._open_positions)
+
 class TestOrderFeed:
     """Tests for order feed WebSocket event handling."""
 
@@ -629,6 +663,44 @@ class TestRehydrate:
         assert len(rt._open_positions) == 1
         assert rt._open_positions[0]["sl_order_id"] == "SL001"
 
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_rehydrate_restores_runtime_controls(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.get_pending_orders = AsyncMock(return_value=[
+            {"id": 10, "trade_id": 1}
+        ])
+        mock_db.get_trades = AsyncMock(return_value=[
+            {
+                "id": 1, "signal_id": 42, "status": "pending",
+                "trading_symbol": "SENSEX82000CE",
+                "notes": "Real BUY 82000 CE @ 145-155",
+                "quantity": 20, "price": 155.0,
+                "entry_timer_mins": 3,
+                "exit_timer_mins": 7,
+                "entry_slippage": 2.5,
+                "exit_slippage": 1.7,
+            }
+        ])
+        mock_db.get_positions = AsyncMock(return_value=[
+            {
+                "id": 100, "trade_id": 2, "trading_symbol": "SENSEX81500PE",
+                "entry_price": 120.0, "current_price": 125.0, "pnl": 100.0,
+                "quantity": 20, "max_ltp": 125.0, "trailing_sl": 115.0,
+                "status": "open", "sl_activated": 0, "sl_order_id": "SL001",
+                "exit_timer_mins": 11, "exit_slippage": 0.9,
+            }
+        ])
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.rehydrate_from_db()
+
+        assert rt._pending_orders[0]["entry_timer_mins"] == 3
+        assert rt._pending_orders[0]["exit_timer_mins"] == 7
+        assert rt._pending_orders[0]["entry_slippage"] == 2.5
+        assert rt._pending_orders[0]["exit_slippage"] == 1.7
+        assert rt._open_positions[0]["exit_timer_mins"] == 11
+        assert rt._open_positions[0]["exit_slippage"] == 0.9
+
 
 class TestLotSize:
     """Test lot size multiplier."""
@@ -671,6 +743,30 @@ class TestRetryLogic:
         assert sl_id == "SL001"
         assert mock_kotak.place_order.call_count == 2
 
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_sl_protect_retry_budget_5x_0_2(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.update_position = AsyncMock()
+        rt = make_trader(mock_kotak, mock_market_feed)
+
+        mock_kotak.place_order.side_effect = Exception("Network error")
+        pos = {
+            "id": 100, "trading_symbol": "SENSEX82000CE",
+            "quantity": 20, "trailing_sl": 140.0,
+        }
+
+        sleep_calls = []
+
+        async def fake_sleep(delay):
+            sleep_calls.append(delay)
+
+        with patch("backend.real_trader.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)):
+            sl_id = await rt._place_sl_order(pos, 140.0)
+
+        assert sl_id is None
+        assert mock_kotak.place_order.call_count == 5
+        assert sleep_calls == [0.2, 0.2, 0.2, 0.2]
+
 
 class TestDoubleNestedOrderHistory:
     """Regression tests for BUG 1: verify_fill with real kotak_trader wrapper format."""
@@ -711,6 +807,97 @@ class TestDoubleNestedOrderHistory:
         # Position must be created with the verified fill price
         assert len(rt._open_positions) == 1
         assert rt._open_positions[0]["entry_price"] == 152.00
+
+
+class TestFeedFirstEntryConfirmation:
+    """Feed-first fill confirmation with polling fallback."""
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_confirm_entry_fill_prefers_order_feed(self, mock_db, mock_kotak, mock_market_feed):
+        rt = make_trader(mock_kotak, mock_market_feed)
+
+        async def slow_poll(order_id, order):
+            await asyncio.sleep(0.3)
+            return {"status": "traded", "fill_price": 999.0, "fill_qty": 1}
+
+        rt._verify_fill = AsyncMock(side_effect=slow_poll)
+
+        order = {"trading_symbol": "SENSEX26MAR76000PE", "quantity": 20, "price": 355.5}
+        task = asyncio.create_task(rt._confirm_entry_fill("ORD-FEED-1", order))
+        await asyncio.sleep(0)
+
+        await rt.handle_order_feed({
+            "data": {"nOrdNo": "ORD-FEED-1", "ordSt": "complete", "avgPrc": "349.75", "fldQty": 20}
+        })
+
+        result = await task
+        assert result is not None
+        assert result["status"] == "traded"
+        assert result["fill_price"] == pytest.approx(349.75)
+        assert result["fill_qty"] == 20
+        assert result["confirm_source"] == "feed"
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_confirm_entry_fill_falls_back_to_polling(self, mock_db, mock_kotak, mock_market_feed):
+        rt = make_trader(mock_kotak, mock_market_feed)
+        rt._verify_fill = AsyncMock(return_value={"status": "traded", "fill_price": 152.0, "fill_qty": 20})
+
+        order = {"trading_symbol": "SENSEX26MAR76000PE", "quantity": 20, "price": 355.5}
+        result = await rt._confirm_entry_fill("ORD-POLL-1", order)
+
+        assert result is not None
+        assert result["status"] == "traded"
+        assert result["fill_price"] == pytest.approx(152.0)
+        assert result["fill_qty"] == 20
+        assert result["confirm_source"] == "poll"
+        rt._verify_fill.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_confirm_entry_fill_handles_feed_rejected(self, mock_db, mock_kotak, mock_market_feed):
+        rt = make_trader(mock_kotak, mock_market_feed)
+
+        async def slow_poll(order_id, order):
+            await asyncio.sleep(0.3)
+            return {"status": "traded", "fill_price": 999.0, "fill_qty": 1}
+
+        rt._verify_fill = AsyncMock(side_effect=slow_poll)
+
+        order = {"trading_symbol": "SENSEX26MAR76000PE", "quantity": 20, "price": 355.5}
+        task = asyncio.create_task(rt._confirm_entry_fill("ORD-REJ-1", order))
+        await asyncio.sleep(0)
+
+        await rt.handle_order_feed({
+            "data": {"nOrdNo": "ORD-REJ-1", "ordSt": "rejected", "rejRsn": "price out of range"}
+        })
+
+        result = await task
+        assert result is None
+
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_confirm_entry_fill_timeout_returns_none(self, mock_db, mock_kotak, mock_market_feed):
+        import backend.real_trader as rt_mod
+        rt = make_trader(mock_kotak, mock_market_feed)
+
+        async def very_slow_poll(order_id, order):
+            await asyncio.sleep(1.0)
+            return {"status": "traded", "fill_price": 111.0, "fill_qty": 20}
+
+        rt._verify_fill = AsyncMock(side_effect=very_slow_poll)
+
+        old_timeout = rt_mod.FILL_CONFIRM_TIMEOUT_S
+        rt_mod.FILL_CONFIRM_TIMEOUT_S = 0.05
+        try:
+            order = {"trading_symbol": "SENSEX26MAR76000PE", "quantity": 20, "price": 355.5}
+            result = await rt._confirm_entry_fill("ORD-TIMEOUT-1", order)
+            assert result is None
+        finally:
+            rt_mod.FILL_CONFIRM_TIMEOUT_S = old_timeout
+
 
 
 class TestRehydrateCreatedAt:
@@ -1014,3 +1201,104 @@ class TestRealResponseSafety:
         assert mock_db.update_trade.called
         payload = mock_db.update_trade.call_args_list[-1].args[1]
         assert payload.get("status") == "closed"
+
+
+class TestSLSafety:
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_fill_order_sl_fail_attempts_emergency_exit(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.update_trade = AsyncMock()
+        mock_db.save_position = AsyncMock(return_value=100)
+        mock_db.delete_pending_order = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        rt._place_sl_order = AsyncMock(return_value=None)
+        rt.close_position = AsyncMock(return_value={"status": "closed"})
+
+        order = {
+            "trade_id": 1,
+            "pending_order_id": 10,
+            "trading_symbol": "SENSEX82000CE",
+            "quantity": 20,
+            "signal_id": 42,
+            "activation_points": 5.0,
+            "trail_gap": 2.0,
+            "exit_timer_mins": 10,
+            "exit_slippage": 1.0,
+        }
+
+        await rt._fill_order(order, 150.0, filled_qty=20)
+
+        rt.close_position.assert_awaited_once_with(100, exit_price=150.0, exit_reason="sl_protect_fail")
+
+
+class TestClosePositionSafety:
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_close_position_is_idempotent_during_inflight_close(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 148.0,
+            "quantity": 20, "pnl": -40.0,
+            "max_ltp": 150.0, "trailing_sl": 140.0,
+            "sl_activated": False, "activation_points": 5.0,
+            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "exit_timer_mins": 10, "exit_slippage": 1.0,
+            "opened_at": datetime.now(timezone.utc),
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+
+        async def slow_verify(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return {"status": "traded", "fill_price": 148.0, "fill_qty": 20}
+
+        rt._verify_exit_fill = AsyncMock(side_effect=slow_verify)
+
+        r1, r2 = await asyncio.gather(
+            rt.close_position(100, exit_price=148.0, exit_reason="timer"),
+            rt.close_position(100, exit_price=148.0, exit_reason="timer"),
+        )
+
+        statuses = {r1.get("status"), r2.get("status")}
+        assert "closed" in statuses
+        assert "error" in statuses
+
+        sell_calls = [
+            c for c in mock_kotak.place_order.call_args_list
+            if c.kwargs.get("transaction_type") == "S"
+        ]
+        assert len(sell_calls) == 1
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_close_position_db_failure_keeps_not_closed_state(self, mock_db, mock_kotak, mock_market_feed):
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock(side_effect=Exception("db down"))
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 148.0,
+            "quantity": 20, "pnl": -40.0,
+            "max_ltp": 150.0, "trailing_sl": 140.0,
+            "sl_activated": False, "activation_points": 5.0,
+            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "exit_timer_mins": 10, "exit_slippage": 1.0,
+            "opened_at": datetime.now(timezone.utc),
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+        rt._verify_exit_fill = AsyncMock(return_value={"status": "traded", "fill_price": 148.0, "fill_qty": 20})
+
+        result = await rt.close_position(100, exit_price=148.0, exit_reason="timer")
+
+        assert result["status"] == "error"
+        assert any(p["id"] == 100 for p in rt._open_positions)
+        assert rt._open_positions[0]["status"] == "closing"
