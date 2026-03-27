@@ -62,6 +62,10 @@ class TradeManager:
         self.contract_master = ContractMaster()
         self.lot_size = int(Config.DEFAULT_LOT_SIZE)
 
+        # Wire mode guard — prevents wrong engine from firing on ticks
+        self.paper_trader.set_active_mode_fn(lambda: self.mode)
+        self.real_trader.set_active_mode_fn(lambda: self.mode)
+
         # Background task handles for reconciliation + EOD
         self._real_reconcile_task: Optional[asyncio.Task] = None
         self._real_eod_task: Optional[asyncio.Task] = None
@@ -219,7 +223,7 @@ class TradeManager:
         # ── [FIX #3] Dedup: block only if open position exists for this strike ──
 
         # 4a. Open-position duplicate check
-        open_positions = await db.get_positions(mode=self.mode, status="open")
+        open_positions = await db.get_positions(mode=None, status="open")  # [SAFETY] cross-mode check
         for pos in open_positions:
             if (str(pos.get("strike")) == str(signal.strike) and
                     str(pos.get("option_type", "")).upper() == signal.option_type.upper()):

@@ -68,12 +68,21 @@ class PaperTrader:
         self._ws_broadcast: Optional[Callable] = None
         self._on_trade_expired: Optional[Callable] = None   # [12] always initialized
 
+        # Mode guard — set by TradeManager; on_tick returns immediately if mode != 'paper'
+        self._active_mode: Optional[Callable] = None
+
         # [FIX #10] Shared lock — prevents on_tick + check_timeouts double-expiry
         self._expiry_lock = asyncio.Lock()
 
         # [FIX #15] Timer state + lock — prevents bounce-timer and SL-timer concurrent fire
         self._timer_lock  = asyncio.Lock()
         self._timer_state = _TimerState.IDLE
+
+    def set_active_mode_fn(self, fn: Callable):
+        """fn() returns the current trading mode ('paper'/'real').
+        Prevents paper_trader.on_tick from simulating fills while in real mode.
+        """
+        self._active_mode = fn
 
     # ── Wiring ────────────────────────────────────────────────────────────────
 
@@ -274,6 +283,9 @@ class PaperTrader:
 
     async def on_tick(self, token: str, ltp: float, data: dict):
         """Called on every market tick — fills, position updates, timeouts."""
+        # ── Mode guard: do nothing if we are not the active engine ──────────────
+        if self._active_mode and self._active_mode() != "paper":
+            return
         now         = datetime.now(timezone.utc)
         tick_symbol = data.get("symbol", "")
 

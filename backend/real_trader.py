@@ -102,6 +102,15 @@ class RealTrader:
         # Entry fill confirmation waiters (order_id -> Future)
         self._entry_fill_waiters: dict[str, asyncio.Future] = {}
 
+        # Mode guard — set by TradeManager; on_tick returns immediately if mode != 'real'
+        self._active_mode: Optional[Callable] = None
+
+    def set_active_mode_fn(self, fn: Callable):
+        """fn() returns the current trading mode ('paper'/'real').
+        Prevents real_trader.on_tick from placing exchange orders while in paper mode.
+        """
+        self._active_mode = fn
+
     # ── Wiring ────────────────────────────────────────────────────────────────
 
     def set_ws_broadcast(self, broadcast_fn):
@@ -851,6 +860,9 @@ class RealTrader:
 
     async def on_tick(self, token: str, ltp: float, data: dict):
         """Called on every market tick — bounce entry, position SL trailing."""
+        # ── Mode guard: do nothing if we are not the active engine ──────────────
+        if self._active_mode and self._active_mode() != "real":
+            return
         now = datetime.now(timezone.utc)
         tick_symbol = data.get("symbol", "")
 

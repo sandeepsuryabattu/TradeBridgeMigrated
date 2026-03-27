@@ -1435,3 +1435,98 @@ class TestClosePositionSafety:
         assert result["status"] == "error"
         assert any(p["id"] == 100 for p in rt._open_positions)
         assert rt._open_positions[0]["status"] == "closing"
+
+
+# ── Regression: mode-guard and cross-mode dedup (2026-03-27) ─────────────────
+
+class TestModeGuard:
+    """
+    Regression tests for the mode-guard on on_tick().
+    real_trader.on_tick() must be a no-op when mode is 'paper'.
+    paper_trader.on_tick() must be a no-op when mode is 'real'.
+    """
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_real_trader_on_tick_blocked_in_paper_mode(
+        self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy
+    ):
+        """
+        REGRESSION: real_trader.on_tick must return immediately in paper mode.
+        Before fix: both traders received ticks regardless of current mode.
+        """
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        rt.set_active_mode_fn(lambda: "paper")  # mode guard: paper
+
+        await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
+        symbol = rt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        await rt.on_tick("12345", 148.0, tick)
+        await rt.on_tick("12345", 153.0, tick)
+
+        assert not mock_kotak.place_order.called
+        assert len(rt._pending_orders) == 1
+        assert len(rt._open_positions) == 0
+
+    @pytest.mark.asyncio
+    @patch("backend.paper_trader.db")
+    async def test_paper_trader_on_tick_blocked_in_real_mode(self, mock_db):
+        """
+        REGRESSION: paper_trader.on_tick must return immediately in real mode.
+        """
+        from backend.paper_trader import PaperTrader
+
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+
+        pt = PaperTrader()
+        pt.set_active_mode_fn(lambda: "real")  # mode guard: real
+
+        signal = {
+            "strike": "82000", "option_type": "CE",
+            "entry_low": 145, "entry_high": 155,
+            "stoploss": 140, "contract_lot_size": 20, "entry_label": "test",
+        }
+        await pt.place_order(signal, signal_id=99, lot_size=1, strategy={})
+        symbol = pt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        await pt.on_tick("12345", 148.0, tick)
+        await pt.on_tick("12345", 153.0, tick)
+
+        assert len(pt._open_positions) == 0
+        assert len(pt._pending_orders) == 1
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_real_trader_on_tick_active_in_real_mode(
+        self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy
+    ):
+        """Mode guard must NOT block on_tick when mode matches ('real')."""
+        mock_db.save_trade = AsyncMock(return_value=1)
+        mock_db.save_pending_order = AsyncMock(return_value=10)
+        mock_db.update_trade = AsyncMock()
+        mock_db.save_position = AsyncMock(return_value=100)
+        mock_db.delete_pending_order = AsyncMock()
+        mock_db.update_position = AsyncMock()
+
+        _set_order_history_fill(mock_kotak, price=153.5, qty=20)
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        rt.set_active_mode_fn(lambda: "real")
+
+        await rt.place_order(sample_signal, signal_id=42, lot_size=1, strategy=sample_strategy)
+        symbol = rt._pending_orders[0]["trading_symbol"]
+        tick = {"symbol": symbol, "tk": "12345"}
+
+        await rt.on_tick("12345", 148.0, tick)
+        await rt.on_tick("12345", 153.0, tick)
+
+        assert mock_kotak.place_order.called
+        assert len(rt._open_positions) == 1
