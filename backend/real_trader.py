@@ -56,6 +56,7 @@ ORDER_RETRY_DELAY_S      = 0.5
 SL_PROTECT_RETRIES       = 5
 SL_PROTECT_RETRY_DELAY_S = 0.2
 RECONCILE_INTERVAL_S     = 30     # Used by the scheduler in main.py
+MAX_SL_REPROTECT_ATTEMPTS = 3    # Cap re-placement attempts per position to prevent runaway loops
 EOD_EXIT_MINUTES_BEFORE  = 5      # Close positions N minutes before market close
 
 # Fill confirmation tuning (extended to handle real-world latency)
@@ -494,7 +495,7 @@ class RealTrader:
                         "level":   "error",
                         "message": f"❌ {label.upper()} {status.upper()}: {trading_symbol} — {reason}",
                     })
-                    return None
+                    return {"status": status, "reject_reason": reason}
 
                 # "open", "open pending", "validation pending", etc. — keep polling
 
@@ -633,109 +634,70 @@ class RealTrader:
                 with suppress(asyncio.CancelledError):
                     await poll_task
 
-    # ── Place SL Order on Exchange ────────────────────────────────────────────
+    # ── Software SL — store trigger level only (no exchange order) ───────────
 
     async def _place_sl_order(self, pos: dict, trigger_price: float) -> Optional[str]:
-        """Place exchange SL order. Returns kotak sl_order_id or None."""
-        log.info(
-            "Placing SL order: %s trigger=%.2f price=%.2f",
-            pos["trading_symbol"], trigger_price, SL_LIMIT_PRICE,
-        )
+        """Software SL: store the SL trigger level in memory + DB.
 
+        Exchange DAY SL orders (order_type=SL, validity=DAY) require option
+        writing margin (~₹1.43L per lot) because Kotak RMS treats them as a
+        potential short position.  Retail option buyers don't have that margin.
+
+        Instead we monitor price on every tick and fire an IOC SELL in
+        _process_position_tick when price ≤ trailing_sl.  This is identical
+        to how Zerodha GTT works — broker-side software trigger.
+
+        We use "SW:<position_id>" as a sentinel sl_order_id so the rest of
+        the code knows an SL is active without expecting a real exchange order.
+        """
+        sentinel = f"SW:{pos['id']}"
+        pos["sl_order_id"] = sentinel
         try:
-            result = await self._kotak_call_with_retry(
-                self.kotak.place_order,
-                f"SL {pos['trading_symbol']}",
-                retries=SL_PROTECT_RETRIES,
-                delay_s=SL_PROTECT_RETRY_DELAY_S,
-                exchange_segment="bse_fo",
-                trading_symbol=pos["trading_symbol"],
-                transaction_type="S",
-                order_type="SL",
-                quantity=pos["quantity"],
-                price=SL_LIMIT_PRICE,
-                trigger_price=trigger_price,
-                validity="DAY",
-            )
-
-            sl_order_id = self._extract_order_id(result)
-            if not sl_order_id:
-                raise Exception("Kotak SL place_order response missing nOrdNo")
-
-            await db.update_position(pos["id"], {"sl_order_id": sl_order_id})
-            pos["sl_order_id"] = sl_order_id
-
-            await self._broadcast("order_update", {
-                "id":          pos.get("trade_id"),
-                "status_note": f"✅ SL Placed — Order #{sl_order_id} (trigger: {trigger_price:.2f})",
+            await db.update_position(pos["id"], {
+                "sl_order_id": sentinel,
+                "trailing_sl": trigger_price,
             })
-
-            log.info("SL order placed: sl_order_id=%s, trigger=%.2f", sl_order_id, trigger_price)
-            return sl_order_id
-
         except Exception:
-            log.exception("Failed to place SL order for %s", pos["trading_symbol"])
-            await self._broadcast("order_alert", {
-                "level":   "error",
-                "message": f"⚠️ SL order FAILED for {pos['trading_symbol']} — position UNPROTECTED",
-            })
-            return None
+            log.exception("_place_sl_order: DB update failed for %s", pos["trading_symbol"])
 
-    # ── Update SL Order (Trail) ───────────────────────────────────────────────
+        log.info(
+            "Software SL active: %s trigger=%.2f (sentinel=%s)",
+            pos["trading_symbol"], trigger_price, sentinel,
+        )
+        await self._broadcast("order_update", {
+            "id":          pos.get("trade_id"),
+            "status_note": f"🛡 Software SL set @ {trigger_price:.2f}",
+        })
+        return sentinel
+
+    # ── Update Software SL (Trail) ────────────────────────────────────────────
 
     async def _update_sl_order(self, pos: dict, new_trigger: float):
-        """Modify exchange SL order to trail the trigger price.
+        """Software SL trail: just update trailing_sl in memory + DB.
 
-        FIX #2: sl_order_id is only updated in pos after modify_order succeeds.
-        FIX #6: exchange_segment is now passed to modify_order.
+        No exchange order to modify — the tick handler reads trailing_sl
+        directly on every tick and fires an IOC SELL when triggered.
         """
+        # Software SL — no exchange order to modify, just update the level
+        # The sentinel sl_order_id ("SW:<id>") signals software SL is active.
         sl_order_id = pos.get("sl_order_id")
         if not sl_order_id:
-            log.warning("No sl_order_id for position %s — cannot trail", pos["id"])
-            # Attempt to re-place SL
-            new_sl_id = await self._place_sl_order(pos, new_trigger)
-            if not new_sl_id:
-                await self._broadcast("order_alert", {
-                    "level": "error",
-                    "message": f"🚨 SL trail re-protect failed for {pos['trading_symbol']} — forcing exit",
-                })
-                fresh_ltp = self._get_fresh_ltp(pos)
-                await self.close_position(pos["id"], exit_price=fresh_ltp, exit_reason="sl_protect_fail")
+            # SL not yet set — initialise it now
+            await self._place_sl_order(pos, new_trigger)
             return
 
-        log.info("Trailing SL: %s trigger → %.2f", pos["trading_symbol"], new_trigger)
-
+        log.info("Software SL trailed: %s → %.2f", pos["trading_symbol"], new_trigger)
+        pos["trailing_sl"] = new_trigger
         try:
-            await self._kotak_call_with_retry(
-                self.kotak.modify_order,
-                f"Trail SL {pos['trading_symbol']}",
-                order_id=sl_order_id,
-                exchange_segment="bse_fo",          # FIX #6
-                trigger_price=new_trigger,
-                price=SL_LIMIT_PRICE,
-                order_type="SL",
-                quantity=pos["quantity"],
-                validity="DAY",
-                trading_symbol=pos["trading_symbol"],
-                transaction_type="S",
-            )
-
-            # FIX #2: Only update in-memory sl_order_id AFTER successful modify.
-            # (sl_order_id doesn't change on modify, but the guard prevents stale
-            # state if modify raises and we fall through to re-place logic elsewhere.)
             await db.update_position(pos["id"], {"trailing_sl": new_trigger})
-
-            await self._broadcast("order_update", {
-                "id":          pos.get("trade_id"),
-                "status_note": f"🔄 SL Trailed → trigger: {new_trigger:.2f} ✅",
-            })
-
         except Exception:
-            log.exception("Failed to trail SL for %s", pos["trading_symbol"])
-            await self._broadcast("order_alert", {
-                "level":   "warning",
-                "message": f"⚠️ SL trail FAILED for {pos['trading_symbol']} — SL may be stale",
-            })
+            log.exception("_update_sl_order: DB trail update failed for %s", pos["trading_symbol"])
+
+        await self._broadcast("order_update", {
+            "id":          pos.get("trade_id"),
+            "status_note": f"📈 SL trailed → {new_trigger:.2f}",
+        })
+
 
     # ── Fill Order ────────────────────────────────────────────────────────────
 
@@ -829,25 +791,12 @@ class RealTrader:
         }
         self._open_positions.append(position)
 
-        # Place exchange SL order
+        # Activate software SL (no exchange order — tick handler fires IOC SELL)
         sl_order_id = await self._place_sl_order(position, initial_sl)
         position["sl_order_id"] = sl_order_id
 
-        if not sl_order_id:
-            log.error("Initial SL placement failed for %s — attempting emergency exit", position["trading_symbol"])
-            await self._broadcast("order_alert", {
-                "level": "error",
-                "message": f"🚨 SL protection unavailable for {position['trading_symbol']} — attempting emergency exit",
-            })
-            emergency = await self.close_position(position_id, exit_price=fill_price, exit_reason="sl_protect_fail")
-            if emergency.get("status") != "closed":
-                await self._broadcast("order_alert", {
-                    "level": "error",
-                    "message": f"🚨 Emergency exit could not be confirmed for {position['trading_symbol']} — MANUAL ACTION REQUIRED",
-                })
-
         log.info(
-            "Position opened | Real | Entry=%.2f | Initial SL=%.2f | SL Order=%s",
+            "Position opened | Real | Entry=%.2f | Initial SL=%.2f | Software SL=%s",
             fill_price, initial_sl, sl_order_id,
         )
 
@@ -1082,6 +1031,10 @@ class RealTrader:
     async def _process_position_tick(self, pos: dict, ltp: float):
         """Process a tick for an open position — signal_trail SL logic.
 
+        Software SL: when ltp drops to/below trailing_sl we fire an IOC SELL
+        immediately.  This replaces exchange DAY SL orders which require option
+        writing margin (~₹1.43L) that retail buyers don't have.
+
         FIX #1: On activation, SL is anchored at entry_price + activation_points
         (the breakeven+ level), not at the current LTP which could be much higher
         and would cause immediate SL triggers on the next dip.
@@ -1124,6 +1077,24 @@ class RealTrader:
                 "max_ltp":     pos.get("max_ltp", ltp),
                 "status_note": f"SL trailed to {new_sl:.2f} [signal_trail]",
             })
+
+        # ── Software SL trigger ────────────────────────────────────────────────
+        # Fire immediately when price hits or breaks the SL level.
+        # Guard: only fire if an SL is active and position is still open.
+        trailing_sl = pos.get("trailing_sl", 0)
+        if trailing_sl > 0 and ltp <= trailing_sl and pos.get("status") == "open":
+            log.warning(
+                "SOFTWARE SL HIT: %s ltp=%.2f ≤ sl=%.2f — firing IOC SELL",
+                pos["trading_symbol"], ltp, trailing_sl,
+            )
+            await self._broadcast("order_alert", {
+                "level":   "warning",
+                "message": f"🔴 SL Hit: {pos['trading_symbol']} @ {ltp:.2f} (SL={trailing_sl:.2f}) — exiting",
+            })
+            # Use 'software_sl' so close_position PLACES the IOC SELL.
+            # (exit_reason='sl' skips the SELL — that was only for exchange-triggered SL.)
+            await self.close_position(pos["id"], exit_price=ltp, exit_reason="software_sl")
+            return  # Skip DB update — close_position handles it
 
         try:
             await db.update_position(pos["id"], {
@@ -1169,21 +1140,15 @@ class RealTrader:
             db_sync_ok = False
 
             try:
-                # 1. Cancel exchange SL order (skip if SL already triggered)
-                sl_order_id = pos.get("sl_order_id")
-                if sl_order_id and exit_reason != "sl":
-                    try:
-                        await self._kotak_call_with_retry(
-                            self.kotak.cancel_order,
-                            f"Cancel SL {pos['trading_symbol']}",
-                            order_id=sl_order_id,
-                        )
-                        log.info("Cancelled SL order %s", sl_order_id)
-                    except Exception:
-                        log.exception("Failed to cancel SL order %s — may already be triggered", sl_order_id)
+                # 1. Software SL — no exchange SL order to cancel.
+                #    Just clear the sentinel so reconcile doesn't check it.
+                pos["sl_order_id"] = None
 
                 # 2. Place Limit SELL IOC
-                if exit_reason in ("timer", "kill", "eod", "manual", "sl_protect_fail"):
+                # Skip only if the exchange SL order already filled ('sl' exit reason
+                # from the old exchange-SL path).  Software SL ('software_sl') always
+                # needs to place the SELL — the bot fires the exit, not the exchange.
+                if exit_reason != "sl":
                     try:
                         exit_slippage = float(pos.get("exit_slippage", DEFAULT_EXIT_SLIPPAGE))
                         approx_ltp    = pos.get("current_price", pos.get("entry_price", 0))
@@ -1205,7 +1170,37 @@ class RealTrader:
                             raise Exception("SELL place_order response missing nOrdNo")
 
                         sell_fill = await self._poll_order_fill(sell_order_id, pos, label="exit")
-                        if not sell_fill or sell_fill.get("status") != "traded":
+
+                        if sell_fill and sell_fill.get("status") == "traded":
+                            exchange_exit_confirmed = True
+                            fill_px = float(sell_fill.get("fill_price") or 0)
+                            if fill_px > 0:
+                                price = fill_px
+                            pnl = (price - pos["entry_price"]) * pos["quantity"]
+                            await self._broadcast("order_update", {
+                                "id":          pos.get("trade_id"),
+                                "status_note": f"✅ SELL Filled @ {price:.2f} ({exit_reason})",
+                            })
+                        elif sell_fill and sell_fill.get("status") == "rejected":
+                            # REJECTED exit SELL almost always means the position is
+                            # already closed on exchange (e.g. SL triggered, external
+                            # square-off).  Forcing the position closed in DB prevents
+                            # the infinite retry loop that caused 600+ sell orders.
+                            rej_reason = sell_fill.get("reject_reason", "unknown")
+                            log.warning(
+                                "EXIT SELL REJECTED for %s (#%s): %s — treating as already exited",
+                                pos["trading_symbol"], sell_order_id, rej_reason,
+                            )
+                            exchange_exit_confirmed = True
+                            # Keep the last known PnL; we can't get exact fill
+                            await self._broadcast("order_alert", {
+                                "level":   "warning",
+                                "message": (
+                                    f"⚠️ Exit SELL rejected for {pos['trading_symbol']} "
+                                    f"(likely already closed on exchange) — closing in DB"
+                                ),
+                            })
+                        else:
                             await self._broadcast("order_alert", {
                                 "level":   "error",
                                 "message": f"❌ EXIT SELL UNVERIFIED for {pos['trading_symbol']} (#{sell_order_id}) — MANUAL EXIT REQUIRED",
@@ -1216,15 +1211,6 @@ class RealTrader:
                             })
                             return {"status": "error", "message": "Exit SELL unverified", "order_id": sell_order_id}
 
-                        exchange_exit_confirmed = True
-                        fill_px = float(sell_fill.get("fill_price") or 0)
-                        if fill_px > 0:
-                            price = fill_px
-                        pnl = (price - pos["entry_price"]) * pos["quantity"]
-                        await self._broadcast("order_update", {
-                            "id":          pos.get("trade_id"),
-                            "status_note": f"✅ SELL Filled @ {price:.2f} ({exit_reason})",
-                        })
                     except Exception:
                         log.exception("Failed to place/verify exit SELL for %s", pos["trading_symbol"])
                         await self._broadcast("order_alert", {
@@ -1389,44 +1375,9 @@ class RealTrader:
         if status in ('traded', 'complete', 'completed', 'rejected', 'cancelled'):
             self._resolve_entry_fill_waiter(order_id, {'status': status, 'event': data})
 
-        if status in ("traded", "complete", "completed"):
-            for pos in list(self._open_positions):
-                if pos.get("sl_order_id") == order_id and pos.get("status") == "open":
-                    fill_price = float(data.get("flPrc", pos.get("trailing_sl", 0)))
-                    if fill_price <= 0:
-                        fill_price = float(
-                            data.get("avgPrc") or data.get("prc") or
-                            pos.get("trailing_sl", 0) or pos.get("entry_price", 0)
-                        )
-                    log.warning("SL TRIGGERED by exchange: %s @ %s", pos["trading_symbol"], fill_price)
-                    await self._broadcast("order_update", {
-                        "id":          pos.get("trade_id"),
-                        "status_note": f"🔴 SL Triggered @ {fill_price} — Exited ✅",
-                    })
-                    pos["sl_order_id"] = None  # Already triggered
-                    await self.close_position(pos["id"], exit_price=fill_price, exit_reason="sl")
-                    return
-
-        if status in ("rejected", "cancelled"):
-            for pos in list(self._open_positions):
-                if pos.get("sl_order_id") == order_id and pos.get("status") == "open":
-                    reason = data.get("rejRsn", "Unknown")
-                    log.error("SL order %s %s for %s: %s", status, order_id, pos["trading_symbol"], reason)
-                    await self._broadcast("order_alert", {
-                        "level":   "error",
-                        "message": f"⚠️ SL order {status.upper()} for {pos['trading_symbol']}: {reason}",
-                    })
-                    new_sl_id = await self._place_sl_order(pos, pos.get("trailing_sl", 0))
-                    if new_sl_id:
-                        pos["sl_order_id"] = new_sl_id
-                    else:
-                        await self._broadcast("order_alert", {
-                            "level": "error",
-                            "message": f"🚨 SL re-protect failed for {pos['trading_symbol']} — forcing exit",
-                        })
-                        fresh_ltp = self._get_fresh_ltp(pos)
-                        await self.close_position(pos["id"], exit_price=fresh_ltp, exit_reason="sl_protect_fail")
-                    return
+        # Software SL: exchange never sees an SL order — nothing to handle here
+        # for SL triggers or rejections.  The tick handler fires exits directly.
+        # Entry fill events are still processed via _resolve_entry_fill_waiter above.
 
     # ── Reconciliation ────────────────────────────────────────────────────────
 
@@ -1462,51 +1413,41 @@ class RealTrader:
             if not isinstance(orders, list):
                 return
 
-            # Build two sets: all known order IDs, and those with terminal status.
-            all_order_ids: set[str] = set()
-            terminal_order_ids: set[str] = set()
+            # Kotak order book returns multiple rows per order (one per status
+            # transition, oldest → newest).  We MUST use only the LATEST row per
+            # nOrdNo to determine current status.  Using any earlier row risks
+            # marking a live "trigger pending" SL as "terminal" because a prior
+            # status update (e.g. "complete" from the entry BUY fill earlier in
+            # the day) appears in the same history list — this caused a live trade
+            # force-exit and real financial loss.
+            latest_by_order_id: dict[str, dict] = {}
             for o in orders:
                 oid = str(o.get("nOrdNo", "")).strip()
-                if not oid:
-                    continue
-                all_order_ids.add(oid)
-                if str(o.get("ordSt", "")).lower().strip() in _TERMINAL_ORDER_STATUSES:
-                    terminal_order_ids.add(oid)
+                if oid:
+                    latest_by_order_id[oid] = o  # last row wins (oldest → newest)
 
+            all_order_ids: set[str] = set(latest_by_order_id.keys())
+            terminal_order_ids: set[str] = {
+                oid for oid, o in latest_by_order_id.items()
+                if str(o.get("ordSt", "")).lower().strip() in _TERMINAL_ORDER_STATUSES
+            }
+
+            # Software SL: positions have a "SW:<id>" sentinel, not a real order.
+            # Reconcile still verifies the position is alive and can force-exit
+            # if the tick feed has been dead for too long (handled by check_timeouts).
+            # No order-book checks needed for SL — tick handler fires exits directly.
             for pos in list(self._open_positions):
                 if pos.get("status") != "open":
                     continue
-                sl_order_id = pos.get("sl_order_id")
-                if not sl_order_id:
-                    continue
-
-                # Re-place only if: (a) order has terminal status, or
-                # (b) order is completely absent from the book (silent drop).
-                needs_reprotect = (
-                    sl_order_id in terminal_order_ids or
-                    sl_order_id not in all_order_ids
-                )
-
-                if needs_reprotect:
-                    reason = "terminal" if sl_order_id in terminal_order_ids else "absent"
-                    log.error(
-                        "RECONCILE: SL order %s is %s for %s — re-placing",
-                        sl_order_id, reason, pos["trading_symbol"],
+                sl_id = pos.get("sl_order_id", "")
+                if sl_id and not str(sl_id).startswith("SW:"):
+                    # Legacy real exchange SL order still in DB from before migration.
+                    # Treat as software SL — reset sentinel so it doesn't get checked.
+                    log.info(
+                        "RECONCILE: Migrating legacy exchange SL %s → software SL for %s",
+                        sl_id, pos["trading_symbol"],
                     )
-                    await self._broadcast("order_alert", {
-                        "level":   "warning",
-                        "message": f"⚠️ SL order {reason} for {pos['trading_symbol']} — re-placing",
-                    })
-                    new_sl_id = await self._place_sl_order(pos, pos.get("trailing_sl", 0))
-                    if new_sl_id:
-                        pos["sl_order_id"] = new_sl_id
-                    else:
-                        await self._broadcast("order_alert", {
-                            "level": "error",
-                            "message": f"🚨 SL reconcile re-protect failed for {pos['trading_symbol']} — forcing exit",
-                        })
-                        fresh_ltp = self._get_fresh_ltp(pos)
-                        await self.close_position(pos["id"], exit_price=fresh_ltp, exit_reason="sl_protect_fail")
+                    await self._place_sl_order(pos, pos.get("trailing_sl", 0))
 
         except Exception:
             log.exception("reconcile_orders failed")
@@ -1739,6 +1680,9 @@ class RealTrader:
         for pos in list(self._open_positions):
             sl_order_id = pos.get("sl_order_id")
             if not sl_order_id:
+                continue
+            # Software SL: SW: sentinels are not broker orders — skip verification
+            if str(sl_order_id).startswith("SW:"):
                 continue
 
             try:

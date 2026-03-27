@@ -324,11 +324,12 @@ class TestFillVerification:
 
 
 class TestSLOrder:
-    """Tests for exchange-level SL order placement and trailing."""
+    """Tests for software SL placement and trailing."""
 
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
     async def test_sl_order_placed_on_fill(self, mock_db, mock_kotak, mock_market_feed, sample_signal, sample_strategy):
+        """After entry fill, a software SL sentinel is set — no exchange order."""
         mock_db.save_trade = AsyncMock(return_value=1)
         mock_db.save_pending_order = AsyncMock(return_value=10)
         mock_db.update_trade = AsyncMock()
@@ -336,15 +337,7 @@ class TestSLOrder:
         mock_db.delete_pending_order = AsyncMock()
         mock_db.update_position = AsyncMock()
 
-        # SL order returns different order ID
-        sl_call_count = [0]
-        def mock_place(*, exchange_segment, trading_symbol, transaction_type, order_type, quantity, price, **kwargs):
-            sl_call_count[0] += 1
-            if order_type == "SL":
-                return {"status": "ok", "data": {"nOrdNo": "SL001"}}
-            return {"status": "ok", "data": {"nOrdNo": "ORD001"}}
-
-        mock_kotak.place_order.side_effect = mock_place
+        mock_kotak.place_order.return_value = {"status": "ok", "data": {"nOrdNo": "ORD001"}}
         _set_order_history_fill(mock_kotak, price=153.0, qty=20)
 
         rt = make_trader(mock_kotak, mock_market_feed)
@@ -356,12 +349,12 @@ class TestSLOrder:
         await rt.on_tick("12345", 148.0, tick)
         await rt.on_tick("12345", 153.0, tick)  # bounce → fill
 
-        # Should have called place_order twice: once for BUY, once for SL
-        assert mock_kotak.place_order.call_count == 2
-        sl_call = mock_kotak.place_order.call_args_list[1]
-        assert sl_call.kwargs["order_type"] == "SL"
-        assert float(sl_call.kwargs["price"]) == 0.05
-        assert float(sl_call.kwargs["trigger_price"]) == 140.0  # signal stoploss
+        # Only BUY placed — no exchange SL order
+        sl_calls = [c for c in mock_kotak.place_order.call_args_list
+                    if c.kwargs.get("order_type") == "SL"]
+        assert len(sl_calls) == 0
+        assert len(rt._open_positions) == 1
+        assert rt._open_positions[0]["sl_order_id"].startswith("SW:")
 
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
@@ -370,7 +363,6 @@ class TestSLOrder:
 
         rt = make_trader(mock_kotak, mock_market_feed)
 
-        # Manually add an open position
         pos = {
             "id": 100,
             "trade_id": 1,
@@ -384,7 +376,7 @@ class TestSLOrder:
             "sl_activated": False,
             "activation_points": 5.0,
             "trail_gap": 2.0,
-            "sl_order_id": "SL001",
+            "sl_order_id": "SW:100",
             "exit_timer_mins": 10,
             "opened_at": datetime.now(timezone.utc),
             "exit_slippage": 1.0,
@@ -398,8 +390,9 @@ class TestSLOrder:
         await rt.on_tick("12345", 155.0, tick)
 
         assert pos["sl_activated"] is True
-        # modify_order should be called to update SL
-        assert mock_kotak.modify_order.called
+        # Software SL: no modify_order call
+        assert not mock_kotak.modify_order.called
+        assert pos["trailing_sl"] == 155.0  # anchored at entry + activation
 
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
@@ -421,7 +414,7 @@ class TestSLOrder:
             "sl_activated": True,
             "activation_points": 5.0,
             "trail_gap": 2.0,
-            "sl_order_id": "SL001",
+            "sl_order_id": "SW:100",
             "exit_timer_mins": 10,
             "opened_at": datetime.now(timezone.utc),
             "exit_slippage": 1.0,
@@ -431,14 +424,12 @@ class TestSLOrder:
 
         tick = {"symbol": "SENSEX82000CE", "tk": "12345"}
 
-        # New high at 160 → SL trails to 160 - 2 = 158
-        mock_kotak.modify_order.reset_mock()
+        # New high at 160 → SL trails to 160 - 2 = 158 in memory
         await rt.on_tick("12345", 160.0, tick)
 
         assert pos["trailing_sl"] == 158.0
-        assert mock_kotak.modify_order.called
-        mod_call = mock_kotak.modify_order.call_args
-        assert float(mod_call.kwargs["trigger_price"]) == 158.0
+        # Software SL: no exchange call
+        assert not mock_kotak.modify_order.called
 
 
 class TestClosePosition:
@@ -469,9 +460,9 @@ class TestClosePosition:
 
         assert result["status"] == "closed"
         assert result["exit_reason"] == "timer"
-        # SL should be cancelled
-        mock_kotak.cancel_order.assert_called_with(order_id="SL001")
-        # Exit SELL should be placed
+        # Software SL: cancel_order is NEVER called (no exchange SL order exists)
+        mock_kotak.cancel_order.assert_not_called()
+        # Exit SELL IOC should still be placed
         sell_calls = [c for c in mock_kotak.place_order.call_args_list
                       if c.kwargs.get("transaction_type") == "S"]
         assert len(sell_calls) == 1
@@ -544,6 +535,7 @@ class TestOrderFeed:
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
     async def test_sl_triggered_closes_position(self, mock_db, mock_kotak, mock_market_feed):
+        """Software SL: tick at/below trailing_sl fires IOC SELL and closes position."""
         mock_db.update_position = AsyncMock()
         mock_db.update_trade = AsyncMock()
 
@@ -551,21 +543,28 @@ class TestOrderFeed:
         pos = {
             "id": 100, "trade_id": 1,
             "trading_symbol": "SENSEX82000CE",
-            "entry_price": 150.0, "current_price": 140.0,
+            "entry_price": 150.0, "current_price": 141.0,
             "quantity": 20, "pnl": -200.0,
             "max_ltp": 155.0, "trailing_sl": 140.0,
             "sl_activated": True, "activation_points": 5.0,
-            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "trail_gap": 2.0, "sl_order_id": "SW:100",
             "exit_timer_mins": 10, "exit_slippage": 1.0,
             "opened_at": datetime.now(timezone.utc),
             "status": "open",
         }
         rt._open_positions.append(pos)
 
-        # Simulate exchange SL triggered
-        await rt.handle_order_feed({
-            "data": {"nOrdNo": "SL001", "ordSt": "traded", "flPrc": "139.50"}
-        })
+        # Exit SELL fill mock
+        mock_kotak.order_history.return_value = {
+            "status": "ok",
+            "data": {"data": [{"nOrdNo": "SELL001", "ordSt": "complete",
+                               "avgPrc": "139.50", "fldQty": 20}]},
+        }
+        mock_kotak.place_order.return_value = {"status": "ok", "data": {"nOrdNo": "SELL001"}}
+
+        # Tick at SL level → software SL fires IOC SELL
+        tick = {"symbol": "SENSEX82000CE", "tk": "12345"}
+        await rt.on_tick("12345", 140.0, tick)
 
         assert len(rt._open_positions) == 0
         mock_db.update_position.assert_called()
@@ -573,6 +572,7 @@ class TestOrderFeed:
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
     async def test_sl_rejected_replaces(self, mock_db, mock_kotak, mock_market_feed):
+        """Software SL: order_feed rejected events for sl_order_id are ignored (no exchange SL)."""
         mock_db.update_position = AsyncMock()
 
         rt = make_trader(mock_kotak, mock_market_feed)
@@ -583,21 +583,22 @@ class TestOrderFeed:
             "quantity": 20, "pnl": -100.0,
             "max_ltp": 155.0, "trailing_sl": 140.0,
             "sl_activated": True, "activation_points": 5.0,
-            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "trail_gap": 2.0, "sl_order_id": "SW:100",
             "exit_timer_mins": 10, "exit_slippage": 1.0,
             "opened_at": datetime.now(timezone.utc),
             "status": "open",
         }
         rt._open_positions.append(pos)
 
-        # SL order rejected → should attempt re-place
-        mock_kotak.place_order.return_value = {"status": "ok", "data": {"nOrdNo": "SL002"}}
+        # Order feed "rejected" on BUY entry order — should be resolved via waiter
         await rt.handle_order_feed({
-            "data": {"nOrdNo": "SL001", "ordSt": "rejected", "rejRsn": "Insufficient margin"}
+            "data": {"nOrdNo": "BUY001", "ordSt": "rejected", "rejRsn": "Insufficient margin"}
         })
 
-        # Should have attempted to re-place SL
-        assert mock_kotak.place_order.called
+        # Position remains open (software SL unaffected by order feed)
+        assert len(rt._open_positions) == 1
+        # No new exchange SL order placed
+        assert not mock_kotak.place_order.called
 
 
 class TestReconciliation:
@@ -606,32 +607,164 @@ class TestReconciliation:
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
     async def test_reconcile_missing_sl(self, mock_db, mock_kotak, mock_market_feed):
+        """Software SL: reconcile migrates a legacy exchange SL ID to SW: sentinel."""
         mock_db.update_position = AsyncMock()
 
         rt = make_trader(mock_kotak, mock_market_feed)
 
-        # Position has SL order that's NOT in the order book
+        # Position has a legacy exchange SL order ID (from before migration)
         pos = {
             "id": 100, "trade_id": 1,
             "trading_symbol": "SENSEX82000CE",
             "entry_price": 150.0, "current_price": 148.0,
             "quantity": 20, "trailing_sl": 140.0,
-            "sl_order_id": "MISSING_SL",
+            "sl_order_id": "LEGACY_SL_001",  # Not a SW: sentinel
             "status": "open",
         }
         rt._open_positions.append(pos)
 
-        # Order book returns SL001 but NOT MISSING_SL
         mock_kotak.get_order_book.return_value = {
-            "data": [{"nOrdNo": "SL001", "ordSt": "trigger pending"}]
+            "data": [{"nOrdNo": "OTHER", "ordSt": "trigger pending"}]
         }
-        mock_kotak.place_order.return_value = {"status": "ok", "data": {"nOrdNo": "SL_NEW"}}
 
         await rt.reconcile_orders()
 
-        # Should have re-placed the SL
-        assert mock_kotak.place_order.called
-        assert pos["sl_order_id"] == "SL_NEW"
+        # Should have migrated legacy SL to software SL sentinel
+        assert pos["sl_order_id"].startswith("SW:")
+        # No new exchange order placed
+        assert not mock_kotak.place_order.called
+
+
+class TestReconcileTradedSL:
+    """Tests for reconcile with software SL (SW: sentinel pattern)."""
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_reconcile_traded_sl_closes_position(self, mock_db, mock_kotak, mock_market_feed):
+        """SW: sentinel positions are left alone by reconcile — tick handler fires exits."""
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 140.0,
+            "quantity": 20, "trailing_sl": 140.0,
+            "sl_order_id": "SW:100",  # Software SL sentinel
+            "status": "open",
+            "exit_slippage": 1.0,
+        }
+        rt._open_positions.append(pos)
+
+        mock_kotak.get_order_book.return_value = {
+            "data": [{"nOrdNo": "SOME_BUY_ORDER", "ordSt": "complete"}]
+        }
+
+        await rt.reconcile_orders()
+
+        # Software SL position stays open — tick handler fires exit
+        assert len(rt._open_positions) == 1
+        # No new exchange order placed
+        assert not mock_kotak.place_order.called
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_reconcile_rejected_sl_replaces(self, mock_db, mock_kotak, mock_market_feed):
+        """Legacy exchange SL ID (no SW: prefix) gets migrated to software SL."""
+        mock_db.update_position = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 148.0,
+            "quantity": 20, "trailing_sl": 140.0,
+            "sl_order_id": "LEGACY_SL_XYZ",  # Old exchange order (pre-migration)
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+
+        mock_kotak.get_order_book.return_value = {
+            "data": [{"nOrdNo": "OTHER", "ordSt": "trigger pending"}]
+        }
+
+        await rt.reconcile_orders()
+
+        # Should migrate to software SL sentinel
+        assert pos["sl_order_id"].startswith("SW:")
+        assert len(rt._open_positions) == 1
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_reconcile_reprotect_cap_forces_exit(self, mock_db, mock_kotak, mock_market_feed):
+        """SW: sentinel positions are never force-closed by reconcile (tick handler does it)."""
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 148.0,
+            "quantity": 20, "trailing_sl": 140.0,
+            "sl_order_id": "SW:100",
+            "status": "open",
+            "exit_slippage": 1.0,
+        }
+        rt._open_positions.append(pos)
+
+        mock_kotak.get_order_book.return_value = {
+            "data": [{"nOrdNo": "SOME_BUY", "ordSt": "complete"}]
+        }
+
+        await rt.reconcile_orders()
+
+        # Software SL position stays open — tick handler fires exits
+        assert len(rt._open_positions) == 1
+
+
+class TestClosePositionNoReason:
+    """Tests for close_position when exit_reason is None."""
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_close_position_no_reason_still_sells(self, mock_db, mock_kotak, mock_market_feed):
+        """close_position with exit_reason=None should still place a SELL order."""
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+
+        # Exit fill verification
+        mock_kotak.order_history.return_value = {
+            "status": "ok",
+            "data": {"data": [{"nOrdNo": "SELL001", "ordSt": "traded", "flPrc": "148.0", "flQty": "20"}]},
+        }
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        pos = {
+            "id": 100, "trade_id": 1,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 148.0,
+            "quantity": 20, "pnl": -40.0,
+            "max_ltp": 150.0, "trailing_sl": 140.0,
+            "sl_activated": False, "activation_points": 5.0,
+            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "exit_timer_mins": 10, "exit_slippage": 1.0,
+            "opened_at": datetime.now(timezone.utc),
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+
+        result = await rt.close_position(100, exit_price=148.0)  # No exit_reason
+
+        # Should still place SELL + close
+        sell_calls = [c for c in mock_kotak.place_order.call_args_list
+                      if c.kwargs.get("transaction_type") == "S"]
+        assert len(sell_calls) == 1
+        assert result["status"] == "closed"
 
 
 class TestRehydrate:
@@ -653,7 +786,7 @@ class TestRehydrate:
             {"id": 100, "trade_id": 2, "trading_symbol": "SENSEX81500PE",
              "entry_price": 120.0, "current_price": 125.0, "pnl": 100.0,
              "quantity": 20, "max_ltp": 125.0, "trailing_sl": 115.0,
-             "status": "open", "sl_activated": 0, "sl_order_id": "SL001"}
+             "status": "open", "sl_activated": 0, "sl_order_id": "SW:100"}
         ])
 
         rt = make_trader(mock_kotak, mock_market_feed)
@@ -661,7 +794,8 @@ class TestRehydrate:
 
         assert len(rt._pending_orders) == 1
         assert len(rt._open_positions) == 1
-        assert rt._open_positions[0]["sl_order_id"] == "SL001"
+        # Software SL: sentinel preserved as-is on rehydration
+        assert rt._open_positions[0]["sl_order_id"] == "SW:100"
 
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
@@ -719,20 +853,15 @@ class TestLotSize:
 
 
 class TestRetryLogic:
-    """Test order retry on failure."""
+    """Test software SL sentinel creation."""
 
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
     async def test_retry_on_order_failure(self, mock_db, mock_kotak, mock_market_feed):
+        """Software SL: _place_sl_order returns SW: sentinel immediately (no Kotak call)."""
         mock_db.update_position = AsyncMock()
 
         rt = make_trader(mock_kotak, mock_market_feed)
-
-        # First call fails, second succeeds
-        mock_kotak.place_order.side_effect = [
-            Exception("Network error"),
-            {"status": "ok", "data": {"nOrdNo": "SL001"}},
-        ]
 
         pos = {
             "id": 100, "trading_symbol": "SENSEX82000CE",
@@ -740,32 +869,24 @@ class TestRetryLogic:
         }
 
         sl_id = await rt._place_sl_order(pos, 140.0)
-        assert sl_id == "SL001"
-        assert mock_kotak.place_order.call_count == 2
+        assert sl_id == "SW:100"  # Sentinel = SW:<position_id>
+        assert not mock_kotak.place_order.called  # No exchange order
 
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
     async def test_sl_protect_retry_budget_5x_0_2(self, mock_db, mock_kotak, mock_market_feed):
+        """Software SL: _place_sl_order always succeeds (no exchange to reject)."""
         mock_db.update_position = AsyncMock()
         rt = make_trader(mock_kotak, mock_market_feed)
 
-        mock_kotak.place_order.side_effect = Exception("Network error")
         pos = {
             "id": 100, "trading_symbol": "SENSEX82000CE",
             "quantity": 20, "trailing_sl": 140.0,
         }
 
-        sleep_calls = []
-
-        async def fake_sleep(delay):
-            sleep_calls.append(delay)
-
-        with patch("backend.real_trader.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)):
-            sl_id = await rt._place_sl_order(pos, 140.0)
-
-        assert sl_id is None
-        assert mock_kotak.place_order.call_count == 5
-        assert sleep_calls == [0.2, 0.2, 0.2, 0.2]
+        sl_id = await rt._place_sl_order(pos, 140.0)
+        assert sl_id == "SW:100"
+        assert not mock_kotak.place_order.called
 
 
 class TestDoubleNestedOrderHistory:
@@ -821,7 +942,7 @@ class TestFeedFirstEntryConfirmation:
             await asyncio.sleep(0.3)
             return {"status": "traded", "fill_price": 999.0, "fill_qty": 1}
 
-        rt._verify_fill = AsyncMock(side_effect=slow_poll)
+        rt._poll_order_fill = AsyncMock(side_effect=slow_poll)
 
         order = {"trading_symbol": "SENSEX26MAR76000PE", "quantity": 20, "price": 355.5}
         task = asyncio.create_task(rt._confirm_entry_fill("ORD-FEED-1", order))
@@ -842,7 +963,7 @@ class TestFeedFirstEntryConfirmation:
     @patch("backend.real_trader.db")
     async def test_confirm_entry_fill_falls_back_to_polling(self, mock_db, mock_kotak, mock_market_feed):
         rt = make_trader(mock_kotak, mock_market_feed)
-        rt._verify_fill = AsyncMock(return_value={"status": "traded", "fill_price": 152.0, "fill_qty": 20})
+        rt._poll_order_fill = AsyncMock(return_value={"status": "traded", "fill_price": 152.0, "fill_qty": 20})
 
         order = {"trading_symbol": "SENSEX26MAR76000PE", "quantity": 20, "price": 355.5}
         result = await rt._confirm_entry_fill("ORD-POLL-1", order)
@@ -852,7 +973,7 @@ class TestFeedFirstEntryConfirmation:
         assert result["fill_price"] == pytest.approx(152.0)
         assert result["fill_qty"] == 20
         assert result["confirm_source"] == "poll"
-        rt._verify_fill.assert_awaited_once()
+        rt._poll_order_fill.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
@@ -863,7 +984,7 @@ class TestFeedFirstEntryConfirmation:
             await asyncio.sleep(0.3)
             return {"status": "traded", "fill_price": 999.0, "fill_qty": 1}
 
-        rt._verify_fill = AsyncMock(side_effect=slow_poll)
+        rt._poll_order_fill = AsyncMock(side_effect=slow_poll)
 
         order = {"trading_symbol": "SENSEX26MAR76000PE", "quantity": 20, "price": 355.5}
         task = asyncio.create_task(rt._confirm_entry_fill("ORD-REJ-1", order))
@@ -883,11 +1004,11 @@ class TestFeedFirstEntryConfirmation:
         import backend.real_trader as rt_mod
         rt = make_trader(mock_kotak, mock_market_feed)
 
-        async def very_slow_poll(order_id, order):
+        async def very_slow_poll(order_id, order, **kwargs):
             await asyncio.sleep(1.0)
             return {"status": "traded", "fill_price": 111.0, "fill_qty": 20}
 
-        rt._verify_fill = AsyncMock(side_effect=very_slow_poll)
+        rt._poll_order_fill = AsyncMock(side_effect=very_slow_poll)
 
         old_timeout = rt_mod.FILL_CONFIRM_TIMEOUT_S
         rt_mod.FILL_CONFIRM_TIMEOUT_S = 0.05
@@ -1051,7 +1172,7 @@ class TestTripleNestedProductionFormat:
         rt._ws_broadcast = AsyncMock()
 
         order = {"trading_symbol": "SENSEX76000PE", "quantity": 20, "price": 355.50}
-        result = await rt._verify_fill("260325000470191", order)
+        result = await rt._poll_order_fill("260325000470191", order, label="entry")
 
         assert result is not None
         assert result["status"] == "traded"
@@ -1120,6 +1241,7 @@ class TestRealResponseSafety:
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
     async def test_order_feed_complete_closes_sl_position(self, mock_db, mock_kotak, mock_market_feed):
+        """Software SL: tick at/below trailing_sl fires IOC SELL and closes position."""
         mock_db.update_position = AsyncMock()
         mock_db.update_trade = AsyncMock()
 
@@ -1127,20 +1249,25 @@ class TestRealResponseSafety:
         pos = {
             "id": 100, "trade_id": 1,
             "trading_symbol": "SENSEX82000CE",
-            "entry_price": 150.0, "current_price": 140.0,
+            "entry_price": 150.0, "current_price": 141.0,
             "quantity": 20, "pnl": -200.0,
             "max_ltp": 155.0, "trailing_sl": 140.0,
             "sl_activated": True, "activation_points": 5.0,
-            "trail_gap": 2.0, "sl_order_id": "SL001",
+            "trail_gap": 2.0, "sl_order_id": "SW:100",
             "exit_timer_mins": 10, "exit_slippage": 1.0,
             "opened_at": datetime.now(timezone.utc),
             "status": "open",
         }
         rt._open_positions.append(pos)
 
-        await rt.handle_order_feed({
-            "data": {"nOrdNo": "SL001", "ordSt": "complete", "flPrc": "139.50"}
-        })
+        mock_kotak.place_order.return_value = {"status": "ok", "data": {"nOrdNo": "SELL001"}}
+        mock_kotak.order_history.return_value = {
+            "status": "ok",
+            "data": {"data": [{"nOrdNo": "SELL001", "ordSt": "complete",
+                               "avgPrc": "139.50", "fldQty": 20}]},
+        }
+        tick = {"symbol": "SENSEX82000CE", "tk": "12345"}
+        await rt.on_tick("12345", 140.0, tick)
 
         assert len(rt._open_positions) == 0
 
@@ -1155,7 +1282,7 @@ class TestRealResponseSafety:
             "trading_symbol": "SENSEX82000CE",
             "entry_price": 150.0, "current_price": 148.0,
             "quantity": 20, "trailing_sl": 140.0,
-            "sl_order_id": "SL001",
+            "sl_order_id": "SW:100",  # Software SL sentinel
             "status": "open",
         }
         rt._open_positions.append(pos)
@@ -1165,14 +1292,14 @@ class TestRealResponseSafety:
             "stat": "Ok",
             "data": {
                 "data": [
-                    {"nOrdNo": "SL001", "ordSt": "trigger pending"}
+                    {"nOrdNo": "OTHER_BUY", "ordSt": "complete"}
                 ]
             }
         }
 
         await rt.reconcile_orders()
 
-        # SL exists; no replacement order should be placed
+        # SW: sentinel — no exchange order to replace, no place_order call
         mock_kotak.place_order.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1207,12 +1334,13 @@ class TestSLSafety:
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
     async def test_fill_order_sl_fail_attempts_emergency_exit(self, mock_db, mock_kotak, mock_market_feed):
+        """Software SL: _fill_order always succeeds (sentinel never fails), no emergency exit needed."""
         mock_db.update_trade = AsyncMock()
         mock_db.save_position = AsyncMock(return_value=100)
         mock_db.delete_pending_order = AsyncMock()
+        mock_db.update_position = AsyncMock()
 
         rt = make_trader(mock_kotak, mock_market_feed)
-        rt._place_sl_order = AsyncMock(return_value=None)
         rt.close_position = AsyncMock(return_value={"status": "closed"})
 
         order = {
@@ -1225,11 +1353,16 @@ class TestSLSafety:
             "trail_gap": 2.0,
             "exit_timer_mins": 10,
             "exit_slippage": 1.0,
+            "signal_trail_initial_sl": "telegram",
+            "signal_stoploss": 140.0,
         }
 
         await rt._fill_order(order, 150.0, filled_qty=20)
 
-        rt.close_position.assert_awaited_once_with(100, exit_price=150.0, exit_reason="sl_protect_fail")
+        # Software SL always sets SW: sentinel — no emergency exit
+        assert len(rt._open_positions) == 1
+        assert rt._open_positions[0]["sl_order_id"].startswith("SW:")
+        rt.close_position.assert_not_awaited()
 
 
 class TestClosePositionSafety:

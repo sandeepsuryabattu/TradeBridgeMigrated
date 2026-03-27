@@ -164,14 +164,23 @@ function bindEventListeners() {
 
     $('#btn-clear')?.addEventListener('click', () => {
         // Reset modal state — no selection, confirm disabled
-        $$('input[name="clear-scope"]').forEach(r => r.checked = false);
+        document.querySelectorAll('input[name="clear-scope"]').forEach(r => r.checked = false);
         const dateRow = $('#clear-date-row');
         if (dateRow) dateRow.style.display = 'none';
         const confirmBtn = $('#btn-confirm-clear');
         if (confirmBtn) confirmBtn.disabled = true;
         const dateInput = $('#clear-date-input');
         if (dateInput) dateInput.value = '';
-        $('#clear-modal').style.display = 'flex';
+        
+        // FIX: The clear-modal is incorrectly nested inside confirm-real-modal (HTML bug)
+        // Move it out to body level by reparenting it
+        const clearModal = $('#clear-modal');
+        if (clearModal && clearModal.parentElement && clearModal.parentElement.id !== document.body.id) {
+            document.body.appendChild(clearModal);
+        }
+        
+        // Show modal
+        if (clearModal) clearModal.style.display = 'flex';
     });
 
     $('#btn-kill')?.addEventListener('click', async () => {
@@ -1328,7 +1337,10 @@ function renderPositions() {
     const realisedEl = $('#pnl-realised');
     const closed = state.positions.filter(p => p.status === 'closed');
     if (realisedEl) {
-        const realisedPnl = closed.reduce((sum, p) => sum + (p.pnl || 0), 0);
+        const realisedPnl = closed.reduce((sum, p) => {
+            const net = calculateNetPnL(p);
+            return sum + (net ?? p.pnl ?? 0);
+        }, 0);
         realisedEl.textContent = `₹${realisedPnl.toFixed(2)}`;
         realisedEl.className = `pnl-value ${realisedPnl > 0 ? 'positive' : realisedPnl < 0 ? 'negative' : ''}`;
     }
@@ -1423,7 +1435,7 @@ function renderClosedPositions(closed, container) {
         const posId = String(p.id);
         if (existingIds.has(posId)) return; // Already rendered, don't re-render immutable snapshots
 
-        const pnl      = p.pnl || 0;
+        const pnl      = calculateNetPnL(p) ?? p.pnl ?? 0;
         const pnlClass = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
         const exitTime = formatTime(p.closed_at);
         
@@ -1502,12 +1514,14 @@ function renderTrades() {
                 <tr>
                     <th>Symbol</th><th>Side</th>
                     <th>Qty</th><th>Price</th><th>Fill</th><th>Exit</th>
-                    <th>P&L</th><th>Mode</th><th>Status</th>
+                    <th>P&L</th><th>Net P&L</th><th>Mode</th><th>Status</th>
                     <th>Entered</th><th>Exited</th>
                 </tr>
             </thead>
             <tbody>
-                ${filtered.map(t => `
+                ${filtered.map(t => {
+                    const netPnL = calculateNetPnL(t);
+                    return `
                     <tr>
                         <td class="mono">${esc(t.trading_symbol || '-')}</td>
                         <td>${t.transaction_type === 'B' ? '🟢 BUY' : '🔴 SELL'}</td>
@@ -1518,12 +1532,15 @@ function renderTrades() {
                         <td class="mono" style="color:${(t.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">
                             ${t.pnl != null ? '₹' + t.pnl.toFixed(2) : '-'}
                         </td>
+                        <td class="mono" style="color:${(netPnL || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">
+                            ${netPnL != null ? '₹' + netPnL.toFixed(2) : '-'}
+                        </td>
                         <td>${t.mode === 'paper' ? '📄' : '🔴'} ${t.mode || '-'}</td>
                         <td><span class="trade-status ${t.status || ''}">${t.status || '-'}</span></td>
                         <td class="mono">${formatTime(t.fill_time || t.opened_at)}</td>
                         <td class="mono">${t.closed_at ? formatTime(t.closed_at) : '-'}</td>
-                    </tr>
-                `).join('')}
+                    </tr>`;
+                }).join('')}
             </tbody>
         </table>
     `;
@@ -1670,6 +1687,52 @@ function updateBadge(id, connected) {
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+// Net P&L calculation constants (BSE F&O Options)
+const CHARGES = {
+    stt_rate: 0.001,           // 0.1% on premium
+    txn_rate: 0.000325,        // 0.0325% on premium
+    sebi_rate: 0.000001,       // 0.0001% (₹10/crore)
+    stamp_rate: 0.00003,      // 0.003% on buy side
+    brokerage_per_side: 0.05, // ₹0.05 per side
+    gst_rate: 0.18            // 18%
+};
+
+function calculateNetPnL(trade) {
+    // Support both trade and position field names
+    const fillPrice = trade.fill_price || trade.entry_price || 0;
+    const exitPrice = trade.exit_price || trade.current_price || 0;
+    const quantity = trade.quantity || 1;
+    const pnl = trade.pnl || 0;
+
+    if (fillPrice <= 0 || exitPrice <= 0) return null;
+
+    // Total premium (per unit price × quantity)
+    const buyPremium = fillPrice * quantity;
+    const sellPremium = exitPrice * quantity;
+
+    // Brokerage per side (both buy and sell = ₹0.10 total)
+    const totalBrokerage = CHARGES.brokerage_per_side * 2;
+    
+    // Buy side charges
+    const sttBuy = buyPremium * CHARGES.stt_rate;
+    const txnBuy = buyPremium * CHARGES.txn_rate;
+    const sebiBuy = buyPremium * CHARGES.sebi_rate;
+    const stampBuy = buyPremium * CHARGES.stamp_rate;
+    const gstBuy = CHARGES.gst_rate * (totalBrokerage + sebiBuy + txnBuy);
+
+    // Sell side charges
+    const sttSell = sellPremium * CHARGES.stt_rate;
+    const txnSell = sellPremium * CHARGES.txn_rate;
+    const sebiSell = sellPremium * CHARGES.sebi_rate;
+    const gstSell = CHARGES.gst_rate * (totalBrokerage + sebiSell + txnSell);
+
+    // Total charges
+    const totalCharges = sttBuy + txnBuy + sebiBuy + stampBuy + gstBuy +
+                         sttSell + txnSell + sebiSell + gstSell;
+
+    return pnl - totalCharges;
+}
+
 function formatTime(iso) {
     if (!iso) return '-';
     try {
@@ -1799,25 +1862,46 @@ function bindClearModal() {
     });
 
     $('#btn-confirm-clear')?.addEventListener('click', async () => {
+        console.log('[CLEAR] Button clicked, checking state...');
         const scope = document.querySelector('input[name="clear-scope"]:checked')?.value;
-        if (!scope) return;
+        console.log('[CLEAR] Selected scope:', scope);
+        
+        if (!scope) {
+            console.log('[CLEAR] ERROR: No scope selected');
+            toast('Please select what to clear', 'warning');
+            return;
+        }
 
-        const date = scope === 'date' ? ($('#clear-date-input')?.value || null) : null;
+        const dateInput = $('#clear-date-input');
+        const date = scope === 'date' ? (dateInput?.value || null) : null;
+        console.log('[CLEAR] Date value:', date);
+        
         if (scope === 'date' && !date) {
-            return toast('Please pick a date to clear', 'warning');
+            console.log('[CLEAR] ERROR: Date required but not selected');
+            toast('Please pick a date to clear', 'warning');
+            return;
         }
 
         const confirmText = date
             ? `Clear all data for ${date}? This cannot be undone.`
             : 'Clear ALL dashboard data? This cannot be undone.';
-        if (!confirm(confirmText)) return;
+        console.log('[CLEAR] Showing confirm, scope:', scope);
+        
+        const userConfirm = confirm(confirmText);
+        console.log('[CLEAR] User confirmed:', userConfirm);
+        if (!userConfirm) {
+            console.log('[CLEAR] User cancelled');
+            return;
+        }
 
+        console.log('[CLEAR] Calling API with:', { date, scope });
         try {
-            await fetch(`${API_BASE}/api/clear`, {
+            const response = await fetch(`${API_BASE}/api/clear`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ date }),
             });
+            console.log('[CLEAR] API response status:', response.status, response.statusText);
 
             if (date === null) {
                 // Full wipe — reset all state

@@ -74,22 +74,20 @@ class TelegramListener:
             # Register message handler
             @self.client.on(events.NewMessage())
             async def handler(event):
-                # ── DEBUG LOGGING ──
+                # ── FILTERING ──
+                # Drop silently if not from our target channel
+                if self._channel_id:
+                    if event.chat_id != self._channel_id:
+                        return
+
+                # ── DEBUG LOGGING (target channel only) ──
                 try:
                     chat = await event.get_chat()
                     chat_id = getattr(chat, 'id', 'Unknown')
                     chat_title = getattr(chat, 'title', 'Private/Unknown')
-                    log.info(f"📩 Raw Telegram Event: [Chat {chat_id} ({chat_title})] {event.message.text[:50]}...")
+                    log.info(f"📩 Telegram Event: [Chat {chat_id} ({chat_title})] {event.message.text[:50]}...")
                 except Exception as e:
                     log.debug(f"Error logging raw event: {e}")
-
-                # ── FILTERING ──
-                # If TELEGRAM_CHANNEL_ID is set, only process those.
-                # If not set (or for temporary debugging), process all.
-                if self._channel_id:
-                    # Telethon expects comparison with the integer ID
-                    if event.chat_id != self._channel_id:
-                        return
 
                 await self._handle_message(event)
 
