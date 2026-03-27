@@ -66,8 +66,7 @@ class TradeManager:
         self.paper_trader.set_active_mode_fn(lambda: self.mode)
         self.real_trader.set_active_mode_fn(lambda: self.mode)
 
-        # Background task handles for reconciliation + EOD
-        self._real_reconcile_task: Optional[asyncio.Task] = None
+        # Background task handle for EOD check
         self._real_eod_task: Optional[asyncio.Task] = None
 
         # [FIX #25] Stop-trading flag — when True, signals are saved/broadcast
@@ -462,23 +461,9 @@ class TradeManager:
     # ── Background Tasks ──────────────────────────────────────────────────────
 
     def _start_real_background_tasks(self):
-        """Launch reconciliation and EOD-check loops for real trading."""
-        if self._real_reconcile_task is None or self._real_reconcile_task.done():
-            self._real_reconcile_task = asyncio.ensure_future(self._reconcile_loop())
+        """Launch EOD-check loop for real trading."""
         if self._real_eod_task is None or self._real_eod_task.done():
             self._real_eod_task = asyncio.ensure_future(self._eod_loop())
-
-    async def _reconcile_loop(self):
-        """Every 30s, verify exchange SL orders are intact."""
-        while True:
-            try:
-                await asyncio.sleep(30)
-                if self.mode == "real" and self.kotak.is_authenticated:
-                    await self.real_trader.reconcile_orders()
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                log.exception("reconcile_loop error")
 
     async def _eod_loop(self):
         """Every 60s, check for EOD auto-close."""

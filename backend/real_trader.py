@@ -1393,77 +1393,6 @@ class RealTrader:
 
     # ── Reconciliation ────────────────────────────────────────────────────────
 
-    async def reconcile_orders(self):
-        """Verify all expected SL orders still exist on exchange.
-
-        FIX #4: Inverted reconcile logic. Instead of maintaining a whitelist of
-        "known active" statuses, we only consider an SL order as missing if it
-        appears in the order book with a TERMINAL status (traded/rejected/cancelled).
-        This prevents false re-placement when the order is in a transient state
-        (e.g. "modify pending", "after market order req received").
-
-        If the order is completely absent from the order book (e.g. Kotak dropped
-        it silently), we also re-place — that case is handled by the `not found`
-        branch below.
-        """
-        if not self.kotak or not self.kotak.is_authenticated:
-            return
-
-        if not self._open_positions:
-            return
-
-        try:
-            order_book = await asyncio.to_thread(self.kotak.get_order_book)
-            if not order_book or not isinstance(order_book, dict):
-                return
-
-            orders = self._extract_order_rows(order_book)
-            if not orders and isinstance(order_book, dict):
-                raw_orders = order_book.get("data", [])
-                if isinstance(raw_orders, list):
-                    orders = raw_orders
-            if not isinstance(orders, list):
-                return
-
-            # Kotak order book returns multiple rows per order (one per status
-            # transition, oldest → newest).  We MUST use only the LATEST row per
-            # nOrdNo to determine current status.  Using any earlier row risks
-            # marking a live "trigger pending" SL as "terminal" because a prior
-            # status update (e.g. "complete" from the entry BUY fill earlier in
-            # the day) appears in the same history list — this caused a live trade
-            # force-exit and real financial loss.
-            latest_by_order_id: dict[str, dict] = {}
-            for o in orders:
-                oid = str(o.get("nOrdNo", "")).strip()
-                if oid:
-                    latest_by_order_id[oid] = o  # last row wins (oldest → newest)
-
-            all_order_ids: set[str] = set(latest_by_order_id.keys())
-            terminal_order_ids: set[str] = {
-                oid for oid, o in latest_by_order_id.items()
-                if str(o.get("ordSt", "")).lower().strip() in _TERMINAL_ORDER_STATUSES
-            }
-
-            # Software SL: positions have a "SW:<id>" sentinel, not a real order.
-            # Reconcile still verifies the position is alive and can force-exit
-            # if the tick feed has been dead for too long (handled by check_timeouts).
-            # No order-book checks needed for SL — tick handler fires exits directly.
-            for pos in list(self._open_positions):
-                if pos.get("status") != "open":
-                    continue
-                sl_id = pos.get("sl_order_id", "")
-                if sl_id and not str(sl_id).startswith("SW:"):
-                    # Legacy real exchange SL order still in DB from before migration.
-                    # Treat as software SL — reset sentinel so it doesn't get checked.
-                    log.info(
-                        "RECONCILE: Migrating legacy exchange SL %s → software SL for %s",
-                        sl_id, pos["trading_symbol"],
-                    )
-                    await self._place_sl_order(pos, pos.get("trailing_sl", 0))
-
-        except Exception:
-            log.exception("reconcile_orders failed")
-
     # ── Cancel a single pending order ─────────────────────────────────────────
 
     async def cancel_pending_order(self, trade_id: int) -> dict:
@@ -1675,11 +1604,6 @@ class RealTrader:
         # rather than silently re-placing an SL on a ghost position.
         if restored_positions and self.kotak and self.kotak.is_authenticated:
             await self._verify_sl_orders_on_startup()
-
-        try:
-            await self.reconcile_orders()
-        except Exception:
-            log.exception("rehydrate_from_db: reconcile_orders failed after rehydrate")
 
     async def _verify_sl_orders_on_startup(self):
         """Check if any restored SL order was triggered while service was down.
