@@ -1373,3 +1373,97 @@ class TestModeGuard:
 
         assert mock_kotak.place_order.called
         assert len(rt._open_positions) == 1
+
+
+# ── Regression: Broker downtime during exit (2026-03-27) ─────────────────────
+
+class TestBrokerDownSafeguard:
+    """
+    Ensures that if the broker API fails during an automated exit (SL trigger),
+    the position is NOT lost and remains in 'closing' state for manual resolution.
+    """
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_exit_api_failure_keeps_position_open(
+        self, mock_db, mock_kotak, mock_market_feed
+    ):
+        """
+        GIVEN an open position with a software SL
+        WHEN the SL triggers but Kotak place_order fails
+        THEN the position state must REVERT to 'open' (via finally block)
+        so that the monitor continues to attempt exit on next ticks.
+        """
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+
+        # Simulate broker connection error on the SELL IOC
+        mock_kotak.place_order.side_effect = Exception("Kotak API is down")
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        rt.set_active_mode_fn(lambda: "real")
+
+        pos = {
+            "id": 999, "trade_id": 123,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 145.0,
+            "quantity": 20, "trailing_sl": 140.0,
+            "sl_activated": True, "sl_order_id": "SW:999",
+            "status": "open",
+        }
+        rt._open_positions.append(pos)
+
+        # Trigger SL exit via tick
+        tick = {"symbol": "SENSEX82000CE", "tk": "12345"}
+        await rt.on_tick("12345", 140.0, tick)
+
+        # Position should revert to 'open' because exit failed
+        assert len(rt._open_positions) == 1
+        assert rt._open_positions[0]["status"] == "open"
+        
+        # update_trade('closed') should NOT have been called
+        closed_calls = [c for c in mock_db.update_trade.call_args_list 
+                       if c.args[1].get("status") == "closed"]
+        assert len(closed_calls) == 0
+
+class TestExecutionEdgeCases:
+    """Tests for price gaps and other execution edge cases."""
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_price_gap_exit(self, mock_db, mock_kotak, mock_market_feed):
+        """If price gaps below SL, it should exit at the first available tick."""
+        mock_db.update_position = AsyncMock()
+        mock_db.update_trade = AsyncMock()
+        mock_db.save_position = AsyncMock(return_value=100)
+        mock_db.delete_pending_order = AsyncMock()
+
+        # Exit SELL fill at the gap price (135.0)
+        mock_kotak.order_history.return_value = {
+            "status": "ok",
+            "data": {"data": [{"nOrdNo": "SELL-GAP", "ordSt": "complete", "avgPrc": "135.0", "fldQty": 20}]}
+        }
+        mock_kotak.place_order.return_value = {"status": "ok", "data": {"nOrdNo": "SELL-GAP"}}
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        rt.set_active_mode_fn(lambda: "real")
+
+        pos = {
+            "id": 101, "trade_id": 10,
+            "trading_symbol": "SENSEX82000CE",
+            "entry_price": 150.0, "current_price": 145.0,
+            "quantity": 20, "trailing_sl": 140.0,
+            "sl_activated": True, "sl_order_id": "SW:101",
+            "status": "open", "exit_slippage": 1.0,
+        }
+        rt._open_positions.append(pos)
+
+        # Signal gaps from 145 straight to 135 (below 140 SL)
+        tick = {"symbol": "SENSEX82000CE", "tk": "12345"}
+        await rt.on_tick("12345", 135.0, tick)
+
+        # Should have exited
+        assert len(rt._open_positions) == 0
+        # The SELL order should have been placed with slippage from 135
+        sell_call = [c for c in mock_kotak.place_order.call_args_list if c.kwargs.get("transaction_type") == "S"][0]
+        assert float(sell_call.kwargs["price"]) == 134.0  # 135 - 1.0 slippage
