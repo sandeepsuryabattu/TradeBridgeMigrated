@@ -26,29 +26,29 @@
 
 // ── Globals ──────────────────────────────────────────────────────────────────
 const API_BASE = window.location.origin;
-const WS_URL   = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 
-let ws             = null;
+let ws = null;
 let reconnectTimer = null;
 
 const state = {
-    messages:     [],
-    signals:      [],
-    trades:       [],
-    positions:    [],
-    mode:         'paper',
-    lotSize:      1,
-    strategy:     {},
-    tradeFilter:  'all',
+    messages: [],
+    signals: [],
+    trades: [],
+    positions: [],
+    mode: 'paper',
+    lotSize: 1,
+    strategy: {},
+    tradeFilter: 'all',
     selectedDate: null,
-    wsConnected:  false,
-    sensex_ltp:   0,
-    stopTrading:  false,
+    wsConnected: false,
+    sensex_ltp: 0,
+    stopTrading: false,
     kotakBalance: null,
 };
 
 // ── DOM Helpers ───────────────────────────────────────────────────────────────
-const $  = (sel) => document.querySelector(sel);
+const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 const esc = (str) => String(str)
     .replace(/&/g, '&amp;')
@@ -61,9 +61,9 @@ function startTimerTick() {
     if (timerTickInterval) return;
     timerTickInterval = setInterval(() => {
         document.querySelectorAll('.timer-tag').forEach(el => {
-            const start       = el.dataset.timerStart;
-            const mins        = parseFloat(el.dataset.timerMins  || 10);
-            const label       = el.dataset.timerLabel            || '';
+            const start = el.dataset.timerStart;
+            const mins = parseFloat(el.dataset.timerMins || 10);
+            const label = el.dataset.timerLabel || '';
             const tradeStatus = (el.dataset.tradeStatus || '').toLowerCase();
             const hideTimerStatuses = new Set(['filled', 'open', 'closed', 'cancelled', 'rejected', 'failed', 'expired']);
             if (tradeStatus && tradeStatus !== 'pending' && hideTimerStatuses.has(tradeStatus)) {
@@ -74,10 +74,10 @@ function startTimerTick() {
             el.style.display = '';
             const remaining = getCountdown(start, mins);
             if (remaining === null) {
-                el.textContent  = `⌛ ${label}: expired`;
+                el.textContent = `⌛ ${label}: expired`;
                 el.style.opacity = '0.5';
             } else {
-                el.textContent  = `⏳ ${label}: ${remaining}`;
+                el.textContent = `⏳ ${label}: ${remaining}`;
                 el.style.opacity = '1';
             }
         });
@@ -109,7 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // ── Event Listeners ───────────────────────────────────────────────────────────
 function bindEventListeners() {
     const hamburger = $('#btn-hamburger');
-    const menu      = $('#header-menu');
+    const menu = $('#header-menu');
     if (hamburger && menu) {
         hamburger.addEventListener('click', () => menu.classList.toggle('open'));
         document.addEventListener('click', (e) => {
@@ -171,14 +171,14 @@ function bindEventListeners() {
         if (confirmBtn) confirmBtn.disabled = true;
         const dateInput = $('#clear-date-input');
         if (dateInput) dateInput.value = '';
-        
+
         // FIX: The clear-modal is incorrectly nested inside confirm-real-modal (HTML bug)
         // Move it out to body level by reparenting it
         const clearModal = $('#clear-modal');
         if (clearModal && clearModal.parentElement && clearModal.parentElement.id !== document.body.id) {
             document.body.appendChild(clearModal);
         }
-        
+
         // Show modal
         if (clearModal) clearModal.style.display = 'flex';
     });
@@ -186,7 +186,7 @@ function bindEventListeners() {
     $('#btn-kill')?.addEventListener('click', async () => {
         if (!confirm('⚠️ KILL SWITCH\n\nThis will:\n• Close ALL open positions at current price\n• Cancel ALL pending orders\n\nAre you sure?')) return;
         try {
-            const res  = await fetch(`${API_BASE}/api/kill`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/api/kill`, { method: 'POST' });
             const data = await res.json();
             toast(`Killed: ${data.positions_closed} positions closed, ${data.orders_cancelled} orders cancelled`, 'warning');
         } catch {
@@ -241,10 +241,10 @@ function bindEventListeners() {
         const btn = e.target.closest('.btn-cancel-pending');
         if (!btn) return;
         e.stopPropagation();
-        const tradeId  = parseInt(btn.dataset.tradeId);
+        const tradeId = parseInt(btn.dataset.tradeId);
         const signalId = parseInt(btn.dataset.signalId);
         if (!tradeId) return;
-        btn.disabled    = true;
+        btn.disabled = true;
         btn.textContent = '⏳';
         cancelPendingOrder(tradeId, signalId);
     });
@@ -269,7 +269,7 @@ function bindEventListeners() {
 // ── Mobile Resizers ───────────────────────────────────────────────────────────
 function setupMobileResizers() {
     if (window.innerWidth > 768) return;
-    
+
     $$('.panel').forEach(panel => {
         const resizer = document.createElement('div');
         resizer.className = 'panel-resizer';
@@ -346,9 +346,9 @@ function handleWSMessage(msg) {
         switch (msg.type) {
             case 'init':
                 // Server is the source of truth — replace local state on every reconnect
-                if (msg.data.trades)    state.trades    = msg.data.trades;
-                if (msg.data.positions) state.positions  = msg.data.positions;
-                if (msg.data.messages)  state.messages   = msg.data.messages;
+                if (msg.data.trades) state.trades = msg.data.trades;
+                if (msg.data.positions) state.positions = msg.data.positions;
+                if (msg.data.messages) state.messages = msg.data.messages;
                 if (msg.data.signals) {
                     state.signals = msg.data.signals;
                     state.signals.forEach(s => { if (s.last_ltp) s.live_ltp = s.last_ltp; });
@@ -382,7 +382,7 @@ function handleWSMessage(msg) {
                     );
                     if (existingIdx !== -1) {
                         state.signals[existingIdx].trade_status = 'replaced';
-                        state.signals[existingIdx].status_note  = 'Replaced by newer signal';
+                        state.signals[existingIdx].status_note = 'Replaced by newer signal';
                     }
                 }
                 state.signals.unshift(msg.data);
@@ -428,7 +428,7 @@ function handleWSMessage(msg) {
                             const sigIdx = state.signals.findIndex(s => s.id === primaryTrade.signal_id);
                             if (sigIdx !== -1) {
                                 state.signals[sigIdx].trade_status = 'filled';
-                                state.signals[sigIdx].status_note  = `Filled @ ₹${(msg.data.entry_price || msg.data.fill_price || 0).toFixed(2)}`;
+                                state.signals[sigIdx].status_note = `Filled @ ₹${(msg.data.entry_price || msg.data.fill_price || 0).toFixed(2)}`;
                                 renderSignals();
                             }
                         }
@@ -464,9 +464,9 @@ function handleWSMessage(msg) {
                 if (upd.signal_id) {
                     const sigIdx = state.signals.findIndex(s => s.id === upd.signal_id);
                     if (sigIdx !== -1) {
-                        if (upd.status)      state.signals[sigIdx].trade_status = upd.status;
-                        if (upd.status_note) state.signals[sigIdx].status_note  = upd.status_note;
-                        if (upd.min_ltp)     state.signals[sigIdx].min_ltp      = upd.min_ltp;
+                        if (upd.status) state.signals[sigIdx].trade_status = upd.status;
+                        if (upd.status_note) state.signals[sigIdx].status_note = upd.status_note;
+                        if (upd.min_ltp) state.signals[sigIdx].min_ltp = upd.min_ltp;
                         renderSignals();
                     }
                 }
@@ -494,7 +494,7 @@ function handleWSMessage(msg) {
                 if (msg.data.symbol) {
                     const incomingSymbol = msg.data.symbol.toUpperCase();
                     state.signals.forEach(s => {
-                        const idxStr    = (s.idx || s.index || 'SENSEX').toUpperCase().replace(/\s/g, '');
+                        const idxStr = (s.idx || s.index || 'SENSEX').toUpperCase().replace(/\s/g, '');
                         const suffixStr = `${s.strike}${s.option_type}`.toUpperCase().replace(/\s/g, '');
                         if (incomingSymbol.startsWith(idxStr) && incomingSymbol.endsWith(suffixStr)) {
                             s.live_ltp = msg.data.ltp;
@@ -554,7 +554,7 @@ function handleWSMessage(msg) {
                 break;
 
             case 'order_alert': {
-                const level   = msg.data.level || 'info';
+                const level = msg.data.level || 'info';
                 const alertMsg = msg.data.message || 'Order alert';
                 const typeMap = { error: 'error', warning: 'warning', success: 'success', info: 'info' };
                 toast(alertMsg, typeMap[level] || 'info');
@@ -601,12 +601,12 @@ async function fetchInitialData() {
                 updateStopTradingUI();
             }
         }
-        if (msgsRes.ok)   state.messages  = await msgsRes.json();
+        if (msgsRes.ok) state.messages = await msgsRes.json();
         if (sigsRes.ok) {
             state.signals = await sigsRes.json();
             state.signals.forEach(s => { if (s.last_ltp) s.live_ltp = s.last_ltp; });
         }
-        if (tradesRes.ok) state.trades    = await tradesRes.json();
+        if (tradesRes.ok) state.trades = await tradesRes.json();
         deriveSignalTradeStatuses();
 
         if (!state.selectedDate) {
@@ -627,7 +627,7 @@ async function setMode(mode, totp = null, force = false) {
     try {
         const body = { mode, force };
         if (totp) body.totp = totp;
-        const res  = await fetch(`${API_BASE}/api/mode`, {
+        const res = await fetch(`${API_BASE}/api/mode`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -652,10 +652,10 @@ async function setMode(mode, totp = null, force = false) {
 
 async function kotakLogin() {
     try {
-        const res  = await fetch(`${API_BASE}/api/auth/login`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/auth/login`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'ok') {
-            $('#otp-row').style.display       = 'none';
+            $('#otp-row').style.display = 'none';
             $('#kotak-auth-status').textContent = '✅ Authenticated';
             updateBadge('badge-kotak', true);
             toast('Kotak Neo authenticated automatically!', 'success');
@@ -669,14 +669,14 @@ async function kotakLogin() {
 async function submitOTP() {
     const otp = $('#otp-input').value.trim();
     try {
-        const res  = await fetch(`${API_BASE}/api/auth/2fa`, {
+        const res = await fetch(`${API_BASE}/api/auth/2fa`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ otp: otp || null }),
         });
         const data = await res.json();
         if (data.status === 'ok') {
-            $('#otp-row').style.display       = 'none';
+            $('#otp-row').style.display = 'none';
             $('#kotak-auth-status').textContent = '✅ Authenticated';
             updateBadge('badge-kotak', true);
             toast('Kotak Neo authenticated!', 'success');
@@ -688,7 +688,7 @@ async function sendTestSignal() {
     const text = $('#test-signal-input').value.trim();
     if (!text) return toast('Enter a signal message', 'warning');
     try {
-        const res    = await fetch(`${API_BASE}/api/test-signal`, {
+        const res = await fetch(`${API_BASE}/api/test-signal`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text, sender: 'Test' }),
@@ -708,7 +708,7 @@ async function sendTestSignal() {
 async function exitPosition(positionId) {
     if (!confirm('Exit this position at current price?')) return;
     try {
-        const res  = await fetch(`${API_BASE}/api/positions/${positionId}/exit`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/positions/${positionId}/exit`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'closed' || data.status === 'ok') {
             toast('Exit submitted — awaiting confirmation', 'info');
@@ -720,7 +720,7 @@ async function exitPosition(positionId) {
 
 async function cancelPendingOrder(tradeId, signalId) {
     try {
-        const res  = await fetch(`${API_BASE}/api/orders/${tradeId}/cancel`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/orders/${tradeId}/cancel`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'ok') {
             toast(`Cancelled: ${data.trading_symbol || 'pending order'}`, 'info');
@@ -729,7 +729,7 @@ async function cancelPendingOrder(tradeId, signalId) {
                 const sigIdx = state.signals.findIndex(s => s.id === signalId);
                 if (sigIdx !== -1) {
                     state.signals[sigIdx].trade_status = 'cancelled';
-                    state.signals[sigIdx].status_note  = 'Cancelled by user';
+                    state.signals[sigIdx].status_note = 'Cancelled by user';
                     renderSignals();
                 }
             }
@@ -743,7 +743,7 @@ async function setLotSize() {
     const lots = parseInt($('#lot-input').value);
     if (!lots || lots < 1) return toast('Lot size must be at least 1', 'warning');
     try {
-        const res  = await fetch(`${API_BASE}/api/settings/lot-size`, {
+        const res = await fetch(`${API_BASE}/api/settings/lot-size`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ lots }),
@@ -757,7 +757,7 @@ async function setLotSize() {
 // ── Fallback Actions [FIX #25] ────────────────────────────────────────────────
 function setFallbackBtnState(btn, loading, label) {
     if (!btn) return;
-    btn.disabled   = loading;
+    btn.disabled = loading;
     btn.textContent = loading ? '⏳ Working…' : label;
 }
 
@@ -765,7 +765,7 @@ async function reconnectMarketFeed() {
     const btn = $('#btn-reconnect-market-feed');
     setFallbackBtnState(btn, true, '🔌 Reconnect Market Feed');
     try {
-        const res  = await fetch(`${API_BASE}/api/reconnect-market-feed`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/reconnect-market-feed`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'ok') {
             toast(`✅ ${data.message}`, 'success');
@@ -783,7 +783,7 @@ async function reconnectTelegram() {
     const btn = $('#btn-reconnect-telegram');
     setFallbackBtnState(btn, true, '📡 Reconnect Telegram');
     try {
-        const res  = await fetch(`${API_BASE}/api/reconnect-telegram`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/reconnect-telegram`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'ok') {
             toast(`✅ ${data.message}`, 'success');
@@ -801,7 +801,7 @@ async function resubscribeSignals() {
     const btn = $('#btn-resubscribe-signals');
     setFallbackBtnState(btn, true, '🔔 Re-subscribe Signals');
     try {
-        const res  = await fetch(`${API_BASE}/api/resubscribe-signals`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/resubscribe-signals`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'ok') {
             toast(`✅ ${data.message}`, 'success');
@@ -828,7 +828,7 @@ async function restartBackend() {
     const btn = $('#btn-restart-backend');
     setFallbackBtnState(btn, true, '🔄 Restart Backend');
     try {
-        const res  = await fetch(`${API_BASE}/api/restart-backend`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/restart-backend`, { method: 'POST' });
         const data = await res.json();
         toast(`🔄 ${data.message}`, 'warning');
         // Close settings modal — it'll reopen cleanly after reconnect
@@ -855,7 +855,7 @@ async function clearSignalTracker() {
     const btn = $('#btn-clear-signal-tracker');
     setFallbackBtnState(btn, true, '🧹 Clear Signal Tracker');
     try {
-        const res  = await fetch(`${API_BASE}/api/clear-signal-tracker`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/clear-signal-tracker`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'ok') {
             toast(`✅ ${data.message}`, 'success');
@@ -870,11 +870,11 @@ async function clearSignalTracker() {
 }
 
 function bindFallbackActions() {
-    $('#btn-reconnect-market-feed')?.addEventListener('click',  reconnectMarketFeed);
-    $('#btn-reconnect-telegram')?.addEventListener('click',     reconnectTelegram);
-    $('#btn-resubscribe-signals')?.addEventListener('click',    resubscribeSignals);
-    $('#btn-restart-backend')?.addEventListener('click',        restartBackend);
-    $('#btn-clear-signal-tracker')?.addEventListener('click',   clearSignalTracker);
+    $('#btn-reconnect-market-feed')?.addEventListener('click', reconnectMarketFeed);
+    $('#btn-reconnect-telegram')?.addEventListener('click', reconnectTelegram);
+    $('#btn-resubscribe-signals')?.addEventListener('click', resubscribeSignals);
+    $('#btn-restart-backend')?.addEventListener('click', restartBackend);
+    $('#btn-clear-signal-tracker')?.addEventListener('click', clearSignalTracker);
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -887,13 +887,13 @@ async function loadByDate(date) {
             fetch(`${API_BASE}/api/trades?date=${dateParam}&limit=500`),
             fetch(`${API_BASE}/api/positions?status=&date=${dateParam === 'all' ? '' : dateParam}`),
         ]);
-        if (msgsRes.ok)   state.messages = await msgsRes.json();
+        if (msgsRes.ok) state.messages = await msgsRes.json();
         if (sigsRes.ok) {
             state.signals = await sigsRes.json();
             state.signals.forEach(s => { if (s.last_ltp) s.live_ltp = s.last_ltp; });
         }
         if (tradesRes.ok) state.trades = await tradesRes.json();
-        if (posRes.ok)    state.positions = await posRes.json();
+        if (posRes.ok) state.positions = await posRes.json();
         // Derive AFTER both signals and trades are loaded
         deriveSignalTradeStatuses();
         state.selectedDate = date;
@@ -931,16 +931,16 @@ function deriveSignalTradeStatuses() {
     // Map trade statuses → signal trade_status labels
     // [FIX #30] Added 'pending' mapping so cancel button shows on page reload
     const TRADE_TO_SIGNAL = {
-        'pending':   'pending',
-        'filled':    'filled',
-        'open':      'filled',
-        'closed':    'closed',
-        'expired':   'expired',
-        'replaced':  'replaced',
+        'pending': 'pending',
+        'filled': 'filled',
+        'open': 'filled',
+        'closed': 'closed',
+        'expired': 'expired',
+        'replaced': 'replaced',
         'cancelled': 'cancelled',
-        'stopped':   'stopped',
-        'ignored':   'ignored',
-        'failed':    'failed',
+        'stopped': 'stopped',
+        'ignored': 'ignored',
+        'failed': 'failed',
     };
 
     state.signals.forEach(s => {
@@ -965,7 +965,7 @@ function deriveSignalTradeStatuses() {
         group.slice(0, -1).forEach(s => {
             if (!TERMINAL.includes(s.trade_status || '')) {
                 s.trade_status = 'replaced';
-                s.status_note  = 'Replaced by newer signal';
+                s.status_note = 'Replaced by newer signal';
             }
         });
     });
@@ -974,19 +974,19 @@ function deriveSignalTradeStatuses() {
 
 // ── Health Monitor ──────────────────────────────────────────────────────────
 const healthState = {
-    lastPong:        null,
-    lastSensexTick:  null,
+    lastPong: null,
+    lastSensexTick: null,
     lastInstrumentTick: null,
-    marketFeed:      false,
-    telegram:        false,
-    kotak:           false,
+    marketFeed: false,
+    telegram: false,
+    kotak: false,
 };
 
 // NSE holidays fetched from Upstox — cached for the session
 let _nseHolidays = null;
 async function fetchNSEHolidays() {
     try {
-        const res  = await fetch('https://api.upstox.com/v2/market/holidays');
+        const res = await fetch('https://api.upstox.com/v2/market/holidays');
         const data = await res.json();
         if (data.status === 'success') {
             _nseHolidays = new Set(
@@ -1019,52 +1019,52 @@ function toggleHealthPanel() {
 }
 
 function getHealthChecks() {
-    const now      = Date.now();
+    const now = Date.now();
     const inMarket = isMarketHours();
     const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const checks   = [];
+    const checks = [];
 
     // 1. WebSocket
     checks.push({
-        label:  'WebSocket',
-        ok:     state.wsConnected,
-        warn:   false,
+        label: 'WebSocket',
+        ok: state.wsConnected,
+        warn: false,
         detail: state.wsConnected ? 'Connected' : 'Disconnected — reconnecting',
     });
 
     // 2. Telegram
     checks.push({
-        label:  'Telegram',
-        ok:     healthState.telegram,
-        warn:   false,
+        label: 'Telegram',
+        ok: healthState.telegram,
+        warn: false,
         detail: healthState.telegram ? 'Running' : 'Not connected',
     });
 
     // 3. Kotak Neo
     checks.push({
-        label:  'Kotak Neo',
-        ok:     healthState.kotak,
-        warn:   false,
+        label: 'Kotak Neo',
+        ok: healthState.kotak,
+        warn: false,
         detail: healthState.kotak ? 'Authenticated' : 'Not authenticated',
     });
 
     // 4. Market Feed
     const mfWarn = !inMarket && !healthState.marketFeed;
     checks.push({
-        label:  'Market Feed',
-        ok:     healthState.marketFeed || !inMarket,
-        warn:   mfWarn,
+        label: 'Market Feed',
+        ok: healthState.marketFeed || !inMarket,
+        warn: mfWarn,
         detail: healthState.marketFeed ? 'Running' : (inMarket ? 'Not running during market hours' : 'Off — outside market hours'),
     });
 
     // 5. SENSEX LTP freshness (streams 9:00–15:35)
-    const sensexAge  = healthState.lastSensexTick ? Math.floor((now - healthState.lastSensexTick) / 1000) : null;
-    const sensexOk   = sensexAge !== null && sensexAge < 60;
+    const sensexAge = healthState.lastSensexTick ? Math.floor((now - healthState.lastSensexTick) / 1000) : null;
+    const sensexOk = sensexAge !== null && sensexAge < 60;
     const sensexWarn = !inMarket;
     checks.push({
-        label:  'SENSEX Feed',
-        ok:     sensexOk || sensexWarn,
-        warn:   sensexWarn,
+        label: 'SENSEX Feed',
+        ok: sensexOk || sensexWarn,
+        warn: sensexWarn,
         detail: sensexWarn
             ? 'Outside market hours'
             : (sensexAge === null ? 'No tick received yet' : (sensexOk ? `Live — last tick ${sensexAge}s ago` : `Stale — ${sensexAge}s ago`)),
@@ -1073,16 +1073,16 @@ function getHealthChecks() {
     // 6. Instrument LTP
     const activeSignals = state.signals.filter(s =>
         s.status === 'valid' &&
-        !['filled','closed','expired','replaced','cancelled','stopped'].includes(s.trade_status || '')
+        !['filled', 'closed', 'expired', 'replaced', 'cancelled', 'stopped'].includes(s.trade_status || '')
     );
-    const instrAge  = healthState.lastInstrumentTick ? Math.floor((now - healthState.lastInstrumentTick) / 1000) : null;
-    const instrOk   = instrAge !== null && instrAge < 60;
+    const instrAge = healthState.lastInstrumentTick ? Math.floor((now - healthState.lastInstrumentTick) / 1000) : null;
+    const instrOk = instrAge !== null && instrAge < 60;
     const noSignals = activeSignals.length === 0;
     const instrWarn = !inMarket || noSignals;
     checks.push({
-        label:  'Instrument LTP',
-        ok:     instrOk || instrWarn,
-        warn:   instrWarn,
+        label: 'Instrument LTP',
+        ok: instrOk || instrWarn,
+        warn: instrWarn,
         detail: noSignals
             ? 'No active signals to track'
             : (!inMarket ? 'Outside market hours'
@@ -1092,20 +1092,20 @@ function getHealthChecks() {
 
     // 7. WS Heartbeat
     const pongAge = healthState.lastPong ? Math.floor((now - healthState.lastPong) / 1000) : null;
-    const pongOk  = pongAge !== null && pongAge < 60;
+    const pongOk = pongAge !== null && pongAge < 60;
     checks.push({
-        label:  'WS Heartbeat',
-        ok:     pongOk,
-        warn:   false,
+        label: 'WS Heartbeat',
+        ok: pongOk,
+        warn: false,
         detail: pongAge === null ? 'No pong yet' : (pongOk ? `OK — last pong ${pongAge}s ago` : `Silent for ${pongAge}s`),
     });
 
     // 8. Signal feed today
     const todaySignals = state.signals.filter(s => (s.created_at || s.timestamp || '').slice(0, 10) === todayStr);
     checks.push({
-        label:  'Signal Feed',
-        ok:     todaySignals.length > 0,
-        warn:   todaySignals.length === 0 && !inMarket,
+        label: 'Signal Feed',
+        ok: todaySignals.length > 0,
+        warn: todaySignals.length === 0 && !inMarket,
         detail: todaySignals.length > 0
             ? `${todaySignals.length} signal(s) today — last at ${formatTime(todaySignals[0].created_at || todaySignals[0].timestamp)}`
             : (inMarket ? 'No signals received today' : 'No signals yet today'),
@@ -1114,9 +1114,9 @@ function getHealthChecks() {
     // 9. Trade activity today
     const todayTrades = state.trades.filter(t => (t.created_at || t.fill_time || '').slice(0, 10) === todayStr);
     checks.push({
-        label:  'Trade Activity',
-        ok:     true,
-        warn:   false,
+        label: 'Trade Activity',
+        ok: true,
+        warn: false,
         detail: todayTrades.length > 0
             ? `${todayTrades.length} trade(s) today — last at ${formatTime(todayTrades[0].created_at || todayTrades[0].fill_time)}`
             : 'No trades today',
@@ -1124,9 +1124,9 @@ function getHealthChecks() {
 
     // 10. Stop Trading flag
     checks.push({
-        label:  'Trading Active',
-        ok:     !state.stopTrading,
-        warn:   !!state.stopTrading,
+        label: 'Trading Active',
+        ok: !state.stopTrading,
+        warn: !!state.stopTrading,
         detail: state.stopTrading ? 'Stop trading is ON — no new orders will be placed' : 'Enabled',
     });
 
@@ -1136,10 +1136,10 @@ function getHealthChecks() {
 function renderHealthChecks() {
     const container = document.getElementById('health-checks');
     if (!container) return;
-    const checks  = getHealthChecks();
+    const checks = getHealthChecks();
     container.innerHTML = checks.map(c => {
         const color = c.warn ? 'var(--yellow, #f59e0b)' : (c.ok ? 'var(--green)' : 'var(--red)');
-        const icon  = c.warn ? '⚠️' : (c.ok ? '✅' : '❌');
+        const icon = c.warn ? '⚠️' : (c.ok ? '✅' : '❌');
         return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg);border-radius:6px;border:1px solid var(--border)">
             <span style="font-size:14px">${icon}</span>
             <div>
@@ -1152,10 +1152,10 @@ function renderHealthChecks() {
 }
 
 function updateHealthBadge() {
-    const checks  = getHealthChecks();
+    const checks = getHealthChecks();
     const anyFail = checks.some(c => !c.ok && !c.warn);
     const anyWarn = checks.some(c => c.warn);
-    const badge   = document.getElementById('badge-health');
+    const badge = document.getElementById('badge-health');
     if (!badge) return;
     badge.className = 'badge ' + (anyFail ? 'badge-disconnected' : anyWarn ? 'badge-warn' : 'badge-connected');
 }
@@ -1169,7 +1169,7 @@ function renderAll() {
 
 function renderMessages() {
     const container = $('#messages-list');
-    const count     = $('#msg-count');
+    const count = $('#msg-count');
     if (!container || !count) return;
     count.textContent = state.messages.length;
 
@@ -1180,16 +1180,16 @@ function renderMessages() {
     if (container.querySelector('.empty-state')) container.innerHTML = '';
 
     const currentIds = new Set([...container.querySelectorAll('.msg-bubble')].map(el => el.dataset.id));
-    const newItems   = state.messages.filter(m => !currentIds.has(String(m.id || m.timestamp)));
+    const newItems = state.messages.filter(m => !currentIds.has(String(m.id || m.timestamp)));
     if (newItems.length === 0) return;
 
     const fragment = document.createDocumentFragment();
     [...newItems].forEach(m => {
-        const id  = m.id || m.timestamp;
+        const id = m.id || m.timestamp;
         const div = document.createElement('div');
-        div.className    = 'msg-bubble';
-        div.dataset.id   = id;
-        div.innerHTML    = `
+        div.className = 'msg-bubble';
+        div.dataset.id = id;
+        div.innerHTML = `
             <div class="msg-sender">${esc(m.sender || 'Unknown')}</div>
             <div class="msg-text">${esc(m.raw_text || m.text || '')}</div>
             <div class="msg-time">${formatTime(m.timestamp || m.created_at)}</div>
@@ -1206,7 +1206,7 @@ function renderMessages() {
 function renderSignals() {
     try {
         const container = $('#signals-list');
-        const count     = $('#signal-count');
+        const count = $('#signal-count');
         if (!container || !count) return;
         count.textContent = state.signals.length;
 
@@ -1226,12 +1226,12 @@ function renderSignals() {
         });
 
         sorted.forEach(s => {
-            const status      = s.status      || 'empty';
-            const isValid     = status        === 'valid';
+            const status = s.status || 'empty';
+            const isValid = status === 'valid';
             const tradeStatus = s.trade_status || '';
-            const timerStart  = s.created_at  || s.timestamp;
+            const timerStart = s.created_at || s.timestamp;
 
-            const ltpVal    = s.live_ltp ? `₹${s.live_ltp.toFixed(2)}` : '--';
+            const ltpVal = s.live_ltp ? `₹${s.live_ltp.toFixed(2)}` : '--';
             const sensexVal = state.sensex_ltp ? state.sensex_ltp.toFixed(2) : '--';
 
             let targetsText = '--';
@@ -1257,11 +1257,11 @@ function renderSignals() {
                     <span class="signal-status ${status}">${status}</span>
                     <div style="display:flex;gap:6px;align-items:center;">
                         ${showTimer
-                            ? `<span class="timer-tag" data-timer-start="${timerStart}" data-timer-mins="${entryMins}" data-timer-label="Entry" data-trade-status="${tradeStatus}">⏳ Entry: --:--</span>`
-                            : ''}
+                    ? `<span class="timer-tag" data-timer-start="${timerStart}" data-timer-mins="${entryMins}" data-timer-label="Entry" data-trade-status="${tradeStatus}">⏳ Entry: --:--</span>`
+                    : ''}
                         ${showCancel
-                            ? `<button class="btn-cancel-pending" data-trade-id="${cancelTradeId}" data-signal-id="${s.id}" title="Cancel pending entry">✕ Cancel</button>`
-                            : ''}
+                    ? `<button class="btn-cancel-pending" data-trade-id="${cancelTradeId}" data-signal-id="${s.id}" title="Cancel pending entry">✕ Cancel</button>`
+                    : ''}
                         ${tradeStatus && tradeStatus !== 'valid' ? `<span class="signal-status ${tradeStatus}">${tradeStatus}</span>` : ''}
                     </div>
                 </div>
@@ -1274,35 +1274,35 @@ function renderSignals() {
                         <div><span class="label">Entry</span><br><span class="value">₹${s.entry_low || 0} - ₹${s.entry_high || 0}</span></div>
                         <div><span class="label">SENSEX</span><br><span class="value ltp-live signal-sensex-ltp">${sensexVal}</span></div>
                         <div><span class="label">LTP</span><br><span class="value ltp-live" id="signal-ltp-${s.id}">${ltpVal}</span></div>
-                        ${s.min_ltp    ? `<div><span class="label">Min LTP</span><br><span class="value">₹${s.min_ltp}</span></div>` : ''}
-                        ${s.stoploss   ? `<div><span class="label">SL</span><br><span class="value">₹${s.stoploss}</span></div>` : ''}
+                        ${s.min_ltp ? `<div><span class="label">Min LTP</span><br><span class="value">₹${s.min_ltp}</span></div>` : ''}
+                        ${s.stoploss ? `<div><span class="label">SL</span><br><span class="value">₹${s.stoploss}</span></div>` : ''}
                         <div><span class="label">Targets</span><br><span class="value">${targetsText}</span></div>
                     </div>
                 ` : ''}
             `;
 
-            const id       = `signal-card-${s.id}`;
-            let card       = document.getElementById(id);
+            const id = `signal-card-${s.id}`;
+            let card = document.getElementById(id);
             const newClass = `signal-card ${tradeStatus || status}`;
 
             if (card) {
                 if (card.className !== newClass || card.dataset.tradeStatus !== tradeStatus) {
-                    card.className           = newClass;
+                    card.className = newClass;
                     card.dataset.tradeStatus = tradeStatus;
-                    card.innerHTML           = cardHtml;
+                    card.innerHTML = cardHtml;
                 }
             } else {
-                card                     = document.createElement('div');
-                card.id                  = id;
-                card.className           = newClass;
+                card = document.createElement('div');
+                card.id = id;
+                card.className = newClass;
                 card.dataset.tradeStatus = tradeStatus;
-                card.innerHTML           = cardHtml;
+                card.innerHTML = cardHtml;
                 container.appendChild(card);
             }
         });
 
         sorted.forEach((s, idx) => {
-            const card     = document.getElementById(`signal-card-${s.id}`);
+            const card = document.getElementById(`signal-card-${s.id}`);
             const expected = container.children[idx];
             if (card && card !== expected) {
                 container.insertBefore(card, expected || null);
@@ -1321,16 +1321,16 @@ function renderSignals() {
 
 function renderPositions() {
     const container = $('#positions-list');
-    const count     = $('#pos-count');
-    const pnlEl     = $('#pnl-value');
+    const count = $('#pos-count');
+    const pnlEl = $('#pnl-value');
     if (!container || !count || !pnlEl) return;
 
     // Closed position refs
     const closedSection = $('#closed-positions-section');
-    const closedList    = $('#closed-positions-list');
-    const closedCount   = $('#closed-pos-count');
+    const closedList = $('#closed-positions-list');
+    const closedCount = $('#closed-pos-count');
 
-    const open     = state.positions.filter(p => p.status === 'open');
+    const open = state.positions.filter(p => p.status === 'open');
     count.textContent = open.length;
 
     const totalPnl = open.reduce((sum, p) => sum + (p.pnl || 0), 0);
@@ -1345,7 +1345,7 @@ function renderPositions() {
         realisedEl.className = `pnl-value ${realisedPnl > 0 ? 'positive' : realisedPnl < 0 ? 'negative' : ''}`;
     }
     pnlEl.textContent = `₹${totalPnl.toFixed(2)}`;
-    pnlEl.className   = `pnl-value ${totalPnl > 0 ? 'positive' : totalPnl < 0 ? 'negative' : ''}`;
+    pnlEl.className = `pnl-value ${totalPnl > 0 ? 'positive' : totalPnl < 0 ? 'negative' : ''}`;
 
     // Update closed section visibility
     if (closedSection && closedList && closedCount) {
@@ -1374,28 +1374,28 @@ function renderPositions() {
     const exitMins = state.strategy.exitTimerMins ?? 10;
 
     open.forEach(p => {
-        const pnl       = p.pnl || 0;
-        const pnlClass  = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
-        const existing  = container.querySelector(`.position-card[data-pos-id="${p.id}"]`);
+        const pnl = p.pnl || 0;
+        const pnlClass = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
+        const existing = container.querySelector(`.position-card[data-pos-id="${p.id}"]`);
 
         if (existing) {
             // [3] Patch only the volatile fields — timer node is untouched
             const pnlDiv = existing.querySelector('.pos-pnl');
             if (pnlDiv) {
                 pnlDiv.textContent = `${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(2)}`;
-                pnlDiv.className   = `pos-pnl ${pnlClass}`;
+                pnlDiv.className = `pos-pnl ${pnlClass}`;
             }
             const ltpSpan = existing.querySelector('.pos-meta .mono');
             if (ltpSpan) ltpSpan.textContent = `₹${(p.current_price || 0).toFixed(2)}`;
-            const slTag  = existing.querySelector('.sl-tag');
-            if (slTag)   slTag.textContent   = `SL: ₹${(p.trailing_sl || 0).toFixed(2)}`;
+            const slTag = existing.querySelector('.sl-tag');
+            if (slTag) slTag.textContent = `SL: ₹${(p.trailing_sl || 0).toFixed(2)}`;
             const maxTag = existing.querySelector('.max-tag');
             if (maxTag && p.max_ltp) maxTag.textContent = `Max: ₹${p.max_ltp.toFixed(2)}`;
         } else {
-            const div           = document.createElement('div');
-            div.className       = 'position-card';
-            div.dataset.posId   = String(p.id);
-            div.innerHTML       = `
+            const div = document.createElement('div');
+            div.className = 'position-card';
+            div.dataset.posId = String(p.id);
+            div.innerHTML = `
                 <div class="pos-info">
                     <div style="display:flex;justify-content:space-between;align-items:center;">
                         <span class="pos-symbol">${esc(p.trading_symbol || '')}</span>
@@ -1423,7 +1423,7 @@ function renderPositions() {
 
 function renderClosedPositions(closed, container) {
     const existingIds = new Set([...container.querySelectorAll('.position-card')].map(c => c.dataset.posId));
-    
+
     // Sort closed so newest closed is first
     const sorted = [...closed].sort((a, b) => {
         const ta = new Date(a.closed_at || a.created_at || 0).getTime();
@@ -1435,17 +1435,17 @@ function renderClosedPositions(closed, container) {
         const posId = String(p.id);
         if (existingIds.has(posId)) return; // Already rendered, don't re-render immutable snapshots
 
-        const pnl      = calculateNetPnL(p) ?? p.pnl ?? 0;
+        const pnl = calculateNetPnL(p) ?? p.pnl ?? 0;
         const pnlClass = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
         const exitTime = formatTime(p.closed_at);
-        
+
         const reasonLabels = {
             'sl': 'Stop Loss Hit',
             'timer': 'Timed Out',
             'kill': 'Kill Switch',
             'user': 'Closed By User'
         };
-        
+
         let reasonTag = '';
         if (p.exit_reason) {
             const label = reasonLabels[p.exit_reason] || p.exit_reason;
@@ -1454,10 +1454,10 @@ function renderClosedPositions(closed, container) {
             reasonTag = `<span class="exit-reason-tag ignored">Closed</span>`;
         }
 
-        const div           = document.createElement('div');
-        div.className       = 'position-card closed';
-        div.dataset.posId   = posId;
-        div.innerHTML       = `
+        const div = document.createElement('div');
+        div.className = 'position-card closed';
+        div.dataset.posId = posId;
+        div.innerHTML = `
             <div class="pos-info">
                 <div style="display:flex;justify-content:space-between;align-items:center;">
                     <span class="pos-symbol">${esc(p.trading_symbol || '')} ${reasonTag}</span>
@@ -1483,7 +1483,7 @@ function toggleClosedPositions() {
     const list = $('#closed-positions-list');
     const chev = $('#closed-positions-chevron');
     if (!list) return;
-    
+
     if (list.style.display === 'none') {
         list.style.display = 'block';
         if (chev) chev.classList.add('open');
@@ -1495,7 +1495,7 @@ function toggleClosedPositions() {
 
 function renderTrades() {
     const container = $('#trades-list');
-    const count     = $('#trade-count');
+    const count = $('#trade-count');
     if (!container || !count) return;
 
     const filtered = state.tradeFilter === 'all'
@@ -1520,15 +1520,15 @@ function renderTrades() {
             </thead>
             <tbody>
                 ${filtered.map(t => {
-                    const netPnL = calculateNetPnL(t);
-                    return `
+        const netPnL = calculateNetPnL(t);
+        return `
                     <tr>
                         <td class="mono">${esc(t.trading_symbol || '-')}</td>
                         <td>${t.transaction_type === 'B' ? '🟢 BUY' : '🔴 SELL'}</td>
                         <td class="mono">${t.quantity || '-'}</td>
                         <td class="mono">₹${(t.price || 0).toFixed(2)}</td>
-                        <td class="mono">${t.fill_price  ? '₹' + t.fill_price.toFixed(2)          : '-'}</td>
-                        <td class="mono">${t.exit_price  ? '₹' + Number(t.exit_price).toFixed(2)  : '-'}</td>
+                        <td class="mono">${t.fill_price ? '₹' + t.fill_price.toFixed(2) : '-'}</td>
+                        <td class="mono">${t.exit_price ? '₹' + Number(t.exit_price).toFixed(2) : '-'}</td>
                         <td class="mono" style="color:${(t.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">
                             ${t.pnl != null ? '₹' + t.pnl.toFixed(2) : '-'}
                         </td>
@@ -1540,7 +1540,7 @@ function renderTrades() {
                         <td class="mono">${formatTime(t.fill_time || t.opened_at)}</td>
                         <td class="mono">${t.closed_at ? formatTime(t.closed_at) : '-'}</td>
                     </tr>`;
-                }).join('')}
+    }).join('')}
             </tbody>
         </table>
     `;
@@ -1552,17 +1552,17 @@ function updateStatusFromData(status) {
     state.mode = status.mode || 'paper';
     updateModeUI();
     updateBadge('badge-telegram', status.telegram);
-    healthState.telegram   = !!status.telegram;
+    healthState.telegram = !!status.telegram;
     healthState.marketFeed = !!status.market_feed;
     if (status.stop_trading != null) state.stopTrading = status.stop_trading;
 
-    const kotak      = status.kotak || {};
-    const isAuth     = kotak.authenticated;
+    const kotak = status.kotak || {};
+    const isAuth = kotak.authenticated;
     healthState.kotak = !!isAuth;
     updateBadge('badge-kotak', isAuth);
 
     const statusText = $('#kotak-auth-status');
-    const otpRow     = $('#otp-row');
+    const otpRow = $('#otp-row');
     if (!statusText) return;
 
     switch (kotak.login_state || (isAuth ? 'logged_in' : 'unknown')) {
@@ -1595,7 +1595,7 @@ function updateStatusFromData(status) {
 
 function updateModeUI() {
     $('#btn-paper')?.classList.toggle('active', state.mode === 'paper');
-    $('#btn-real')?.classList.toggle('active',  state.mode === 'real');
+    $('#btn-real')?.classList.toggle('active', state.mode === 'real');
 
     // Theme: light mode for real, dark for paper
     document.body.classList.toggle('theme-light', state.mode === 'real');
@@ -1627,7 +1627,7 @@ async function fetchBalance() {
                 const cached = localStorage.getItem('kotak_last_balance');
                 if (cached) {
                     const amt = parseFloat(cached);
-                    balEl.textContent = `₹${amt.toLocaleString('en-IN', {maximumFractionDigits: 0})} 🔒`;
+                    balEl.textContent = `₹${amt.toLocaleString('en-IN', { maximumFractionDigits: 0 })} 🔒`;
                     balEl.title = `Last known balance: ₹${amt.toLocaleString('en-IN')}. Live balance unavailable — market closed.`;
                 } else {
                     balEl.textContent = '✓ Market Closed';
@@ -1653,13 +1653,13 @@ async function fetchBalance() {
             if (available !== null && !isNaN(available) && available > 0) {
                 state.kotakBalance = available;
                 localStorage.setItem('kotak_last_balance', String(available));
-                balEl.textContent = `₹${available.toLocaleString('en-IN', {maximumFractionDigits: 0})}`;
+                balEl.textContent = `₹${available.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
                 balEl.title = 'Kotak Available Margin';
             } else {
                 const cached = localStorage.getItem('kotak_last_balance');
                 if (cached) {
                     const amt = parseFloat(cached);
-                    balEl.textContent = `₹${amt.toLocaleString('en-IN', {maximumFractionDigits: 0})} 🔒`;
+                    balEl.textContent = `₹${amt.toLocaleString('en-IN', { maximumFractionDigits: 0 })} 🔒`;
                     balEl.title = `Last known: ₹${amt.toLocaleString('en-IN')}. Live data not available right now.`;
                 } else {
                     balEl.textContent = '✓ Authenticated';
@@ -1674,7 +1674,7 @@ async function fetchBalance() {
             balEl.textContent = '₹--';
             balEl.title = 'Balance unavailable';
         }
-    } catch(e) {
+    } catch (e) {
         console.error('fetchBalance error:', e);
     }
 }
@@ -1682,14 +1682,14 @@ async function fetchBalance() {
 function updateBadge(id, connected) {
     const badge = $(`#${id}`);
     if (!badge) return;
-    badge.classList.toggle('badge-connected',    !!connected);
+    badge.classList.toggle('badge-connected', !!connected);
     badge.classList.toggle('badge-disconnected', !connected);
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 // Net P&L calculation constants (BSE F&O Options)
 const CHARGES = {
-    stt_rate: 0.001,           // 0.1% on premium
+    stt_rate: 0.0015,           // 0.15% on premium
     txn_rate: 0.000325,        // 0.0325% on premium
     sebi_rate: 0.000001,       // 0.0001% (₹10/crore)
     stamp_rate: 0.00003,      // 0.003% on buy side
@@ -1712,7 +1712,7 @@ function calculateNetPnL(trade) {
 
     // Brokerage per side (both buy and sell = ₹0.10 total)
     const totalBrokerage = CHARGES.brokerage_per_side * 2;
-    
+
     // Buy side charges
     const sttBuy = buyPremium * CHARGES.stt_rate;
     const txnBuy = buyPremium * CHARGES.txn_rate;
@@ -1728,7 +1728,7 @@ function calculateNetPnL(trade) {
 
     // Total charges
     const totalCharges = sttBuy + txnBuy + sebiBuy + stampBuy + gstBuy +
-                         sttSell + txnSell + sebiSell + gstSell;
+        sttSell + txnSell + sebiSell + gstSell;
 
     return pnl - totalCharges;
 }
@@ -1754,7 +1754,7 @@ function getCountdown(isoStart, durationMinutes) {
         const diff = (new Date(d).getTime() + durationMinutes * 60000) - Date.now();
         if (diff <= 0) return null;
         const m = Math.floor((diff % 3600000) / 60000);
-        const s = Math.floor((diff % 60000)   / 1000);
+        const s = Math.floor((diff % 60000) / 1000);
         return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     } catch { return null; }
 }
@@ -1840,7 +1840,7 @@ function bindClearModal() {
     // Scope radio buttons — show/hide date picker, enable confirm
     $$('input[name="clear-scope"]').forEach(radio => {
         radio.addEventListener('change', () => {
-            const dateRow    = $('#clear-date-row');
+            const dateRow = $('#clear-date-row');
             const confirmBtn = $('#btn-confirm-clear');
             if (radio.value === 'date') {
                 if (dateRow) dateRow.style.display = 'block';
@@ -1865,7 +1865,7 @@ function bindClearModal() {
         console.log('[CLEAR] Button clicked, checking state...');
         const scope = document.querySelector('input[name="clear-scope"]:checked')?.value;
         console.log('[CLEAR] Selected scope:', scope);
-        
+
         if (!scope) {
             console.log('[CLEAR] ERROR: No scope selected');
             toast('Please select what to clear', 'warning');
@@ -1875,7 +1875,7 @@ function bindClearModal() {
         const dateInput = $('#clear-date-input');
         const date = scope === 'date' ? (dateInput?.value || null) : null;
         console.log('[CLEAR] Date value:', date);
-        
+
         if (scope === 'date' && !date) {
             console.log('[CLEAR] ERROR: Date required but not selected');
             toast('Please pick a date to clear', 'warning');
@@ -1886,7 +1886,7 @@ function bindClearModal() {
             ? `Clear all data for ${date}? This cannot be undone.`
             : 'Clear ALL dashboard data? This cannot be undone.';
         console.log('[CLEAR] Showing confirm, scope:', scope);
-        
+
         const userConfirm = confirm(confirmText);
         console.log('[CLEAR] User confirmed:', userConfirm);
         if (!userConfirm) {
@@ -1905,9 +1905,9 @@ function bindClearModal() {
 
             if (date === null) {
                 // Full wipe — reset all state
-                state.messages  = [];
-                state.signals   = [];
-                state.trades    = [];
+                state.messages = [];
+                state.signals = [];
+                state.trades = [];
                 state.positions = [];
                 const cpList = $('#closed-positions-list');
                 if (cpList) cpList.innerHTML = '';
@@ -1922,14 +1922,14 @@ function bindClearModal() {
                         return new Date(d).toLocaleDateString('en-CA') === date;
                     } catch { return false; }
                 };
-                state.messages  = state.messages.filter(m => !isSameDate(m.timestamp || m.created_at));
-                state.signals   = state.signals.filter(s  => !isSameDate(s.created_at || s.timestamp));
-                state.trades    = state.trades.filter(t   => !isSameDate(t.created_at || t.fill_time));
+                state.messages = state.messages.filter(m => !isSameDate(m.timestamp || m.created_at));
+                state.signals = state.signals.filter(s => !isSameDate(s.created_at || s.timestamp));
+                state.trades = state.trades.filter(t => !isSameDate(t.created_at || t.fill_time));
                 // Positions: only close today's closed ones — open positions untouched
                 state.positions = state.positions.filter(p =>
                     p.status === 'open' || !isSameDate(p.closed_at || p.created_at)
                 );
-                
+
                 // Clear the cached DOM elements for closed positions so they re-render
                 const cpList = $('#closed-positions-list');
                 if (cpList) cpList.innerHTML = '';
@@ -1968,7 +1968,7 @@ function updateStopTradingUI() {
 async function toggleStopTrading() {
     const newState = !state.stopTrading;
     try {
-        const res  = await fetch(`${API_BASE}/api/stop-trading`, {
+        const res = await fetch(`${API_BASE}/api/stop-trading`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: newState }),
@@ -1986,22 +1986,22 @@ async function toggleStopTrading() {
 
 function bindStopTrading() {
     $('#btn-stop-trading-header')?.addEventListener('click', toggleStopTrading);
-    $('#btn-stop-trading-menu')?.addEventListener('click',   toggleStopTrading);
+    $('#btn-stop-trading-menu')?.addEventListener('click', toggleStopTrading);
 }
 
 // ── Strategy ──────────────────────────────────────────────────────────────────
 const STRATEGY_DEFAULTS = {
-    lots:                      1,
-    activationPoints:          5.0,
-    trailGap:                  2.0,
-    bouncePoints:              5,
-    bufferEnabled:             false,
-    bufferPoints:              2.0,
-    entryTimerMins:            10,
-    exitTimerMins:             10,
-    signalTrailInitialSL:      'telegram',
+    lots: 1,
+    activationPoints: 5.0,
+    trailGap: 2.0,
+    bouncePoints: 5,
+    bufferEnabled: false,
+    bufferPoints: 2.0,
+    entryTimerMins: 10,
+    exitTimerMins: 10,
+    signalTrailInitialSL: 'telegram',
     signalTrailInitialSLPoints: 5.0,
-    entrySlippage:             1.0,
+    entrySlippage: 1.0,
 };
 
 async function loadStrategy() {
@@ -2139,9 +2139,9 @@ function populateLotDropdown() {
     const sel = $('#strategy-lots-select');
     if (!sel || sel.options.length > 0) return;
     for (let i = 1; i <= 50; i++) {
-        const opt         = document.createElement('option');
-        opt.value         = i;
-        opt.textContent   = `${i} Lot${i > 1 ? 's' : ''}`;
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = `${i} Lot${i > 1 ? 's' : ''}`;
         sel.appendChild(opt);
     }
 }
@@ -2193,18 +2193,18 @@ function bindStrategyModal() {
     });
 
     $('#btn-strategy-save')?.addEventListener('click', async () => {
-        const lots             = parseInt($('#strategy-lots-select')?.value) || 1;
-        const bouncePoints     = parseInt($('#bounce-points-input')?.value) || 5;
-        const bufferEnabled    = !!$('#buffer-enabled-toggle')?.checked;
-        const bufferPoints     = parseFloat($('#buffer-points-input')?.value) || 2;
+        const lots = parseInt($('#strategy-lots-select')?.value) || 1;
+        const bouncePoints = parseInt($('#bounce-points-input')?.value) || 5;
+        const bufferEnabled = !!$('#buffer-enabled-toggle')?.checked;
+        const bufferPoints = parseFloat($('#buffer-points-input')?.value) || 2;
         const activationPoints = parseFloat($('#sl-activation-points')?.value) || 5;
-        const trailGap         = parseFloat($('#sl-trail-gap')?.value) || 2;
-        const entryTimerMins   = parseInt($('#entry-timer-mins')?.value) || 10;
-        const exitTimerMins    = parseInt($('#exit-timer-mins')?.value) || 10;
-        const entrySlippage    = parseFloat($('#entry-slippage-input')?.value);
+        const trailGap = parseFloat($('#sl-trail-gap')?.value) || 2;
+        const entryTimerMins = parseInt($('#entry-timer-mins')?.value) || 10;
+        const exitTimerMins = parseInt($('#exit-timer-mins')?.value) || 10;
+        const entrySlippage = parseFloat($('#entry-slippage-input')?.value);
 
         // Signal trail initial SL
-        const initSLRadio   = document.querySelector('input[name="signal-trail-initial-sl"]:checked');
+        const initSLRadio = document.querySelector('input[name="signal-trail-initial-sl"]:checked');
         const signalTrailInitialSL = initSLRadio?.value || 'telegram';
         const signalTrailInitialSLPoints = signalTrailInitialSL === 'points_from_ltp'
             ? (parseFloat($('#sl-init-points-value')?.value) || 5)
