@@ -103,6 +103,63 @@ if manager.strategy.get("lots"):
 # Existing positions and pending orders continue to be managed normally.
 _stop_trading: bool = False
 
+# ── Tick pipeline — module-level so route handlers can reference them ─────────
+# [FIX #30] enqueue_tick / tick_consumer were closures inside lifespan() and
+# therefore invisible to route handlers (e.g. reconnect_market_feed), causing
+# NameError on every reconnect attempt. Promoted to module-level.
+SENSEX_INDEX_TOKENS: set[str] = {"1", "999901", "50060"}
+tick_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
+_main_loop: Optional[asyncio.AbstractEventLoop] = None
+_tick_drain_task: list[asyncio.Task] = []
+
+
+def enqueue_tick(token, ltp, data):
+    """Thread-safe: push a tick onto the async queue from a Kotak SDK thread."""
+    global _main_loop
+    if _main_loop is None:
+        return
+    try:
+        _main_loop.call_soon_threadsafe(tick_queue.put_nowait, (token, ltp, data))
+        qsize = tick_queue.qsize()
+        if qsize > 4000:
+            log.warning(
+                "Tick queue at %d/5000 (%.0f%%) — consider increasing maxsize",
+                qsize, qsize / 5000 * 100,
+            )
+    except RuntimeError:
+        pass  # Event loop closed during shutdown
+    except asyncio.QueueFull:
+        log.warning(
+            "Tick queue full — tick dropped (token=%s ltp=%s). "
+            "Increase maxsize or reduce DB write frequency.",
+            token, ltp,
+        )
+
+
+async def tick_consumer():
+    """Drain tick_queue and forward LTP events to WebSocket clients."""
+    while True:
+        try:
+            token, ltp, data = await asyncio.wait_for(tick_queue.get(), timeout=1.0)
+            symbol = data.get("symbol", "")
+            if token in SENSEX_INDEX_TOKENS or symbol == "SENSEX":
+                await ws_manager.broadcast({
+                    "type": "index_ltp",
+                    "data": {"symbol": "SENSEX", "ltp": ltp},
+                })
+            elif symbol:
+                await ws_manager.broadcast({
+                    "type": "instrument_ltp",
+                    "data": {"symbol": symbol, "ltp": ltp},
+                })
+            if symbol:
+                await db.update_signal_ltp(symbol, ltp)
+            tick_queue.task_done()
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            log.exception("Tick consumer error")
+
 
 # ── WebSocket Connection Manager ──────────────────────────────────────────────
 def _json_safe(obj):
@@ -209,55 +266,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(timeout_checker())
 
     # ── Shared tick pipeline (lifespan scope) ────────────────────────────────
-    SENSEX_INDEX_TOKENS = {"1", "999901", "50060"}
-    tick_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
+    # [FIX #30] tick pipeline is now module-level — just capture the running loop
+    global _main_loop, _tick_drain_task
     _main_loop = asyncio.get_running_loop()
-
-    def enqueue_tick(token, ltp, data):
-        """[FIX #5] Catch QueueFull; warn at 80% capacity."""
-        try:
-            _main_loop.call_soon_threadsafe(tick_queue.put_nowait, (token, ltp, data))
-            qsize = tick_queue.qsize()
-            if qsize > 4000:
-                log.warning(
-                    "Tick queue at %d/5000 (%.0f%%) — consider increasing maxsize",
-                    qsize, qsize / 5000 * 100,
-                )
-        except RuntimeError:
-            pass  # Event loop is closed during shutdown — safe to ignore
-        except asyncio.QueueFull:
-            log.warning(
-                "Tick queue full — tick dropped (token=%s ltp=%s). "
-                "Increase maxsize or reduce DB write frequency.",
-                token, ltp,
-            )
-
-    async def tick_consumer():
-        """Drain tick_queue and forward LTP events to WebSocket clients."""
-        while True:
-            try:
-                token, ltp, data = await asyncio.wait_for(tick_queue.get(), timeout=1.0)
-                symbol = data.get("symbol", "")
-                if token in SENSEX_INDEX_TOKENS or symbol == "SENSEX":
-                    await ws_manager.broadcast({
-                        "type": "index_ltp",
-                        "data": {"symbol": "SENSEX", "ltp": ltp},
-                    })
-                elif symbol:
-                    await ws_manager.broadcast({
-                        "type": "instrument_ltp",
-                        "data": {"symbol": symbol, "ltp": ltp},
-                    })
-                if symbol:
-                    await db.update_signal_ltp(symbol, ltp)
-                tick_queue.task_done()
-            except asyncio.TimeoutError:
-                pass
-            except Exception:
-                log.exception("Tick consumer error")  # [FIX #23]
-
-    # [FIX #6] Drain task reference — shared so daily_contract_refresh can cancel/recreate
-    _tick_drain_task: list[asyncio.Task] = []
 
     async def kotak_auto_login():
         if not any(Config.kotak_env().values()):
@@ -789,6 +800,17 @@ async def reconnect_market_feed():
         manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
         manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
         manager.market_feed.add_raw_tick_callback(enqueue_tick)
+
+        # [FIX #30] Restart the tick consumer task if it's dead
+        if _tick_drain_task:
+            old = _tick_drain_task[0]
+            if old.done():
+                _tick_drain_task.clear()
+        if not _tick_drain_task:
+            new_task = asyncio.create_task(tick_consumer())
+            _tick_drain_task.clear()
+            _tick_drain_task.append(new_task)
+            log.info("reconnect_market_feed: tick consumer task (re)started")
 
         await asyncio.sleep(3)
         manager.market_feed.subscribe_batch([
