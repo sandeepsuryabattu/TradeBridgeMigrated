@@ -39,6 +39,9 @@ from . import database as db
 
 log = logging.getLogger(__name__)
 
+# Pre-compiled regex for symbol matching — avoids recompile on every tick
+_SYMBOL_RE = re.compile(r'^([A-Z]+?)(\d{5}(?:CE|PE))$')
+
 # ── Constants ────────────────────────────────────────────────────────────────
 ENTRY_TIMEOUT_MINS       = 10
 POSITION_TIMEOUT_MINS    = 10
@@ -741,6 +744,7 @@ class RealTrader:
                 "fill_price": fill_price,
                 "fill_time":  datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "quantity":   qty,
+                "min_ltp":    order.get("min_ltp"),   # flush deferred min_ltp on fill
             })
         except Exception:
             log.exception("_fill_order: db.update_trade failed")
@@ -841,7 +845,7 @@ class RealTrader:
         tick_upper  = tick_symbol.upper().strip()
         if order_upper == tick_upper:
             return True
-        order_match = re.match(r'^([A-Z]+?)(\d{5}(?:CE|PE))$', order_upper)
+        order_match = _SYMBOL_RE.match(order_upper)
         if order_match:
             if (tick_upper.startswith(order_match.group(1)) and
                     tick_upper.endswith(order_match.group(2))):
@@ -921,10 +925,7 @@ class RealTrader:
                 if in_range:
                     if order.get("min_ltp") is None or ltp < order["min_ltp"]:
                         order["min_ltp"] = ltp
-                        try:
-                            await db.update_trade(order["trade_id"], {"min_ltp": ltp})
-                        except Exception:
-                            log.exception("on_tick: update min_ltp failed")
+                        # DB write deferred to fill/expiry — removed from hot path (perf fix)
                         await self._broadcast("order_update", {
                             "id":          order["trade_id"],
                             "signal_id":   order.get("signal_id"),

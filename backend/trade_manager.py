@@ -112,23 +112,23 @@ class TradeManager:
     async def process_message(self, text: str, sender: str = "", timestamp: str = ""):
         """Full pipeline: receive → parse → deduplicate → execute → broadcast."""
 
-        # 1. Save raw message
-        msg_id = await db.save_message(text, sender=sender)
-
-        # [10] raw_text key matches what db.get_messages() returns on page load
-        await self._broadcast("new_message", {
-            "id":        msg_id,
-            "raw_text":  text,
-            "sender":    sender,
-            "timestamp": timestamp or _utc_now(),
-        })
-
-        # 2. Parse signal
+        # 1. Save raw message + parse signal in parallel (parse is pure CPU, no await needed)
         signal      = parse_signal(text)
         signal_dict = signal.to_dict()
 
-        # 3. Save parsed signal
-        signal_id            = await db.save_signal(msg_id, signal_dict)
+        msg_id = await db.save_message(text, sender=sender)
+
+        # [10] raw_text key matches what db.get_messages() returns on page load
+        # 2+3. Save signal + broadcast new_message concurrently
+        signal_id, _ = await asyncio.gather(
+            db.save_signal(msg_id, signal_dict),
+            self._broadcast("new_message", {
+                "id":        msg_id,
+                "raw_text":  text,
+                "sender":    sender,
+                "timestamp": timestamp or _utc_now(),
+            }),
+        )
         signal_dict["id"]           = signal_id
         signal_dict["message_id"]   = msg_id
 
@@ -219,13 +219,17 @@ class TradeManager:
                 "skipped":    "stop_trading",
             }
 
-        # ── [FIX #3] Dedup: block only if open position exists for this strike ──
+        # ── Dedup: in-memory check — avoids DB round trips (~8ms saved) ──
 
-        # 4a. Open-position duplicate check
-        open_positions = await db.get_positions(mode=None, status="open")  # [SAFETY] cross-mode check
-        for pos in open_positions:
-            if (str(pos.get("strike")) == str(signal.strike) and
-                    str(pos.get("option_type", "")).upper() == signal.option_type.upper()):
+        # 4a. Open-position duplicate check — use in-memory lists (cross-mode)
+        sig_strike    = str(signal.strike)
+        sig_opt       = signal.option_type.upper()
+        sig_suffix    = f"{sig_strike}{sig_opt}"
+
+        all_open = list(self.paper_trader._open_positions) + list(self.real_trader._open_positions)
+        for pos in all_open:
+            if (str(pos.get("strike")) == sig_strike and
+                    str(pos.get("option_type", "")).upper() == sig_opt):
                 log.info(
                     "Signal skipped — position already open for %s-%s",
                     signal.strike, signal.option_type,
@@ -238,33 +242,38 @@ class TradeManager:
                 }
 
         # [1] Cancel any existing pending order for this strike before placing a new one
-        sig_suffix    = f"{signal.strike}{signal.option_type}".upper()
-        pending_trades = [t for t in await db.get_trades(mode=self.mode) if t.get("status") == "pending"]
+        # In-memory scan — avoids db.get_trades() round trip
+        active_pending = (
+            list(self.paper_trader._pending_orders) if self.mode == "paper"
+            else list(self.real_trader._pending_orders)
+        )
         order_replaced = False
         replaced_signal_id = None
 
-        for order in pending_trades:
+        replaced_signal_id = None
+        for order in active_pending:
             order_sym = order.get("trading_symbol", "").upper()
             if order_sym.endswith(sig_suffix):
+                trade_id = order.get("trade_id")
                 try:
-                    await db.update_trade(order["id"], {"status": "replaced"})
+                    await db.update_trade(trade_id, {"status": "replaced"})
                 except Exception:
                     log.exception("process_message: failed to mark order as replaced")
                 # Remove from the active engine's pending list
                 if self.mode == "real":
                     self.real_trader._pending_orders = [
                         po for po in self.real_trader._pending_orders
-                        if po.get("trade_id") != order["id"]
+                        if po.get("trade_id") != trade_id
                     ]
                 else:
                     self.paper_trader._pending_orders = [
                         po for po in self.paper_trader._pending_orders
-                        if po.get("trade_id") != order["id"]
+                        if po.get("trade_id") != trade_id
                     ]
-                log.info("Cancelled old pending order %d for %s", order["id"], sig_suffix)
+                log.info("Cancelled old pending order %d for %s", trade_id, sig_suffix)
                 replaced_signal_id = order.get("signal_id")
                 await self._broadcast("order_update", {
-                    "id":          order["id"],
+                    "id":          trade_id,
                     "signal_id":   replaced_signal_id,
                     "status":      "replaced",
                     "status_note": "Replaced by newer signal",

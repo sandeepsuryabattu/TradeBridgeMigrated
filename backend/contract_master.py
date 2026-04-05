@@ -22,6 +22,7 @@ class ContractMaster:
 
     def __init__(self):
         self._contracts: list[dict] = []
+        self._lookup_index: dict[tuple, dict] = {}   # (strike_str, option_type) -> contract
         self._last_download: Optional[date] = None
 
     @property
@@ -80,6 +81,7 @@ class ContractMaster:
 
             log.info(f"Final SENSEX contracts (nearest expiry): {len(self._contracts)}")
             self._last_download = date.today()
+            self._build_lookup_index()
 
             # Save filtered contracts to CSV for reference
             self._save_to_csv()
@@ -236,16 +238,38 @@ class ContractMaster:
 
     def lookup(self, strike: str, option_type: str) -> Optional[dict]:
         """Look up the instrument token for a SENSEX option by strike and type.
-        
+        O(1) via _lookup_index; falls back to linear scan if index not built.
+
         Args:
             strike: Strike price as string, e.g. "80000"
             option_type: "CE" or "PE"
-            
+
         Returns:
             dict with instrument_token, trading_symbol, etc. or None
         """
         option_type = option_type.upper()
-        
+
+        # Fast path — O(1) dict lookup
+        if self._lookup_index:
+            try:
+                strike_val = str(int(float(strike)))
+                c = self._lookup_index.get((strike_val, option_type))
+                if c:
+                    return {
+                        "instrument_token": str(c.get("pSymbol", "") or c.get("pInstrumentToken", "") or c.get("instrument_token", "")),
+                        "trading_symbol": c.get("pTrdSymbol", "") or c.get("trading_symbol", ""),
+                        "exchange_segment": "bse_fo",
+                        "strike": strike,
+                        "option_type": option_type,
+                        "expiry": c.get("pExpiryDate", "") or c.get("expiry_date", ""),
+                        "lot_size": c.get("lLotSize", "") or c.get("pLotSize", "") or c.get("lot_size", ""),
+                        "tick_size": c.get("dTickSize", "") or c.get("pTickSize", "") or c.get("tick_size", ""),
+                        "raw": c,
+                    }
+            except (ValueError, TypeError):
+                pass  # fall through to linear scan
+
+        # Slow path — O(n) linear scan (fallback when index not built)
         for c in self._contracts:
             # Kotak has a quirky field name: "dStrikePrice;" (with semicolon)
             c_strike = str(
@@ -312,6 +336,27 @@ class ContractMaster:
         except Exception as e:
             log.error(f"Failed to save contract master CSV: {e}")
 
+    def _build_lookup_index(self):
+        """Build O(1) lookup dict from _contracts. Called after download or CSV load."""
+        self._lookup_index = {}
+        for c in self._contracts:
+            c_strike = str(
+                c.get("dStrikePrice;", "") or c.get("pStrikePrice", "") or
+                c.get("strike_price", "") or c.get("dStrikePrice", "") or ""
+            ).strip()
+            c_option = str(c.get("pOptionType", "") or c.get("option_type", "") or "").upper()
+            try:
+                c_strike_val = int(float(c_strike)) if c_strike else 0
+                # Handle Kotak's strike * 100 convention
+                if c_strike_val > 99999:
+                    c_strike_val = c_strike_val // 100
+                key = (str(c_strike_val), c_option)
+                if key not in self._lookup_index:
+                    self._lookup_index[key] = c
+            except (ValueError, TypeError):
+                pass
+        log.info(f"Lookup index built: {len(self._lookup_index)} entries")
+
     def _load_from_csv(self) -> bool:
         """Load contracts from previously saved CSV."""
         if not os.path.exists(MASTER_FILE):
@@ -322,6 +367,7 @@ class ContractMaster:
                 self._contracts = list(reader)
             if self._contracts:
                 log.info(f"Loaded {len(self._contracts)} contracts from cached CSV")
+                self._build_lookup_index()
                 return True
         except Exception as e:
             log.error(f"Failed to load cached contract master: {e}")

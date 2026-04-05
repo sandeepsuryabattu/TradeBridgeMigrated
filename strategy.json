@@ -8,5 +8,5 @@
   "entryTimerMins": 5,
   "exitTimerMins": 5,
   "signalTrailInitialSL": "points_from_ltp",
-  "signalTrailInitialSLPoints": 10.0
+  "signalTrailInitialSLPoints": 3.0
 }

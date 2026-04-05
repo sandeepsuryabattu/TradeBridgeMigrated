@@ -39,6 +39,9 @@ from . import database as db
 
 log = logging.getLogger(__name__)
 
+# Pre-compiled regex for symbol matching — avoids recompile on every tick
+_SYMBOL_RE = re.compile(r'^([A-Z]+?)(\d{5}(?:CE|PE))$')
+
 # ── [FIX #21] Module-level constants — no more magic numbers buried in logic ──
 ENTRY_TIMEOUT_MINS       = 10     # Default — overridden per-order by strategy.entryTimerMins
 POSITION_TIMEOUT_MINS    = 10     # Default — overridden per-position by strategy.exitTimerMins
@@ -117,7 +120,10 @@ class PaperTrader:
                 if created_at and (now - created_at) > timedelta(minutes=entry_mins):
                     log.warning("TIMEOUT: Expiring pending order %s", order["trading_symbol"])
                     try:
-                        await db.update_trade(order["trade_id"], {"status": "expired"})
+                        upd = {"status": "expired"}
+                        if order.get("min_ltp") is not None:
+                            upd["min_ltp"] = order["min_ltp"]  # flush deferred min_ltp on expiry
+                        await db.update_trade(order["trade_id"], upd)
                         if order.get("pending_order_id"):
                             await db.delete_pending_order(order["pending_order_id"])
                     except Exception:
@@ -264,7 +270,7 @@ class PaperTrader:
         tick_upper  = tick_symbol.upper().strip()
         if order_upper == tick_upper:
             return True
-        order_match = re.match(r'^([A-Z]+?)(\d{5}(?:CE|PE))$', order_upper)
+        order_match = _SYMBOL_RE.match(order_upper)
         if order_match:
             if (tick_upper.startswith(order_match.group(1)) and
                     tick_upper.endswith(order_match.group(2))):
@@ -348,10 +354,7 @@ class PaperTrader:
                 if in_range:
                     if order.get("min_ltp") is None or ltp < order["min_ltp"]:
                         order["min_ltp"] = ltp
-                        try:
-                            await db.update_trade(order["trade_id"], {"min_ltp": ltp})
-                        except Exception:
-                            log.exception("on_tick: update min_ltp failed")
+                        # DB write deferred to fill/expiry — removed from hot path (perf fix)
                         log.info("New low for %s: %s", order["trading_symbol"], ltp)
                         await self._broadcast("order_update", {
                             "id":          order["trade_id"],
@@ -479,6 +482,7 @@ class PaperTrader:
                 "status":     "filled",
                 "fill_price": fill_price,
                 "fill_time":  datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "min_ltp":    order.get("min_ltp"),   # flush deferred min_ltp on fill
             })
         except Exception:
             log.exception("_fill_order: db.update_trade failed")

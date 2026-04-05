@@ -81,13 +81,8 @@ class TelegramListener:
                         return
 
                 # ── DEBUG LOGGING (target channel only) ──
-                try:
-                    chat = await event.get_chat()
-                    chat_id = getattr(chat, 'id', 'Unknown')
-                    chat_title = getattr(chat, 'title', 'Private/Unknown')
-                    log.info(f"📩 Telegram Event: [Chat {chat_id} ({chat_title})] {event.message.text[:50]}...")
-                except Exception as e:
-                    log.debug(f"Error logging raw event: {e}")
+                # event.chat_id used directly — avoids get_chat() Telegram network call (~50-200ms)
+                log.info(f"📩 Telegram Event: [Chat {event.chat_id}] {event.message.text[:50]}...")
 
                 await self._handle_message(event)
 

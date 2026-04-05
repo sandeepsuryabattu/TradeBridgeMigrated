@@ -378,7 +378,8 @@ class MarketFeed:
         """
         url = "https://api.upstox.com/v2/market/holidays"
         try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read())
             if data.get("status") == "success":
                 self._nse_holidays_cache = {

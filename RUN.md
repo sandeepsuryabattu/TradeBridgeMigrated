@@ -1,25 +1,84 @@
-## Running the app locally
+## Running the app (Production — Ubuntu Server via PM2)
 
-### Backend (serves API + frontend)
+### Prerequisites
+
+- PM2 installed globally: `npm install -g pm2`
+- Python venv at `./venv/` with all dependencies installed
+- `.env` file in project root with all Kotak/Telegram credentials
+
+### Start / Restart the backend
+
+```bash
+cd /home/ubuntu/telegram-kotak-trader
+pm2 start 3   # start by PM2 id (kotak-trader)
+# or
+pm2 restart kotak-trader
+```
+
+### Stop the backend
+
+```bash
+pm2 stop kotak-trader
+```
+
+### View live logs
+
+```bash
+pm2 logs kotak-trader              # stream live
+pm2 logs kotak-trader --lines 200  # last 200 lines (non-streaming)
+pm2 logs kotak-trader --lines 500 --nostream  # dump and exit
+```
+
+### PM2 process list
+
+```bash
+pm2 list
+```
+
+Relevant entry: **id=3, name=kotak-trader**
+
+### How PM2 starts uvicorn
+
+PM2 runs the backend via the command stored in the PM2 ecosystem config (or auto-detected from the saved process list). The effective command is:
+
+```bash
+/home/ubuntu/telegram-kotak-trader/venv/bin/python3 \
+  venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8001
+```
+
+Stdout → `/home/ubuntu/.pm2/logs/kotak-trader-out.log`  
+Stderr → `/home/ubuntu/.pm2/logs/kotak-trader-error.log`
+
+### Save PM2 process list (survive reboot)
+
+```bash
+pm2 save
+pm2 startup   # follow the printed command to enable systemd auto-start
+```
+
+---
+
+## Local Development (macOS / manual)
 
 From the project root:
 
 ```bash
-cd /Users/chaitanya/Documents/kotaktegramv2
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+source venv/bin/activate
+uvicorn backend.main:app --reload --host 127.0.0.1 --port 8001
 ```
 
-Then open `http://localhost:8000/` in your browser.  
-This single process serves both the FastAPI backend and the frontend dashboard.
+Then open `http://127.0.0.1:8001/` in your browser.
 
-### Optional: serve frontend only (static files)
+---
 
-If you ever want to serve just the static frontend without the API, from the `frontend` directory:
+## Frontend (static files only)
+
+The frontend is served directly by FastAPI as static files — no separate server needed.  
+If you ever want standalone static serving:
 
 ```bash
-cd /Users/chaitanya/Documents/kotaktegramv2/frontend
+cd frontend
 python -m http.server 3000
 ```
 
-Then open `http://localhost:3000/` in your browser (note: API calls will still point to `http://localhost:8000` by default).
-
+Note: API calls will still target `http://localhost:8001` by default.
