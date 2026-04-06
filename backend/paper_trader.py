@@ -47,6 +47,7 @@ ENTRY_TIMEOUT_MINS       = 10     # Default — overridden per-order by strategy
 POSITION_TIMEOUT_MINS    = 10     # Default — overridden per-position by strategy.exitTimerMins
 DEFAULT_BOUNCE_POINTS    = 5      # Default bounce threshold (overridable via strategy)
 DEFAULT_ACTIVATION_PTS   = 5.0    # Default signal_trail activation threshold
+DEFAULT_ACTIVATION_SL_OFFSET = 0.0  # Points subtracted from breakeven SL on activation (0 = no offset)
 DEFAULT_TRAIL_GAP        = 2.0    # Default signal_trail trailing gap
 DEFAULT_LOT_MULTIPLIER   = 20     # Fallback if contract master unavailable
 SIGNAL_TRAIL_FALLBACK    = 10.0   # signal_trail fallback SL when stoploss missing
@@ -191,8 +192,9 @@ class PaperTrader:
                 buffer_points, entry_low, entry_high, signal_stoploss,
             )
 
-        activation_points = float(strategy.get("activationPoints") or DEFAULT_ACTIVATION_PTS)
-        trail_gap         = float(strategy.get("trailGap")         or DEFAULT_TRAIL_GAP)
+        activation_points   = float(strategy.get("activationPoints") or DEFAULT_ACTIVATION_PTS)
+        activation_sl_offset = float(strategy.get("activationSLOffset") or 0.0)
+        trail_gap           = float(strategy.get("trailGap")         or DEFAULT_TRAIL_GAP)
 
         # [FIX #27] Read initial SL source for signal_trail mode
         signal_trail_initial_sl        = strategy.get("signalTrailInitialSL", "telegram")
@@ -228,8 +230,9 @@ class PaperTrader:
             "created_at":        datetime.now(timezone.utc),
             "sl_mode":           "signal_trail",
             "signal_stoploss":   float(signal_stoploss) if signal_stoploss else None,
-            "activation_points": activation_points,
-            "trail_gap":         trail_gap,
+            "activation_points":    activation_points,
+            "activation_sl_offset": activation_sl_offset,
+            "trail_gap":            trail_gap,
             "bounce_points":     bounce_points,
             "entry_logic":       "code",
             "entry_label":       signal.get("entry_label"),
@@ -401,17 +404,20 @@ class PaperTrader:
         new_sl               = None
 
         # ── signal_trail SL logic (only mode) ──
-        entry_price       = pos["entry_price"]
-        activation_points = pos.get("activation_points", DEFAULT_ACTIVATION_PTS)
-        trail_gap         = pos.get("trail_gap", DEFAULT_TRAIL_GAP)
+        entry_price          = pos["entry_price"]
+        activation_points    = pos.get("activation_points", DEFAULT_ACTIVATION_PTS)
+        activation_sl_offset = pos.get("activation_sl_offset", DEFAULT_ACTIVATION_SL_OFFSET)
+        trail_gap            = pos.get("trail_gap", DEFAULT_TRAIL_GAP)
 
         if not pos.get("sl_activated") and ltp >= entry_price + activation_points:
             # FIX #1 (paper): Anchor initial SL at entry + activation_points (breakeven+), NOT at ltp.
             # Setting new_sl = ltp caused immediate exit on the same tick because
             # the SL hit check (ltp <= trailing_sl) evaluated as ltp <= ltp → True.
+            # activationSLOffset (default 0) allows the user to soften the anchor:
+            #   new_sl = entry + activation_points - offset
             pos["sl_activated"] = True
             pos["max_ltp"]      = ltp
-            new_sl              = entry_price + activation_points
+            new_sl              = entry_price + activation_points - activation_sl_offset
             try:
                 await db.update_position(pos["id"], {"sl_activated": 1, "max_ltp": ltp})
             except Exception:
@@ -508,8 +514,9 @@ class PaperTrader:
             "trailing_sl":       initial_sl,
             "sl_mode":           "signal_trail",
             "signal_stoploss":   order.get("signal_stoploss"),
-            "activation_points": order.get("activation_points", DEFAULT_ACTIVATION_PTS),
-            "trail_gap":         order.get("trail_gap", DEFAULT_TRAIL_GAP),
+            "activation_points":    order.get("activation_points", DEFAULT_ACTIVATION_PTS),
+            "activation_sl_offset": order.get("activation_sl_offset", DEFAULT_ACTIVATION_SL_OFFSET),
+            "trail_gap":            order.get("trail_gap", DEFAULT_TRAIL_GAP),
             "sl_activated":      False,
             # [FIX #26] Carry exit timer into position for on_tick timeout check
             "exit_timer_mins":   order.get("exit_timer_mins", POSITION_TIMEOUT_MINS),
@@ -661,8 +668,9 @@ class PaperTrader:
                 "min_ltp":           t.get("min_ltp"),
                 "sl_mode":           "signal_trail",
                 "signal_stoploss":   None,
-                "activation_points": DEFAULT_ACTIVATION_PTS,
-                "trail_gap":         DEFAULT_TRAIL_GAP,
+                "activation_points":    DEFAULT_ACTIVATION_PTS,
+                "activation_sl_offset": DEFAULT_ACTIVATION_SL_OFFSET,
+                "trail_gap":            DEFAULT_TRAIL_GAP,
                 "bounce_points":     DEFAULT_BOUNCE_POINTS,
                 "entry_logic":       "code",
                 "entry_label":       t.get("entry_label"),
@@ -711,8 +719,9 @@ class PaperTrader:
                 "opened_at":     p.get("opened_at", ""),
                 "sl_mode":           "signal_trail",
                 "signal_stoploss":   p.get("signal_stoploss"),
-                "activation_points": p.get("activation_points") or DEFAULT_ACTIVATION_PTS,
-                "trail_gap":         p.get("trail_gap")          or DEFAULT_TRAIL_GAP,
+                "activation_points":    p.get("activation_points") or DEFAULT_ACTIVATION_PTS,
+                "activation_sl_offset": p.get("activation_sl_offset") or DEFAULT_ACTIVATION_SL_OFFSET,
+                "trail_gap":            p.get("trail_gap")          or DEFAULT_TRAIL_GAP,
                 "sl_activated":      bool(p.get("sl_activated", 0)),
                 "exit_reason":       p.get("exit_reason"),
                 # [FIX #26] Exit timer defaults on rehydrate

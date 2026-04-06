@@ -1993,6 +1993,7 @@ function bindStopTrading() {
 const STRATEGY_DEFAULTS = {
     lots: 1,
     activationPoints: 5.0,
+    activationSLOffset: 0.0,
     trailGap: 2.0,
     bouncePoints: 5,
     bufferEnabled: false,
@@ -2065,7 +2066,7 @@ function renderCurrentStrategySummary() {
         ['Entry Timer', `${s.entryTimerMins ?? 10} min`],
         ['Exit Timer', `${s.exitTimerMins ?? 10} min`],
         ['Buffer', s.bufferEnabled ? `ON (+/-${s.bufferPoints || 2})` : 'OFF'],
-        ['Trail', `Act ${s.activationPoints ?? 5} / Gap ${s.trailGap ?? 2}`],
+        ['Trail', `Act ${s.activationPoints ?? 5} / Offset ${s.activationSLOffset ?? 0} / Gap ${s.trailGap ?? 2}`],
         ['Entry Slippage', `${s.entrySlippage ?? 1} pts`],
         ['Initial SL', formatInitialSLSummary(s)],
     ];
@@ -2121,6 +2122,8 @@ function syncStrategyModalToState() {
     // Signal trail SL
     const actInput = $('#sl-activation-points');
     if (actInput) actInput.value = s.activationPoints ?? 5;
+    const offsetInput = $('#sl-activation-sl-offset');
+    if (offsetInput) offsetInput.value = s.activationSLOffset ?? 0;
     const gapInput = $('#sl-trail-gap');
     if (gapInput) gapInput.value = s.trailGap ?? 2;
 
@@ -2198,6 +2201,7 @@ function bindStrategyModal() {
         const bufferEnabled = !!$('#buffer-enabled-toggle')?.checked;
         const bufferPoints = parseFloat($('#buffer-points-input')?.value) || 2;
         const activationPoints = parseFloat($('#sl-activation-points')?.value) || 5;
+        const activationSLOffset = parseFloat($('#sl-activation-sl-offset')?.value) || 0;
         const trailGap = parseFloat($('#sl-trail-gap')?.value) || 2;
         const entryTimerMins = parseInt($('#entry-timer-mins')?.value) || 10;
         const exitTimerMins = parseInt($('#exit-timer-mins')?.value) || 10;
@@ -2229,7 +2233,7 @@ function bindStrategyModal() {
 
         state.strategy = {
             lots, bouncePoints, bufferEnabled, bufferPoints,
-            activationPoints, trailGap,
+            activationPoints, activationSLOffset, trailGap,
             entryTimerMins, exitTimerMins,
             signalTrailInitialSL, signalTrailInitialSLPoints,
             entrySlippage,

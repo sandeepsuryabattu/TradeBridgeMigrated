@@ -75,12 +75,13 @@ class TradeManager:
 
         # Strategy defaults — simplified to bounce-back entry + signal_trail SL
         self.strategy: Dict[str, Any] = {
-            "lots":             1,
-            "activationPoints": 5.0,
-            "trailGap":         2.0,
-            "bouncePoints":     5,
-            "bufferEnabled":    False,
-            "bufferPoints":     2.0,
+            "lots":               1,
+            "activationPoints":   5.0,
+            "activationSLOffset": 0.0,
+            "trailGap":           2.0,
+            "bouncePoints":       5,
+            "bufferEnabled":      False,
+            "bufferPoints":       2.0,
         }
 
         self._ws_broadcast: Optional[Callable] = None

@@ -46,8 +46,9 @@ _SYMBOL_RE = re.compile(r'^([A-Z]+?)(\d{5}(?:CE|PE))$')
 ENTRY_TIMEOUT_MINS       = 10
 POSITION_TIMEOUT_MINS    = 10
 DEFAULT_BOUNCE_POINTS    = 5
-DEFAULT_ACTIVATION_PTS   = 5.0
-DEFAULT_TRAIL_GAP        = 2.0
+DEFAULT_ACTIVATION_PTS        = 5.0
+DEFAULT_ACTIVATION_SL_OFFSET  = 0.0   # Points subtracted from breakeven SL on activation (0 = no offset)
+DEFAULT_TRAIL_GAP             = 2.0
 DEFAULT_LOT_MULTIPLIER   = 20
 SIGNAL_TRAIL_FALLBACK    = 10.0
 DEFAULT_BUFFER_POINTS    = 2.0
@@ -265,8 +266,9 @@ class RealTrader:
             if signal_stoploss is not None:
                 signal_stoploss = float(signal_stoploss) - buffer_points
 
-        activation_points = float(strategy.get("activationPoints") or DEFAULT_ACTIVATION_PTS)
-        trail_gap         = float(strategy.get("trailGap")         or DEFAULT_TRAIL_GAP)
+        activation_points    = float(strategy.get("activationPoints") or DEFAULT_ACTIVATION_PTS)
+        activation_sl_offset = float(strategy.get("activationSLOffset") or 0.0)
+        trail_gap            = float(strategy.get("trailGap")         or DEFAULT_TRAIL_GAP)
         entry_slippage    = float(strategy.get("entrySlippage")    or DEFAULT_ENTRY_SLIPPAGE)
         exit_slippage     = float(strategy.get("exitSlippage")     or DEFAULT_EXIT_SLIPPAGE)
 
@@ -300,8 +302,9 @@ class RealTrader:
             "created_at":        datetime.now(timezone.utc),
             "sl_mode":           "signal_trail",
             "signal_stoploss":   float(signal_stoploss) if signal_stoploss else None,
-            "activation_points": activation_points,
-            "trail_gap":         trail_gap,
+            "activation_points":    activation_points,
+            "activation_sl_offset": activation_sl_offset,
+            "trail_gap":            trail_gap,
             "bounce_points":     bounce_points,
             "entry_logic":       "code",
             "entry_label":       signal.get("entry_label"),
@@ -762,8 +765,9 @@ class RealTrader:
             "trailing_sl":       initial_sl,
             "sl_mode":           "signal_trail",
             "signal_stoploss":   order.get("signal_stoploss"),
-            "activation_points": order.get("activation_points", DEFAULT_ACTIVATION_PTS),
-            "trail_gap":         order.get("trail_gap", DEFAULT_TRAIL_GAP),
+            "activation_points":    order.get("activation_points", DEFAULT_ACTIVATION_PTS),
+            "activation_sl_offset": order.get("activation_sl_offset", DEFAULT_ACTIVATION_SL_OFFSET),
+            "trail_gap":            order.get("trail_gap", DEFAULT_TRAIL_GAP),
             "sl_activated":      False,
             "exit_timer_mins":   order.get("exit_timer_mins", POSITION_TIMEOUT_MINS),
         }
@@ -1059,15 +1063,18 @@ class RealTrader:
         pos["pnl"]           = (ltp - pos["entry_price"]) * pos["quantity"]
         new_sl               = None
 
-        entry_price       = pos["entry_price"]
-        activation_points = pos.get("activation_points", DEFAULT_ACTIVATION_PTS)
-        trail_gap         = pos.get("trail_gap", DEFAULT_TRAIL_GAP)
+        entry_price          = pos["entry_price"]
+        activation_points    = pos.get("activation_points", DEFAULT_ACTIVATION_PTS)
+        activation_sl_offset = pos.get("activation_sl_offset", DEFAULT_ACTIVATION_SL_OFFSET)
+        trail_gap            = pos.get("trail_gap", DEFAULT_TRAIL_GAP)
 
         if not pos.get("sl_activated") and ltp >= entry_price + activation_points:
-            # FIX #1: Anchor initial SL at entry + activation, not at ltp.
+            # FIX #1: Anchor initial SL at entry + activation_points (breakeven+), not at ltp.
+            # activationSLOffset (default 0) lets user soften the anchor:
+            #   new_sl = entry + activation_points - offset
             pos["sl_activated"] = True
             pos["max_ltp"]      = ltp
-            new_sl              = entry_price + activation_points
+            new_sl              = entry_price + activation_points - activation_sl_offset
             try:
                 await db.update_position(pos["id"], {"sl_activated": 1, "max_ltp": ltp})
             except Exception:
@@ -1534,8 +1541,9 @@ class RealTrader:
                 "min_ltp":           t.get("min_ltp"),
                 "sl_mode":           t.get("sl_mode", "signal_trail"),
                 "signal_stoploss":   t.get("signal_stoploss"),
-                "activation_points": float(t.get("activation_points") or DEFAULT_ACTIVATION_PTS),
-                "trail_gap":         float(t.get("trail_gap")          or DEFAULT_TRAIL_GAP),
+                "activation_points":    float(t.get("activation_points") or DEFAULT_ACTIVATION_PTS),
+                "activation_sl_offset": float(t.get("activation_sl_offset") or DEFAULT_ACTIVATION_SL_OFFSET),
+                "trail_gap":            float(t.get("trail_gap")          or DEFAULT_TRAIL_GAP),
                 "bounce_points":     float(t.get("bounce_points")      or DEFAULT_BOUNCE_POINTS),
                 "entry_logic":       t.get("entry_logic", "code"),
                 "entry_label":       t.get("entry_label"),
@@ -1582,8 +1590,9 @@ class RealTrader:
                 "opened_at":     p.get("opened_at", ""),
                 "sl_mode":           p.get("sl_mode", "signal_trail"),
                 "signal_stoploss":   p.get("signal_stoploss"),
-                "activation_points": p.get("activation_points") or DEFAULT_ACTIVATION_PTS,
-                "trail_gap":         p.get("trail_gap")          or DEFAULT_TRAIL_GAP,
+                "activation_points":    p.get("activation_points") or DEFAULT_ACTIVATION_PTS,
+                "activation_sl_offset": p.get("activation_sl_offset") or DEFAULT_ACTIVATION_SL_OFFSET,
+                "trail_gap":            p.get("trail_gap")          or DEFAULT_TRAIL_GAP,
                 "sl_activated":      bool(p.get("sl_activated", 0)),
                 "exit_reason":       p.get("exit_reason"),
                 "exit_timer_mins":   int(p.get("exit_timer_mins") or POSITION_TIMEOUT_MINS),

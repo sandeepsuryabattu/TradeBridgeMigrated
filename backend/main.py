@@ -57,6 +57,7 @@ STRATEGY_FILE = os.path.join(os.path.dirname(__file__), "..", "strategy.json")
 STRATEGY_DEFAULTS = {
     "lots":                      1,
     "activationPoints":          5.0,
+    "activationSLOffset":         0.0,
     "trailGap":                  2.0,
     "bouncePoints":              5,
     "bufferEnabled":             False,
@@ -536,6 +537,7 @@ class StopTradingRequest(BaseModel):
 class StrategyRequest(BaseModel):
     lots:                      int             = 1
     activationPoints:          Optional[float] = 5.0
+    activationSLOffset:        Optional[float] = 0.0
     trailGap:                  Optional[float] = 2.0
     bouncePoints:              Optional[int]   = 5
     bufferEnabled:             bool            = False
