@@ -385,6 +385,9 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         log.exception("daily_contract_refresh: market_feed.stop() failed")
 
+                    # Let SDK WS threads fully terminate before starting new connections
+                    await asyncio.sleep(2)
+
                     manager.market_feed._started_once = False
                     manager.market_feed.start()
                     manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
@@ -794,6 +797,9 @@ async def reconnect_market_feed():
             log.info("reconnect_market_feed: market feed stopped")
         except Exception:
             log.exception("reconnect_market_feed: stop() failed (may already be stopped)")
+
+        # Let SDK WS threads fully terminate before starting new connections
+        await asyncio.sleep(2)
 
         manager.market_feed._started_once = False
         manager.market_feed.start()

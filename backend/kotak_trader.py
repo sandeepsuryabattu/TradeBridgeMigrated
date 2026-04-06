@@ -62,12 +62,53 @@ class KotakTrader:
 
     # ── Authentication ──
 
+    def cleanup_websocket(self):
+        """Kill the SDK's WS threads before re-initialization.
+
+        The Kotak SDK uses a global `ws` variable and run_forever(reconnect=5)
+        in background threads.  When initialize() creates a new NeoAPI client
+        the old threads keep reconnecting, creating ghost connections.
+        This method tears them down.
+        """
+        if self.client and hasattr(self.client, 'NeoWebSocket') and self.client.NeoWebSocket:
+            neo_ws = self.client.NeoWebSocket
+            # Kill the market-data WS
+            if hasattr(neo_ws, 'hsWebsocket') and neo_ws.hsWebsocket:
+                try:
+                    neo_ws.hsWebsocket.close()
+                    log.info("cleanup_websocket: closed hsWebsocket")
+                except Exception:
+                    log.exception("cleanup_websocket: hsWebsocket.close() failed")
+            # Kill the order-feed WS
+            if hasattr(neo_ws, 'hsiWebsocket') and neo_ws.hsiWebsocket:
+                try:
+                    neo_ws.hsiWebsocket.close()
+                    log.info("cleanup_websocket: closed hsiWebsocket")
+                except Exception:
+                    log.exception("cleanup_websocket: hsiWebsocket.close() failed")
+            # Also try to close the global ws from HSWebSocketLib
+            try:
+                from neo_api_client.HSWebSocketLib import ws as sdk_ws
+                if sdk_ws:
+                    sdk_ws.close()
+                    log.info("cleanup_websocket: closed global SDK ws")
+            except Exception:
+                pass
+            # Null out references so the SDK doesn't try to reuse them
+            neo_ws.is_hsw_open = 0
+            neo_ws.is_hsi_open = 0
+            self.client.NeoWebSocket = None
+            log.info("cleanup_websocket: NeoWebSocket torn down")
+
     def initialize(self):
         """Create NeoAPI client with consumer_key."""
         if NeoAPI is None:
             log.warning("neo_api_client not installed — running in offline mode")
             self._last_error = "neo_api_client not installed"
             return False
+
+        # Tear down old WS threads BEFORE creating a new client
+        self.cleanup_websocket()
 
         try:
             self.client = NeoAPI(

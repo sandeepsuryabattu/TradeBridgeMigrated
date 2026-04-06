@@ -144,9 +144,22 @@ class MarketFeed:
             return False
 
     def stop(self):
-        """[4] Intentionally stop the market feed (no reconnect)."""
+        """[4] Intentionally stop the market feed (no reconnect).
+
+        Also tears down the SDK WS so stale threads don't keep reconnecting.
+        """
         self._running = False
         self._flush_tick_buffer()
+
+        # Kill SDK WebSocket threads to prevent ghost reconnections
+        if self.kotak and hasattr(self.kotak, 'cleanup_websocket'):
+            self.kotak.cleanup_websocket()
+
+        # Clear callbacks so a fresh start() re-registers them
+        self._tick_callbacks.clear()
+        self._raw_tick_callbacks.clear()
+        self._order_callbacks.clear()
+
         log.info("Market feed stopped intentionally")
 
     # ── Subscription ──────────────────────────────────────────────────────────
