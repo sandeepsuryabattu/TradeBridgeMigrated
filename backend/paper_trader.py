@@ -387,7 +387,12 @@ class PaperTrader:
     # ── Position tick processor ───────────────────────────────────────────────
 
     async def _process_position_tick(self, pos: dict, ltp: float):
-        """Process a tick for an open position — signal_trail SL only."""
+        """Process a tick for an open position — signal_trail SL only.
+
+        FIX #1 (paper): On activation, SL is anchored at entry_price + activation_points
+        (breakeven+ level), not at current LTP.  Setting new_sl = ltp caused immediate
+        exit the same tick because the SL check ltp <= trailing_sl evaluated as ltp <= ltp.
+        """
         if ltp <= 0:
             return
 
@@ -401,9 +406,12 @@ class PaperTrader:
         trail_gap         = pos.get("trail_gap", DEFAULT_TRAIL_GAP)
 
         if not pos.get("sl_activated") and ltp >= entry_price + activation_points:
+            # FIX #1 (paper): Anchor initial SL at entry + activation_points (breakeven+), NOT at ltp.
+            # Setting new_sl = ltp caused immediate exit on the same tick because
+            # the SL hit check (ltp <= trailing_sl) evaluated as ltp <= ltp → True.
             pos["sl_activated"] = True
             pos["max_ltp"]      = ltp
-            new_sl              = ltp
+            new_sl              = entry_price + activation_points
             try:
                 await db.update_position(pos["id"], {"sl_activated": 1, "max_ltp": ltp})
             except Exception:
