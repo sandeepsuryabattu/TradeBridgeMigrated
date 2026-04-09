@@ -25,6 +25,18 @@ PATCHES APPLIED:
           147s later on days with no market ticks (Sundays, holidays). Fix: check
           weekday >= 5 (Sat/Sun) or cached NSE holiday list before killing the feed.
           Holiday list fetched once per day and cached in _nse_holidays_cache.
+[FIX #31] Self-healing watchdog. Previously, after force-closing the WS the watchdog
+          set _running=False and then skipped all checks (`if not self._running: continue`).
+          If the SDK's run_forever(reconnect=5) failed silently, the feed stayed dead
+          for 48+ minutes (observed 2026-04-09). Fix:
+          (a) Reduced HEARTBEAT_STALE_THRESHOLD 120s → 60s for faster detection.
+          (b) Watchdog no longer skips when _running=False — tracks _last_close_time
+              and triggers a reconnect callback if feed stays down >15s during market hours.
+          (c) After force-close, sleeps 15s then checks recovery; invokes reconnect
+              callback if _running is still False.
+          (d) Reconnect callback is wired by main.py (same logic as /api/reconnect-market-feed).
+          (e) MAX_RECONNECT_ATTEMPTS caps consecutive reconnect tries per session to
+              prevent infinite loops.
 """
 import asyncio
 import logging
@@ -40,9 +52,11 @@ from . import database as db
 
 log = logging.getLogger(__name__)
 
-TICK_BUFFER_SIZE         = 50    # Flush to DB every N ticks
-HEARTBEAT_INTERVAL       = 30    # Seconds between watchdog checks
-HEARTBEAT_STALE_THRESHOLD = 120  # Seconds without a tick = dead feed
+TICK_BUFFER_SIZE          = 50    # Flush to DB every N ticks
+HEARTBEAT_INTERVAL        = 30    # Seconds between watchdog checks
+HEARTBEAT_STALE_THRESHOLD = 60   # [FIX #31] Reduced 120→60s — detect dead feed faster
+RECONNECT_WAIT_S          = 15   # [FIX #31] Seconds to wait for SDK auto-reconnect before forcing
+MAX_RECONNECT_ATTEMPTS    = 5    # [FIX #31] Max consecutive reconnect tries per session
 
 # [FIX #11] Market hours in IST — no hardcoded UTC offset
 _IST           = ZoneInfo("Asia/Kolkata")
@@ -68,6 +82,11 @@ class MarketFeed:
         self._started_once         = False
         self._session_expired       = False  # Set True after market close; blocks WS reconnect
 
+        # [FIX #31] Self-healing reconnect state
+        self._reconnect_callback:  Callable | None  = None   # Wired by main.py
+        self._last_close_time:     float            = 0.0    # time.time() when _on_close fired
+        self._reconnect_attempts:  int              = 0      # Consecutive reconnect tries this session
+
         # [FIX #26] NSE holiday cache — fetched once per day
         self._nse_holidays_cache:  set[str]         = set()   # "YYYY-MM-DD" strings
         self._nse_holidays_fetched_date: dt_date | None = None
@@ -87,6 +106,12 @@ class MarketFeed:
     def add_raw_tick_callback(self, callback: Callable):
         if callback not in self._raw_tick_callbacks:
             self._raw_tick_callbacks.append(callback)
+
+    def set_reconnect_callback(self, callback: Callable):
+        """[FIX #31] Set the async callback that main.py invokes to do a full
+        stop→start→resubscribe cycle.  Called from the watchdog thread via
+        run_coroutine_threadsafe when feed stays dead after force-close."""
+        self._reconnect_callback = callback
 
     def add_order_callback(self, callback: Callable):
         if callback not in self._order_callbacks:
@@ -286,9 +311,11 @@ class MarketFeed:
     def _on_close(self, message):
         """[12] WS closed — observation only. SDK's run_forever(reconnect=5) will reconnect.
         Flush the tick buffer and update state. No thread spawning here.
+        [FIX #31] Record close timestamp so watchdog can detect prolonged outages.
         """
         log.warning("WS closed: %s — SDK will auto-reconnect in ~5s", message)
         self._running = False
+        self._last_close_time = time.time()  # [FIX #31]
         self._flush_tick_buffer()  # [10] Don't lose buffered ticks
 
     def _on_open(self, message):
@@ -317,6 +344,8 @@ class MarketFeed:
         log.info("Market feed WS opened: %s", message)
         self._running = True
         self._last_tick_time = time.time()
+        self._last_close_time = 0.0          # [FIX #31] clear close timestamp
+        self._reconnect_attempts = 0         # [FIX #31] reset on successful open
 
         known_subs   = [
             {"instrument_token": tk, "exchange_segment": info.get("exchange_segment", "bse_fo")}
@@ -425,8 +454,35 @@ class MarketFeed:
 
     # ── Heartbeat Watchdog ────────────────────────────────────────────────────
 
+    def _trigger_reconnect(self):
+        """[FIX #31] Invoke the reconnect callback from the watchdog thread.
+        Runs the async callback via run_coroutine_threadsafe."""
+        if not self._reconnect_callback:
+            log.warning("No reconnect callback wired — cannot self-heal")
+            return
+        if not self._loop or self._loop.is_closed():
+            log.warning("Event loop unavailable — cannot trigger reconnect")
+            return
+        if self._reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+            log.error(
+                "Max reconnect attempts (%d) reached — stopping auto-reconnect. "
+                "Manual intervention required (pm2 restart or /api/reconnect-market-feed).",
+                MAX_RECONNECT_ATTEMPTS,
+            )
+            return
+
+        self._reconnect_attempts += 1
+        log.info(
+            "[FIX #31] Triggering reconnect callback (attempt %d/%d)...",
+            self._reconnect_attempts, MAX_RECONNECT_ATTEMPTS,
+        )
+        try:
+            asyncio.run_coroutine_threadsafe(self._reconnect_callback(), self._loop)
+        except Exception:
+            log.exception("Failed to schedule reconnect callback")
+
     def _heartbeat_watchdog(self):
-        """[11][FIX #11][FIX #26] Periodically checks that ticks are still arriving.
+        """[11][FIX #11][FIX #26][FIX #31] Periodically checks that ticks are still arriving.
         If feed goes silent for HEARTBEAT_STALE_THRESHOLD seconds during market hours,
         closes the WS so the SDK's own reconnect=5 kicks in fresh.
 
@@ -434,12 +490,12 @@ class MarketFeed:
         UTC offset.
 
         [FIX #26] Weekend + holiday guard added BEFORE the stale-tick check.
-        Root cause: _on_open sets _last_tick_time = time.time() so the watchdog
-        always sees "N seconds since last tick" even on days with zero market
-        activity (Sundays, public holidays). The old code only checked clock time
-        against _MARKET_OPEN/_MARKET_CLOSE — which is within range on a Sunday
-        morning — so it would fire and kill the WS every ~147s all day.
-        Fix: skip the stale check entirely on weekends/holidays.
+
+        [FIX #31] Self-healing: after force-closing the WS, waits RECONNECT_WAIT_S
+        for SDK auto-reconnect. If _running is still False, invokes the reconnect
+        callback (wired by main.py) to do a full stop→start→resubscribe.
+        Also: when _running is False during market hours, checks how long the feed
+        has been down and triggers reconnect if it exceeds RECONNECT_WAIT_S.
         """
         log.info("Heartbeat watchdog running")
         while True:
@@ -450,12 +506,6 @@ class MarketFeed:
                 time.sleep(60)  # Slow poll until daily refresh restarts us
                 continue
 
-            if not self._running:
-                continue  # SDK will reconnect; _on_open will set _running=True
-
-            if self._last_tick_time == 0:
-                continue  # No ticks received yet since startup
-
             # [FIX #26] Skip on weekends and NSE holidays — no ticks expected
             today_ist = datetime.now(_IST).date()
             if self._is_market_holiday(today_ist):
@@ -463,8 +513,6 @@ class MarketFeed:
                     "Heartbeat watchdog: market closed today (%s) — skipping stale check",
                     today_ist.isoformat(),
                 )
-                # Reset _last_tick_time so we don't accumulate stale seconds
-                # across the holiday into tomorrow's first check
                 self._last_tick_time = time.time()
                 continue
 
@@ -472,9 +520,6 @@ class MarketFeed:
             now_ist = datetime.now(_IST).time()
             if not (_MARKET_OPEN <= now_ist <= _MARKET_CLOSE):
                 # Post-market: actively kill the WS to stop the infinite reconnect loop.
-                # The SDK's run_forever(reconnect=5) keeps retrying with a stale token
-                # after market hours, burning CPU and flooding logs. We mark the session
-                # expired and tear down the WS. daily_contract_refresh will start fresh.
                 if self._running or not self._session_expired:
                     log.info(
                         "Outside market hours (%s IST) — shutting down WS to stop reconnect loop",
@@ -488,6 +533,27 @@ class MarketFeed:
                     log.info("Session expired — WS shutdown until next daily refresh")
                 continue
 
+            # [FIX #31] Feed is down during market hours — check if we need to force reconnect
+            if not self._running:
+                if self._last_close_time > 0:
+                    down_secs = time.time() - self._last_close_time
+                    if down_secs > RECONNECT_WAIT_S:
+                        log.warning(
+                            "Feed down for %.0fs during market hours — SDK did not auto-reconnect. "
+                            "Triggering full reconnect...",
+                            down_secs,
+                        )
+                        self._trigger_reconnect()
+                        # Reset close time so we don't spam reconnects every 30s
+                        self._last_close_time = time.time()
+                else:
+                    # _running=False but no close time — feed never connected?
+                    log.debug("Watchdog: feed not running, no close time recorded — waiting")
+                continue
+
+            if self._last_tick_time == 0:
+                continue  # No ticks received yet since startup
+
             elapsed = time.time() - self._last_tick_time
             if elapsed > HEARTBEAT_STALE_THRESHOLD:
                 log.warning(
@@ -496,14 +562,26 @@ class MarketFeed:
                     elapsed,
                 )
                 self._running = False
+                self._last_close_time = time.time()  # [FIX #31] track when we killed it
                 self._flush_tick_buffer()
                 try:
                     from neo_api_client.HSWebSocketLib import ws as sdk_ws
                     if sdk_ws:
                         sdk_ws.close()
-                        log.info("Forced WS close — SDK will reconnect in ~5s")
+                        log.info("Forced WS close — waiting %ds for SDK auto-reconnect...", RECONNECT_WAIT_S)
                 except Exception:
                     log.exception("Could not force-close SDK WS")  # [FIX #23]
+
+                # [FIX #31] Wait for SDK to auto-reconnect; if it doesn't, force reconnect
+                time.sleep(RECONNECT_WAIT_S)
+                if not self._running:
+                    log.warning(
+                        "SDK did not auto-reconnect within %ds — triggering full reconnect",
+                        RECONNECT_WAIT_S,
+                    )
+                    self._trigger_reconnect()
+                else:
+                    log.info("SDK auto-reconnected successfully within %ds", RECONNECT_WAIT_S)
                 # Reset timestamp so watchdog doesn't fire again immediately
                 self._last_tick_time = time.time()
 

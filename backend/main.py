@@ -24,6 +24,8 @@ PATCHES APPLIED:
 [FIX #24] entryTimerMins, exitTimerMins, signalTrailInitialSL, signalTrailInitialSLPoints added to strategy
 [FIX #25] Fallback actions: reconnect-market-feed, reconnect-telegram, resubscribe-signals,
           restart-backend (pm2), clear-signal-tracker
+[FIX #31] Self-healing reconnect callback wired to market_feed so the heartbeat watchdog
+          can trigger a full stop→start→resubscribe cycle without manual intervention.
 """
 import asyncio
 import json
@@ -302,6 +304,50 @@ async def lifespan(app: FastAPI):
                 manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
                 manager.market_feed.add_raw_tick_callback(enqueue_tick)
 
+                # [FIX #31] Wire self-healing reconnect callback
+                async def _auto_reconnect_feed():
+                    """Full stop→start→resubscribe cycle, called by watchdog thread."""
+                    log.info("[FIX #31] Auto-reconnect triggered by watchdog")
+                    try:
+                        try:
+                            manager.market_feed.stop()
+                        except Exception:
+                            log.exception("auto_reconnect: stop() failed")
+
+                        await asyncio.sleep(2)
+
+                        manager.market_feed._started_once = False
+                        manager.market_feed._session_expired = False
+                        manager.market_feed.start()
+                        manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
+                        manager.market_feed.add_tick_callback(manager.real_trader.on_tick)
+                        manager.market_feed.add_raw_tick_callback(enqueue_tick)
+                        manager.market_feed.set_reconnect_callback(_auto_reconnect_feed)
+
+                        # Restart tick consumer if dead
+                        if _tick_drain_task:
+                            old = _tick_drain_task[0]
+                            if old.done():
+                                _tick_drain_task.clear()
+                        if not _tick_drain_task:
+                            new_task = asyncio.create_task(tick_consumer())
+                            _tick_drain_task.clear()
+                            _tick_drain_task.append(new_task)
+
+                        await asyncio.sleep(3)
+                        manager.market_feed.subscribe_batch([
+                            {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+                            {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+                            {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+                        ])
+                        await manager.resubscribe_recent_signals(limit=20)
+                        log.info("[FIX #31] Auto-reconnect complete — feed should resume")
+                        await ws_manager.broadcast({"type": "status_update", "data": {"market_feed": True, "auto_reconnect": True}})
+                    except Exception:
+                        log.exception("[FIX #31] Auto-reconnect failed")
+
+                manager.market_feed.set_reconnect_callback(_auto_reconnect_feed)
+
                 task = asyncio.create_task(tick_consumer())
                 _tick_drain_task.clear()
                 _tick_drain_task.append(task)
@@ -395,6 +441,43 @@ async def lifespan(app: FastAPI):
                     manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
                     manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
                     manager.market_feed.add_raw_tick_callback(enqueue_tick)
+
+                    # [FIX #31] Re-wire self-healing reconnect callback after daily refresh
+                    async def _auto_reconnect_feed_daily():
+                        log.info("[FIX #31] Auto-reconnect triggered by watchdog (post daily-refresh)")
+                        try:
+                            try:
+                                manager.market_feed.stop()
+                            except Exception:
+                                log.exception("auto_reconnect: stop() failed")
+                            await asyncio.sleep(2)
+                            manager.market_feed._started_once = False
+                            manager.market_feed._session_expired = False
+                            manager.market_feed.start()
+                            manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
+                            manager.market_feed.add_tick_callback(manager.real_trader.on_tick)
+                            manager.market_feed.add_raw_tick_callback(enqueue_tick)
+                            manager.market_feed.set_reconnect_callback(_auto_reconnect_feed_daily)
+                            if _tick_drain_task:
+                                old = _tick_drain_task[0]
+                                if old.done():
+                                    _tick_drain_task.clear()
+                            if not _tick_drain_task:
+                                new_task = asyncio.create_task(tick_consumer())
+                                _tick_drain_task.clear()
+                                _tick_drain_task.append(new_task)
+                            await asyncio.sleep(3)
+                            manager.market_feed.subscribe_batch([
+                                {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+                                {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+                                {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+                            ])
+                            await manager.resubscribe_recent_signals(limit=20)
+                            log.info("[FIX #31] Auto-reconnect complete (post daily-refresh)")
+                        except Exception:
+                            log.exception("[FIX #31] Auto-reconnect failed (post daily-refresh)")
+
+                    manager.market_feed.set_reconnect_callback(_auto_reconnect_feed_daily)
 
                     new_task = asyncio.create_task(tick_consumer())
                     _tick_drain_task.clear()
@@ -805,10 +888,48 @@ async def reconnect_market_feed():
         await asyncio.sleep(2)
 
         manager.market_feed._started_once = False
+        manager.market_feed._session_expired = False
         manager.market_feed.start()
         manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
         manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
         manager.market_feed.add_raw_tick_callback(enqueue_tick)
+
+        # [FIX #31] Re-wire self-healing reconnect callback
+        async def _auto_reconnect_feed_manual():
+            log.info("[FIX #31] Auto-reconnect triggered by watchdog (post manual-reconnect)")
+            try:
+                try:
+                    manager.market_feed.stop()
+                except Exception:
+                    log.exception("auto_reconnect: stop() failed")
+                await asyncio.sleep(2)
+                manager.market_feed._started_once = False
+                manager.market_feed._session_expired = False
+                manager.market_feed.start()
+                manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
+                manager.market_feed.add_tick_callback(manager.real_trader.on_tick)
+                manager.market_feed.add_raw_tick_callback(enqueue_tick)
+                manager.market_feed.set_reconnect_callback(_auto_reconnect_feed_manual)
+                if _tick_drain_task:
+                    old = _tick_drain_task[0]
+                    if old.done():
+                        _tick_drain_task.clear()
+                if not _tick_drain_task:
+                    new_task = asyncio.create_task(tick_consumer())
+                    _tick_drain_task.clear()
+                    _tick_drain_task.append(new_task)
+                await asyncio.sleep(3)
+                manager.market_feed.subscribe_batch([
+                    {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+                    {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+                    {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+                ])
+                await manager.resubscribe_recent_signals(limit=20)
+                log.info("[FIX #31] Auto-reconnect complete (post manual-reconnect)")
+            except Exception:
+                log.exception("[FIX #31] Auto-reconnect failed (post manual-reconnect)")
+
+        manager.market_feed.set_reconnect_callback(_auto_reconnect_feed_manual)
 
         # [FIX #30] Restart the tick consumer task if it's dead
         if _tick_drain_task:
