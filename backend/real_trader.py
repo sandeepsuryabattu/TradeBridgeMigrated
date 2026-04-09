@@ -55,6 +55,7 @@ DEFAULT_BUFFER_POINTS    = 2.0
 DEFAULT_ENTRY_SLIPPAGE   = 1.0
 DEFAULT_EXIT_SLIPPAGE    = 1.0
 SL_LIMIT_PRICE           = 0.05   # Used as minimum limit price safeguard
+EXIT_FLOOR_DISCOUNT      = 0.90   # For guaranteed exits: sell at 10% below LTP (BSE OR starts at ~10%)
 MAX_ORDER_RETRIES        = 2
 ORDER_RETRY_DELAY_S      = 0.5
 SL_PROTECT_RETRIES       = 5
@@ -1103,8 +1104,14 @@ class RealTrader:
         # Guard: only fire if an SL is active and position is still open.
         trailing_sl = pos.get("trailing_sl", 0)
         if trailing_sl > 0 and ltp <= trailing_sl and pos.get("status") == "open":
+            # Prevent re-entrant SL triggers: if close_position is already handling
+            # this position, skip. This prevents the bug where a cancelled IOC SELL
+            # resets status to "open" and the next tick fires another SELL.
+            if pos.get("_sl_exit_pending"):
+                return
+            pos["_sl_exit_pending"] = True
             log.warning(
-                "SOFTWARE SL HIT: %s ltp=%.2f ≤ sl=%.2f — firing IOC SELL",
+                "SOFTWARE SL HIT: %s ltp=%.2f ≤ sl=%.2f — firing IOC SELL @ ₹0.05 (best bid)",
                 pos["trading_symbol"], ltp, trailing_sl,
             )
             await self._broadcast("order_alert", {
@@ -1170,66 +1177,88 @@ class RealTrader:
                 # needs to place the SELL — the bot fires the exit, not the exchange.
                 if exit_reason != "sl":
                     try:
-                        exit_slippage = float(pos.get("exit_slippage", DEFAULT_EXIT_SLIPPAGE))
-                        approx_ltp    = pos.get("current_price", pos.get("entry_price", 0))
-                        sell_price    = max(SL_LIMIT_PRICE, round(approx_ltp - exit_slippage, 2))
+                        # For automated exits (SL, timer, EOD), retry IOC SELL
+                        # with refreshed LTP until filled. In fast-crashing markets,
+                        # the option may drop >10% between ticks, causing the first
+                        # IOC SELL (at 10% below stale LTP) to get cancelled.
+                        # Each retry refreshes LTP from pos["current_price"]
+                        # (continuously updated by live ticks) and recalculates
+                        # the sell price to stay within BSE's Operating Range.
+                        exit_attempt = 0
 
-                        sell_result = await self._kotak_call_with_retry(
-                            self.kotak.place_order,
-                            f"SELL {pos['trading_symbol']}",
-                            exchange_segment="bse_fo",
-                            trading_symbol=pos["trading_symbol"],
-                            transaction_type="S",
-                            order_type="L",
-                            quantity=pos["quantity"],
-                            price=sell_price,
-                            validity="IOC",
-                        )
-                        sell_order_id = self._extract_order_id(sell_result)
-                        if not sell_order_id:
-                            raise Exception("SELL place_order response missing nOrdNo")
+                        while True:
+                            exit_attempt += 1
+                            if exit_reason in ("software_sl", "timer", "eod"):
+                                approx_ltp = pos.get("current_price", pos.get("entry_price", 0))
+                                sell_price = max(SL_LIMIT_PRICE, round(approx_ltp * EXIT_FLOOR_DISCOUNT, 2))
+                            else:
+                                exit_slippage = float(pos.get("exit_slippage", DEFAULT_EXIT_SLIPPAGE))
+                                approx_ltp    = pos.get("current_price", pos.get("entry_price", 0))
+                                sell_price    = max(SL_LIMIT_PRICE, round(approx_ltp - exit_slippage, 2))
 
-                        sell_fill = await self._poll_order_fill(sell_order_id, pos, label="exit")
-
-                        if sell_fill and sell_fill.get("status") == "traded":
-                            exchange_exit_confirmed = True
-                            fill_px = float(sell_fill.get("fill_price") or 0)
-                            if fill_px > 0:
-                                price = fill_px
-                            pnl = (price - pos["entry_price"]) * pos["quantity"]
-                            await self._broadcast("order_update", {
-                                "id":          pos.get("trade_id"),
-                                "status_note": f"✅ SELL Filled @ {price:.2f} ({exit_reason})",
-                            })
-                        elif sell_fill and sell_fill.get("status") == "rejected":
-                            # REJECTED exit SELL almost always means the position is
-                            # already closed on exchange (e.g. SL triggered, external
-                            # square-off).  Forcing the position closed in DB prevents
-                            # the infinite retry loop that caused 600+ sell orders.
-                            rej_reason = sell_fill.get("reject_reason", "unknown")
-                            log.warning(
-                                "EXIT SELL REJECTED for %s (#%s): %s — treating as already exited",
-                                pos["trading_symbol"], sell_order_id, rej_reason,
+                            log.info(
+                                "EXIT SELL attempt %d: %s @ %.2f (ltp=%.2f, reason=%s)",
+                                exit_attempt,
+                                pos["trading_symbol"], sell_price, approx_ltp, exit_reason,
                             )
-                            exchange_exit_confirmed = True
-                            # Keep the last known PnL; we can't get exact fill
-                            await self._broadcast("order_alert", {
-                                "level":   "warning",
-                                "message": (
-                                    f"⚠️ Exit SELL rejected for {pos['trading_symbol']} "
-                                    f"(likely already closed on exchange) — closing in DB"
-                                ),
-                            })
-                        else:
-                            await self._broadcast("order_alert", {
-                                "level":   "error",
-                                "message": f"❌ EXIT SELL UNVERIFIED for {pos['trading_symbol']} (#{sell_order_id}) — MANUAL EXIT REQUIRED",
-                            })
-                            await self._broadcast("order_update", {
-                                "id":          pos.get("trade_id"),
-                                "status_note": f"🚨 Exit unverified — check Kotak order #{sell_order_id}",
-                            })
-                            return {"status": "error", "message": "Exit SELL unverified", "order_id": sell_order_id}
+
+                            sell_result = await self._kotak_call_with_retry(
+                                self.kotak.place_order,
+                                f"SELL {pos['trading_symbol']}",
+                                exchange_segment="bse_fo",
+                                trading_symbol=pos["trading_symbol"],
+                                transaction_type="S",
+                                order_type="L",
+                                quantity=pos["quantity"],
+                                price=sell_price,
+                                validity="IOC",
+                            )
+                            sell_order_id = self._extract_order_id(sell_result)
+                            if not sell_order_id:
+                                raise Exception("SELL place_order response missing nOrdNo")
+
+                            sell_fill = await self._poll_order_fill(sell_order_id, pos, label="exit")
+
+                            if sell_fill and sell_fill.get("status") == "traded":
+                                exchange_exit_confirmed = True
+                                fill_px = float(sell_fill.get("fill_price") or 0)
+                                if fill_px > 0:
+                                    price = fill_px
+                                pnl = (price - pos["entry_price"]) * pos["quantity"]
+                                await self._broadcast("order_update", {
+                                    "id":          pos.get("trade_id"),
+                                    "status_note": f"✅ SELL Filled @ {price:.2f} ({exit_reason}) [attempt {exit_attempt}]",
+                                })
+                                break  # Exit filled — done
+
+                            elif sell_fill and sell_fill.get("status") == "rejected":
+                                # REJECTED exit SELL almost always means the position is
+                                # already closed on exchange (e.g. SL triggered, external
+                                # square-off).  Forcing the position closed in DB prevents
+                                # the infinite retry loop that caused 600+ sell orders.
+                                rej_reason = sell_fill.get("reject_reason", "unknown")
+                                log.warning(
+                                    "EXIT SELL REJECTED for %s (#%s): %s — treating as already exited",
+                                    pos["trading_symbol"], sell_order_id, rej_reason,
+                                )
+                                exchange_exit_confirmed = True
+                                await self._broadcast("order_alert", {
+                                    "level":   "warning",
+                                    "message": (
+                                        f"⚠️ Exit SELL rejected for {pos['trading_symbol']} "
+                                        f"(likely already closed on exchange) — closing in DB"
+                                    ),
+                                })
+                                break  # Rejected = already exited — done
+
+                            else:
+                                # Cancelled / unverified — retry with refreshed LTP
+                                log.warning(
+                                    "EXIT SELL cancelled/unverified for %s — retrying (attempt %d) with refreshed LTP",
+                                    pos["trading_symbol"], exit_attempt,
+                                )
+                                await asyncio.sleep(0.2)
+                                continue
 
                     except Exception:
                         log.exception("Failed to place/verify exit SELL for %s", pos["trading_symbol"])
@@ -1294,7 +1323,18 @@ class RealTrader:
                 return {"status": "error", "message": "Exit confirmed but DB sync failed"}
             finally:
                 if pos and pos.get("status") == "closing" and not db_sync_ok and not exchange_exit_confirmed:
-                    pos["status"] = "open"
+                    if exit_reason in ("software_sl", "timer", "eod"):
+                        # Don't reset to "open" — prevents re-entrant SL triggers
+                        pos["status"] = "close_failed"
+                        log.error(
+                            "CLOSE FAILED: %s — manual exit required (exit_reason=%s)",
+                            pos.get("trading_symbol"), exit_reason,
+                        )
+                    else:
+                        pos["status"] = "open"  # Only for manual UI exits
+                # Always clear the SL guard
+                if pos:
+                    pos.pop("_sl_exit_pending", None)
 
     # ── Timeout Checker ───────────────────────────────────────────────────────
 

@@ -66,6 +66,7 @@ class MarketFeed:
         self._last_tick_time:      float            = 0.0
         self._heartbeat_thread:    threading.Thread | None = None
         self._started_once         = False
+        self._session_expired       = False  # Set True after market close; blocks WS reconnect
 
         # [FIX #26] NSE holiday cache — fetched once per day
         self._nse_holidays_cache:  set[str]         = set()   # "YYYY-MM-DD" strings
@@ -114,6 +115,7 @@ class MarketFeed:
             log.warning("start() called more than once — ignoring. SDK handles reconnect internally.")
             return False
         self._started_once = True
+        self._session_expired = False  # Fresh login — allow WS reconnects
 
         try:
             self.kotak.setup_callbacks(
@@ -301,6 +303,17 @@ class MarketFeed:
         Instead: merge known subscriptions into _pending_subs and delegate to
         _flush_pending_subs_when_ready() which polls until is_hsw_open==1.
         """
+        # Session expired (token stale / post-market) — force-close so SDK stops reconnecting
+        if self._session_expired:
+            log.info("WS opened but session expired — closing to stop reconnect loop")
+            try:
+                from neo_api_client.HSWebSocketLib import ws as sdk_ws
+                if sdk_ws:
+                    sdk_ws.close()
+            except Exception:
+                pass
+            return
+
         log.info("Market feed WS opened: %s", message)
         self._running = True
         self._last_tick_time = time.time()
@@ -432,6 +445,11 @@ class MarketFeed:
         while True:
             time.sleep(HEARTBEAT_INTERVAL)
 
+            # Session already expired — sleep longer, don't check anything
+            if self._session_expired:
+                time.sleep(60)  # Slow poll until daily refresh restarts us
+                continue
+
             if not self._running:
                 continue  # SDK will reconnect; _on_open will set _running=True
 
@@ -453,7 +471,22 @@ class MarketFeed:
             # [FIX #11] Use explicit IST timezone — never rely on server's local clock
             now_ist = datetime.now(_IST).time()
             if not (_MARKET_OPEN <= now_ist <= _MARKET_CLOSE):
-                continue  # Outside market hours — stale feed is expected
+                # Post-market: actively kill the WS to stop the infinite reconnect loop.
+                # The SDK's run_forever(reconnect=5) keeps retrying with a stale token
+                # after market hours, burning CPU and flooding logs. We mark the session
+                # expired and tear down the WS. daily_contract_refresh will start fresh.
+                if self._running or not self._session_expired:
+                    log.info(
+                        "Outside market hours (%s IST) — shutting down WS to stop reconnect loop",
+                        now_ist.strftime("%H:%M"),
+                    )
+                    self._session_expired = True
+                    self._running = False
+                    self._flush_tick_buffer()
+                    if self.kotak and hasattr(self.kotak, 'cleanup_websocket'):
+                        self.kotak.cleanup_websocket()
+                    log.info("Session expired — WS shutdown until next daily refresh")
+                continue
 
             elapsed = time.time() - self._last_tick_time
             if elapsed > HEARTBEAT_STALE_THRESHOLD:

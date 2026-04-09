@@ -390,6 +390,7 @@ async def lifespan(app: FastAPI):
                     await asyncio.sleep(2)
 
                     manager.market_feed._started_once = False
+                    manager.market_feed._session_expired = False
                     manager.market_feed.start()
                     manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
                     manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
