@@ -63,6 +63,7 @@ SL_PROTECT_RETRY_DELAY_S = 0.2
 RECONCILE_INTERVAL_S     = 30     # Used by the scheduler in main.py
 MAX_SL_REPROTECT_ATTEMPTS = 3    # Cap re-placement attempts per position to prevent runaway loops
 EOD_EXIT_MINUTES_BEFORE  = 5      # Close positions N minutes before market close
+POS_FLUSH_INTERVAL_S     = 2.0    # Batch position DB writes — flush every N seconds
 
 # Fill confirmation tuning (extended to handle real-world latency)
 FILL_VERIFY_POLLS        = 12     # Number of order_history polls to confirm fill (~3s)
@@ -106,6 +107,11 @@ class RealTrader:
 
         # Entry fill confirmation waiters (order_id -> Future)
         self._entry_fill_waiters: dict[str, asyncio.Future] = {}
+
+        # Batched position-write cache — avoids per-tick DB writes in the hot path.
+        # Keyed by position_id; values overwritten each tick, flushed every POS_FLUSH_INTERVAL_S.
+        self._pos_write_cache: dict[int, dict] = {}
+        self._pos_flush_task: Optional[asyncio.Task] = None
 
         # Mode guard — set by TradeManager; on_tick returns immediately if mode != 'real'
         self._active_mode: Optional[Callable] = None
@@ -714,6 +720,43 @@ class RealTrader:
             "status_note": f"📈 SL trailed → {new_trigger:.2f}",
         })
 
+    # ── Batched Position DB Writes ─────────────────────────────────────────────
+
+    async def _flush_position_cache(self, position_id: int = None):
+        """Flush cached position writes to DB.
+
+        If position_id is given, flush only that position.
+        Otherwise flush all cached entries.
+        """
+        if position_id is not None:
+            fields = self._pos_write_cache.pop(position_id, None)
+            if fields:
+                try:
+                    await db.update_position(position_id, fields)
+                except Exception:
+                    log.exception("_flush_position_cache: failed for position %d", position_id)
+            return
+
+        if not self._pos_write_cache:
+            return
+
+        items = list(self._pos_write_cache.items())
+        self._pos_write_cache.clear()
+        for pid, fields in items:
+            try:
+                await db.update_position(pid, fields)
+            except Exception:
+                log.exception("_flush_position_cache: batch write failed for position %d", pid)
+
+    async def _delayed_flush_positions(self):
+        """Coalesce position writes for POS_FLUSH_INTERVAL_S then flush."""
+        await asyncio.sleep(POS_FLUSH_INTERVAL_S)
+        await self._flush_position_cache()
+
+    def _schedule_pos_flush(self):
+        """Schedule a deferred flush if one isn't already pending."""
+        if self._pos_flush_task is None or self._pos_flush_task.done():
+            self._pos_flush_task = asyncio.create_task(self._delayed_flush_positions())
 
     # ── Fill Order ────────────────────────────────────────────────────────────
 
@@ -1111,7 +1154,7 @@ class RealTrader:
                 return
             pos["_sl_exit_pending"] = True
             log.warning(
-                "SOFTWARE SL HIT: %s ltp=%.2f ≤ sl=%.2f — firing IOC SELL @ ₹0.05 (best bid)",
+                "SOFTWARE SL HIT: %s ltp=%.2f ≤ sl=%.2f — firing IOC SELL @ LTP*0.90 (best bid)",
                 pos["trading_symbol"], ltp, trailing_sl,
             )
             await self._broadcast("order_alert", {
@@ -1123,16 +1166,16 @@ class RealTrader:
             await self.close_position(pos["id"], exit_price=ltp, exit_reason="software_sl")
             return  # Skip DB update — close_position handles it
 
-        try:
-            await db.update_position(pos["id"], {
-                "current_price": ltp,
-                "pnl":           pos["pnl"],
-                "max_ltp":       pos.get("max_ltp", ltp),
-                "trailing_sl":   pos["trailing_sl"],
-                "sl_activated":  int(bool(pos.get("sl_activated", False))),
-            })
-        except Exception:
-            log.exception("_process_position_tick: db.update_position failed")
+        # Batch DB write — coalesce into cache, flush every POS_FLUSH_INTERVAL_S.
+        # Critical writes (SL trail, close) bypass the cache and go directly to DB.
+        self._pos_write_cache[pos["id"]] = {
+            "current_price": ltp,
+            "pnl":           pos["pnl"],
+            "max_ltp":       pos.get("max_ltp", ltp),
+            "trailing_sl":   pos["trailing_sl"],
+            "sl_activated":  int(bool(pos.get("sl_activated", False))),
+        }
+        self._schedule_pos_flush()
 
         await self._broadcast("position_update", {
             "id":            pos["id"],
@@ -1156,6 +1199,9 @@ class RealTrader:
                 return {"status": "error", "message": "Already closed"}
             if pos.get("status") == "closing":
                 return {"status": "error", "message": "Close in progress"}
+
+            # Discard any cached writes — close_position writes final state directly
+            self._pos_write_cache.pop(position_id, None)
 
             pos["status"] = "closing"
             if exit_reason:
