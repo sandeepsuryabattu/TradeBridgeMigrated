@@ -501,11 +501,6 @@ class MarketFeed:
         while True:
             time.sleep(HEARTBEAT_INTERVAL)
 
-            # Session already expired — sleep longer, don't check anything
-            if self._session_expired:
-                time.sleep(60)  # Slow poll until daily refresh restarts us
-                continue
-
             # [FIX #26] Skip on weekends and NSE holidays — no ticks expected
             today_ist = datetime.now(_IST).date()
             if self._is_market_holiday(today_ist):
@@ -518,9 +513,10 @@ class MarketFeed:
 
             # [FIX #11] Use explicit IST timezone — never rely on server's local clock
             now_ist = datetime.now(_IST).time()
+
             if not (_MARKET_OPEN <= now_ist <= _MARKET_CLOSE):
-                # Post-market: actively kill the WS to stop the infinite reconnect loop.
-                if self._running or not self._session_expired:
+                # Outside market hours — kill the WS once to stop the reconnect loop.
+                if self._running or (not self._session_expired):
                     log.info(
                         "Outside market hours (%s IST) — shutting down WS to stop reconnect loop",
                         now_ist.strftime("%H:%M"),
@@ -530,7 +526,21 @@ class MarketFeed:
                     self._flush_tick_buffer()
                     if self.kotak and hasattr(self.kotak, 'cleanup_websocket'):
                         self.kotak.cleanup_websocket()
-                    log.info("Session expired — WS shutdown until next daily refresh")
+                    log.info("Session expired — WS shutdown until market opens")
+                # Always skip the stale-check below when outside market hours
+                continue
+
+            # ── We are inside market hours ────────────────────────────────────
+            # If _session_expired is True (set by a pre-market shutdown), the clock
+            # has now crossed into market hours — clear the flag and reconnect.
+            if self._session_expired:
+                log.info(
+                    "Market hours detected (%s IST) — clearing session_expired and reconnecting feed",
+                    now_ist.strftime("%H:%M"),
+                )
+                self._session_expired = False
+                self._last_close_time = time.time()   # treat as a fresh close so watchdog reconnects
+                self._trigger_reconnect()
                 continue
 
             # [FIX #31] Feed is down during market hours — check if we need to force reconnect

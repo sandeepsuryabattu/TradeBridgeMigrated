@@ -63,12 +63,33 @@ SL_PROTECT_RETRY_DELAY_S = 0.2
 RECONCILE_INTERVAL_S     = 30     # Used by the scheduler in main.py
 MAX_SL_REPROTECT_ATTEMPTS = 3    # Cap re-placement attempts per position to prevent runaway loops
 EOD_EXIT_MINUTES_BEFORE  = 5      # Close positions N minutes before market close
+MAX_EXIT_SELL_ATTEMPTS   = 6      # Hard cap on IOC SELL retry loop before declaring close_failed
+
+# Rejection reasons that mean "position already gone" (exchange confirmed no holding)
+# Anything matching these lets us safely close in DB without placing another SELL.
+_ALREADY_EXITED_REASONS  = frozenset({
+    "no holdings", "insufficient qty", "position closed",
+    "no open position", "net qty is zero", "quantity exceeds",
+})
 POS_FLUSH_INTERVAL_S     = 2.0    # Batch position DB writes — flush every N seconds
 
 # Fill confirmation tuning (extended to handle real-world latency)
 FILL_VERIFY_POLLS        = 12     # Number of order_history polls to confirm fill (~3s)
 FILL_VERIFY_INTERVAL_S   = 0.25   # Seconds between polls
 FILL_CONFIRM_TIMEOUT_S   = 4.0    # Hard timeout for feed+poll confirmation race
+
+BSE_TICK_SIZE            = 0.05   # BSE BFO minimum price increment — all order prices MUST be multiples of this
+
+
+def _round_to_tick(price: float, tick: float = BSE_TICK_SIZE) -> float:
+    """Round price DOWN to nearest valid tick size.
+
+    BSE BFO rejects orders with 'RATE NOT MULTIPLE OF TICK[0.05]' if the price
+    is not an exact multiple of 0.05. Always round DOWN (floor) so the sell
+    price is never above BSE's allowed grid.
+    """
+    import math
+    return max(tick, math.floor(price / tick) * tick)
 
 _IST = ZoneInfo("Asia/Kolkata")
 _MARKET_CLOSE = dt_time(15, 30)
@@ -920,7 +941,8 @@ class RealTrader:
 
         # 1. Update open positions
         for pos in list(self._open_positions):
-            if pos.get("status") != "open":
+            # Allow 'close_failed' through so auto-heal fires on next tick
+            if pos.get("status") not in ("open", "close_failed"):
                 continue
             if not self._symbol_matches(pos["trading_symbol"], tick_symbol, data):
                 continue
@@ -1146,6 +1168,18 @@ class RealTrader:
         # Fire immediately when price hits or breaks the SL level.
         # Guard: only fire if an SL is active and position is still open.
         trailing_sl = pos.get("trailing_sl", 0)
+
+        # Auto-heal: if a previous close attempt was rejected at exchange level,
+        # status is 'close_failed'. Retry close on every tick until it succeeds.
+        if pos.get("status") == "close_failed":
+            log.warning(
+                "AUTO-HEAL: retrying close for %s (close_failed) ltp=%.2f",
+                pos["trading_symbol"], ltp,
+            )
+            pos["status"] = "open"  # Reset so close_position accepts it
+            await self.close_position(pos["id"], exit_price=ltp, exit_reason="software_sl")
+            return
+
         if trailing_sl > 0 and ltp <= trailing_sl and pos.get("status") == "open":
             # Prevent re-entrant SL triggers: if close_position is already handling
             # this position, skip. This prevents the bug where a cancelled IOC SELL
@@ -1236,11 +1270,12 @@ class RealTrader:
                             exit_attempt += 1
                             if exit_reason in ("software_sl", "timer", "eod"):
                                 approx_ltp = pos.get("current_price", pos.get("entry_price", 0))
-                                sell_price = max(SL_LIMIT_PRICE, round(approx_ltp * EXIT_FLOOR_DISCOUNT, 2))
+                                # Round DOWN to BSE tick (0.05) — avoids RATE NOT MULTIPLE OF TICK rejection
+                                sell_price = _round_to_tick(max(SL_LIMIT_PRICE, approx_ltp * EXIT_FLOOR_DISCOUNT))
                             else:
                                 exit_slippage = float(pos.get("exit_slippage", DEFAULT_EXIT_SLIPPAGE))
                                 approx_ltp    = pos.get("current_price", pos.get("entry_price", 0))
-                                sell_price    = max(SL_LIMIT_PRICE, round(approx_ltp - exit_slippage, 2))
+                                sell_price    = _round_to_tick(max(SL_LIMIT_PRICE, approx_ltp - exit_slippage))
 
                             log.info(
                                 "EXIT SELL attempt %d: %s @ %.2f (ltp=%.2f, reason=%s)",
@@ -1278,30 +1313,66 @@ class RealTrader:
                                 break  # Exit filled — done
 
                             elif sell_fill and sell_fill.get("status") == "rejected":
-                                # REJECTED exit SELL almost always means the position is
-                                # already closed on exchange (e.g. SL triggered, external
-                                # square-off).  Forcing the position closed in DB prevents
-                                # the infinite retry loop that caused 600+ sell orders.
-                                rej_reason = sell_fill.get("reject_reason", "unknown")
-                                log.warning(
-                                    "EXIT SELL REJECTED for %s (#%s): %s — treating as already exited",
-                                    pos["trading_symbol"], sell_order_id, rej_reason,
-                                )
-                                exchange_exit_confirmed = True
-                                await self._broadcast("order_alert", {
-                                    "level":   "warning",
-                                    "message": (
-                                        f"⚠️ Exit SELL rejected for {pos['trading_symbol']} "
-                                        f"(likely already closed on exchange) — closing in DB"
-                                    ),
-                                })
-                                break  # Rejected = already exited — done
+                                rej_reason = sell_fill.get("reject_reason", "") or ""
+                                rej_lower  = rej_reason.lower()
+
+                                # Check if the exchange is telling us the position is already gone
+                                already_gone = any(k in rej_lower for k in _ALREADY_EXITED_REASONS)
+
+                                if already_gone:
+                                    # Safe to close in DB — exchange confirms no open holding
+                                    log.warning(
+                                        "EXIT SELL REJECTED (already exited) for %s (#%s): %s — closing in DB",
+                                        pos["trading_symbol"], sell_order_id, rej_reason,
+                                    )
+                                    exchange_exit_confirmed = True
+                                    await self._broadcast("order_alert", {
+                                        "level":   "warning",
+                                        "message": (
+                                            f"⚠️ Exit SELL rejected for {pos['trading_symbol']} "
+                                            f"(already closed on exchange: {rej_reason}) — closing in DB"
+                                        ),
+                                    })
+                                    break
+
+                                else:
+                                    # Genuine price/circuit rejection — do NOT assume position is gone.
+                                    # Log, alert, and break WITHOUT setting exchange_exit_confirmed.
+                                    # The finally block will set status='close_failed' and the
+                                    # next tick's auto-heal will retry.
+                                    log.error(
+                                        "EXIT SELL REJECTED (genuine) for %s (#%s): %s "
+                                        "— NOT treating as closed. Will retry on next tick.",
+                                        pos["trading_symbol"], sell_order_id, rej_reason,
+                                    )
+                                    await self._broadcast("order_alert", {
+                                        "level":   "error",
+                                        "message": (
+                                            f"🚨 SL SELL rejected at exchange for {pos['trading_symbol']}: "
+                                            f"{rej_reason} — auto-retry on next tick"
+                                        ),
+                                    })
+                                    break  # exit the while loop; finally sets close_failed → auto-heal
 
                             else:
-                                # Cancelled / unverified — retry with refreshed LTP
+                                # Cancelled / unverified — retry with refreshed LTP (capped)
+                                if exit_attempt >= MAX_EXIT_SELL_ATTEMPTS:
+                                    log.error(
+                                        "EXIT SELL: max retries (%d) reached for %s — marking close_failed",
+                                        MAX_EXIT_SELL_ATTEMPTS, pos["trading_symbol"],
+                                    )
+                                    await self._broadcast("order_alert", {
+                                        "level":   "error",
+                                        "message": (
+                                            f"🚨 Exit SELL cancelled {MAX_EXIT_SELL_ATTEMPTS}x for "
+                                            f"{pos['trading_symbol']} — position left open, auto-retry on next tick"
+                                        ),
+                                    })
+                                    break  # finally sets close_failed → auto-heal
+
                                 log.warning(
-                                    "EXIT SELL cancelled/unverified for %s — retrying (attempt %d) with refreshed LTP",
-                                    pos["trading_symbol"], exit_attempt,
+                                    "EXIT SELL cancelled/unverified for %s — retrying (attempt %d/%d) with refreshed LTP",
+                                    pos["trading_symbol"], exit_attempt, MAX_EXIT_SELL_ATTEMPTS,
                                 )
                                 await asyncio.sleep(0.2)
                                 continue
@@ -1413,7 +1484,15 @@ class RealTrader:
                     self._pending_orders.remove(order)
 
         for pos in list(self._open_positions):
-            if pos.get("status") != "open":
+            pos_status = pos.get("status")
+            # Retry close_failed positions even if the timer hasn't elapsed — they're already stuck
+            if pos_status == "close_failed":
+                exit_price = pos.get("current_price", pos["entry_price"])
+                log.warning("TIMEOUT-HEAL: retrying close_failed for %s @ %s", pos["trading_symbol"], exit_price)
+                pos["status"] = "open"  # Reset so close_position accepts it
+                await self.close_position(pos["id"], exit_price=exit_price, exit_reason="software_sl")
+                continue
+            if pos_status != "open":
                 continue
             opened_at = _parse_dt(pos.get("opened_at"))
             exit_mins = float(pos.get("exit_timer_mins", POSITION_TIMEOUT_MINS))
@@ -1423,6 +1502,7 @@ class RealTrader:
                 exit_price = pos.get("current_price", pos["entry_price"])
                 log.warning("TIMEOUT: Force-closing %s @ %s", pos["trading_symbol"], exit_price)
                 await self.close_position(pos["id"], exit_price=exit_price, exit_reason="timer")
+
 
     # ── EOD Auto-Close ────────────────────────────────────────────────────────
 

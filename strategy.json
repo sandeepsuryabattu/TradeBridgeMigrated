@@ -3,7 +3,7 @@
   "activationPoints": 3.0,
   "activationSLOffset": 0.0,
   "trailGap": 2.0,
-  "bouncePoints": 3,
+  "bouncePoints": 2,
   "bufferEnabled": true,
   "bufferPoints": 2.0,
   "entryTimerMins": 5,
