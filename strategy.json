@@ -1,13 +1,13 @@
 {
   "lots": 1,
-  "activationPoints": 3.0,
-  "activationSLOffset": 0.0,
+  "activationPoints": 8.0,
+  "activationSLOffset": 1.0,
   "trailGap": 2.0,
-  "bouncePoints": 2,
+  "bouncePoints": 1,
   "bufferEnabled": true,
-  "bufferPoints": 2.0,
-  "entryTimerMins": 5,
-  "exitTimerMins": 5,
+  "bufferPoints": 1.0,
+  "entryTimerMins": 10,
+  "exitTimerMins": 10,
   "signalTrailInitialSL": "points_from_ltp",
   "signalTrailInitialSLPoints": 10.0
 }
