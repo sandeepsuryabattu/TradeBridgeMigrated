@@ -26,6 +26,9 @@ PATCHES APPLIED:
           restart-backend (pm2), clear-signal-tracker
 [FIX #31] Self-healing reconnect callback wired to market_feed so the heartbeat watchdog
           can trigger a full stop→start→resubscribe cycle without manual intervention.
+[FIX #32] Mode persistence: trading mode (paper/real) is now saved to mode.json and
+          restored on startup. Previously, every pm2 restart reset mode to 'paper',
+          requiring manual re-activation of real trading each morning.
 """
 import asyncio
 import json
@@ -92,6 +95,36 @@ def save_strategy(strategy: dict):
         log.exception("Could not save strategy to disk")  # [FIX #23]
 
 
+# ── Mode persistence ──────────────────────────────────────────────────────────
+# [FIX #32] Trading mode (paper/real) was not persisted — every pm2 restart
+# reset mode to Config.TRADING_MODE (default: 'paper'). This caused real
+# trading to silently stop working until a manual mode switch each morning.
+MODE_FILE = os.path.join(os.path.dirname(__file__), "..", "mode.json")
+
+
+def load_mode() -> str:
+    """Load trading mode from disk, falling back to Config default."""
+    try:
+        if os.path.exists(MODE_FILE):
+            with open(MODE_FILE) as f:
+                saved = json.load(f)
+                mode = saved.get("mode", "")
+                if mode in ("paper", "real"):
+                    return mode
+    except Exception:
+        log.exception("Could not load mode from disk")
+    return Config.TRADING_MODE
+
+
+def save_mode(mode: str):
+    """Persist trading mode to disk."""
+    try:
+        with open(MODE_FILE, "w") as f:
+            json.dump({"mode": mode}, f, indent=2)
+    except Exception:
+        log.exception("Could not save mode to disk")
+
+
 # ── Global instances ──────────────────────────────────────────────────────────
 manager  = TradeManager()
 telegram = TelegramListener()
@@ -101,6 +134,12 @@ manager.strategy = load_strategy()
 # Sync lot_size from persisted strategy so it survives restarts
 if manager.strategy.get("lots"):
     manager.lot_size = max(1, int(manager.strategy["lots"]))
+
+# [FIX #32] Load persisted mode so real trading survives restarts
+_persisted_mode = load_mode()
+if _persisted_mode != manager.mode:
+    manager.set_mode(_persisted_mode)
+    log.info("Restored persisted trading mode: %s", _persisted_mode)
 
 # Stop-trading flag — when True, incoming signals are NOT traded.
 # Existing positions and pending orders continue to be managed normally.
@@ -306,9 +345,34 @@ async def lifespan(app: FastAPI):
 
                 # [FIX #31] Wire self-healing reconnect callback
                 async def _auto_reconnect_feed():
-                    """Full stop→start→resubscribe cycle, called by watchdog thread."""
+                    """Full stop→start→resubscribe cycle, called by watchdog thread.
+
+                    [FIX #33] Now re-logins to Kotak when the watchdog detects the
+                    token has expired (overnight). Also re-registers the order feed
+                    callback that was being lost on every stop() call.
+                    """
                     log.info("[FIX #31] Auto-reconnect triggered by watchdog")
                     try:
+                        # [FIX #33] Re-login if token expired (overnight / midnight IST)
+                        needs_relogin = manager.market_feed._needs_relogin
+                        if needs_relogin or not manager.kotak.is_token_valid():
+                            log.info("[FIX #33] Token expired — re-logging in before reconnect")
+                            loop = asyncio.get_running_loop()
+                            try:
+                                await loop.run_in_executor(None, manager.initialize_kotak)
+                                def _force_relogin():
+                                    manager.kotak.is_authenticated = False
+                                    manager.kotak.session_active = False
+                                    return manager.login_kotak()
+                                login_result = await loop.run_in_executor(None, _force_relogin)
+                                if login_result.get("status") == "ok":
+                                    log.info("[FIX #33] Re-login successful before reconnect")
+                                    manager.market_feed._needs_relogin = False
+                                else:
+                                    log.error("[FIX #33] Re-login FAILED: %s", login_result.get("message"))
+                            except Exception:
+                                log.exception("[FIX #33] Re-login exception during reconnect")
+
                         try:
                             manager.market_feed.stop()
                         except Exception:
@@ -322,6 +386,7 @@ async def lifespan(app: FastAPI):
                         manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
                         manager.market_feed.add_tick_callback(manager.real_trader.on_tick)
                         manager.market_feed.add_raw_tick_callback(enqueue_tick)
+                        manager.market_feed.add_order_callback(manager.real_trader.handle_order_feed)  # [FIX #33]
                         manager.market_feed.set_reconnect_callback(_auto_reconnect_feed)
 
                         # Restart tick consumer if dead
@@ -441,11 +506,32 @@ async def lifespan(app: FastAPI):
                     manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
                     manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
                     manager.market_feed.add_raw_tick_callback(enqueue_tick)
+                    manager.market_feed.add_order_callback(manager.real_trader.handle_order_feed)  # [FIX #33]
 
                     # [FIX #31] Re-wire self-healing reconnect callback after daily refresh
                     async def _auto_reconnect_feed_daily():
                         log.info("[FIX #31] Auto-reconnect triggered by watchdog (post daily-refresh)")
                         try:
+                            # [FIX #33] Re-login if token expired
+                            needs_relogin = manager.market_feed._needs_relogin
+                            if needs_relogin or not manager.kotak.is_token_valid():
+                                log.info("[FIX #33] Token expired — re-logging in before reconnect (post daily-refresh)")
+                                _loop = asyncio.get_running_loop()
+                                try:
+                                    await _loop.run_in_executor(None, manager.initialize_kotak)
+                                    def _force_relogin_daily():
+                                        manager.kotak.is_authenticated = False
+                                        manager.kotak.session_active = False
+                                        return manager.login_kotak()
+                                    lr = await _loop.run_in_executor(None, _force_relogin_daily)
+                                    if lr.get("status") == "ok":
+                                        log.info("[FIX #33] Re-login successful (post daily-refresh)")
+                                        manager.market_feed._needs_relogin = False
+                                    else:
+                                        log.error("[FIX #33] Re-login FAILED: %s", lr.get("message"))
+                                except Exception:
+                                    log.exception("[FIX #33] Re-login exception (post daily-refresh)")
+
                             try:
                                 manager.market_feed.stop()
                             except Exception:
@@ -457,6 +543,7 @@ async def lifespan(app: FastAPI):
                             manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
                             manager.market_feed.add_tick_callback(manager.real_trader.on_tick)
                             manager.market_feed.add_raw_tick_callback(enqueue_tick)
+                            manager.market_feed.add_order_callback(manager.real_trader.handle_order_feed)  # [FIX #33]
                             manager.market_feed.set_reconnect_callback(_auto_reconnect_feed_daily)
                             if _tick_drain_task:
                                 old = _tick_drain_task[0]
@@ -734,6 +821,7 @@ async def set_mode(req: ModeRequest):
             }})
 
     result = manager.set_mode(req.mode)
+    save_mode(req.mode)  # [FIX #32] Persist mode to disk so it survives restarts
     await ws_manager.broadcast({"type": "mode_change", "data": result})
     return result
 

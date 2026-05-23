@@ -86,6 +86,7 @@ class MarketFeed:
         self._reconnect_callback:  Callable | None  = None   # Wired by main.py
         self._last_close_time:     float            = 0.0    # time.time() when _on_close fired
         self._reconnect_attempts:  int              = 0      # Consecutive reconnect tries this session
+        self._needs_relogin:       bool             = False  # [FIX #33] Set by watchdog when token likely expired
 
         # [FIX #26] NSE holiday cache — fetched once per day
         self._nse_holidays_cache:  set[str]         = set()   # "YYYY-MM-DD" strings
@@ -539,6 +540,7 @@ class MarketFeed:
                     now_ist.strftime("%H:%M"),
                 )
                 self._session_expired = False
+                self._needs_relogin = True  # [FIX #33] Token expired overnight — reconnect callback must re-login
                 self._last_close_time = time.time()   # treat as a fresh close so watchdog reconnects
                 self._trigger_reconnect()
                 continue

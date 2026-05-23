@@ -1,10 +1,16 @@
 """
 Kotak Neo Trader — API wrapper for authentication and order management.
 Uses neo_api_client with the new access_token auth flow (no consumer_secret).
+
+[FIX #33] Token expiry tracking: Kotak JWT tokens expire at midnight IST.
+          Added _token_expiry field + is_token_valid() so the bot detects
+          stale tokens instead of silently failing API calls.
 """
+import base64
+import json as _json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 try:
@@ -31,6 +37,7 @@ class KotakTrader:
         self.session_active = False
         self._last_login: Optional[datetime] = None
         self._last_error: Optional[str] = None
+        self._token_expiry: Optional[datetime] = None  # [FIX #33] JWT exp timestamp
 
 
     @staticmethod
@@ -185,7 +192,14 @@ class KotakTrader:
                 self.session_active = True
                 self._last_login = datetime.now()
                 self._last_error = None
-                log.info("✅ Kotak Neo login successful!")
+
+                # [FIX #33] Extract and store JWT expiry
+                self._token_expiry = self._extract_token_expiry(result2)
+                if self._token_expiry:
+                    log.info("✅ Kotak Neo login successful! Token expires at %s", self._token_expiry.isoformat())
+                else:
+                    log.info("✅ Kotak Neo login successful! (could not determine token expiry)")
+
                 return {"status": "ok", "message": "Authenticated successfully", "data": result2}
 
             except Exception as e:
@@ -250,6 +264,59 @@ class KotakTrader:
             log.error(f"Order-feed subscribe failed: {e}")
             return {"status": "error", "message": str(e)}
 
+    # ── Token Expiry Helpers [FIX #33] ─────────────────────────────────────────
+
+    def _extract_token_expiry(self, login_result: dict) -> Optional[datetime]:
+        """Decode the JWT exp field from a login/validate response.
+
+        Kotak tokens expire at midnight IST (~18:30 UTC).  Knowing the exact
+        expiry lets us proactively re-login instead of silently failing API calls.
+        """
+        try:
+            token_str = None
+            if isinstance(login_result, dict):
+                data = login_result.get("data", login_result)
+                if isinstance(data, dict):
+                    token_str = data.get("token")
+            if not token_str:
+                return None
+
+            # JWT is header.payload.signature — we only need the payload
+            parts = token_str.split(".")
+            if len(parts) < 2:
+                return None
+            payload_b64 = parts[1]
+            # Add padding
+            payload_b64 += "=" * (4 - len(payload_b64) % 4)
+            payload = _json.loads(base64.urlsafe_b64decode(payload_b64))
+            exp_ts = payload.get("exp")
+            if exp_ts:
+                return datetime.fromtimestamp(int(exp_ts), tz=timezone.utc)
+        except Exception:
+            log.exception("Could not extract token expiry from JWT")
+        return None
+
+    def is_token_valid(self) -> bool:
+        """Check if the current session token is still alive.
+
+        Returns False if:
+          - Not authenticated
+          - Token expiry is known and current time >= expiry - 5 min buffer
+          - Token expiry unknown (conservative — assume expired after 8h)
+        """
+        if not self.is_authenticated or not self.session_active:
+            return False
+        if self._token_expiry:
+            from datetime import timedelta
+            # 5 minute buffer before actual expiry
+            return datetime.now(timezone.utc) < (self._token_expiry - timedelta(minutes=5))
+        # No expiry info — assume valid for 8h from last login
+        if self._last_login:
+            from datetime import timedelta
+            elapsed = (datetime.now() - self._last_login).total_seconds()
+            return elapsed < 8 * 3600
+        return False
+
     # ── Order Management ──
 
     def place_order(
@@ -268,6 +335,10 @@ class KotakTrader:
         """Place an order on Kotak Neo."""
         if not self.client or not self.is_authenticated:
             return {"status": "error", "message": "Not authenticated"}
+        # [FIX #33] Proactive token check
+        if not self.is_token_valid():
+            log.error("Token expired — cannot place order for %s. Re-login required.", trading_symbol)
+            return {"status": "error", "message": "Session token expired — re-login required"}
 
         try:
             result = self.client.place_order(
@@ -311,6 +382,9 @@ class KotakTrader:
         """Modify an existing order (used to trail exchange SL orders)."""
         if not self.client or not self.is_authenticated:
             return {"status": "error", "message": "Not authenticated"}
+        if not self.is_token_valid():
+            log.error("Token expired — cannot modify order %s. Re-login required.", order_id)
+            return {"status": "error", "message": "Session token expired — re-login required"}
         try:
             result = self.client.modify_order(
                 order_id=order_id,
@@ -337,6 +411,9 @@ class KotakTrader:
         """Cancel an existing order."""
         if not self.client or not self.is_authenticated:
             return {"status": "error", "message": "Not authenticated"}
+        if not self.is_token_valid():
+            log.error("Token expired — cannot cancel order %s. Re-login required.", order_id)
+            return {"status": "error", "message": "Session token expired — re-login required"}
         try:
             result = self.client.cancel_order(order_id=order_id)
             err = self._extract_error_message(result)
