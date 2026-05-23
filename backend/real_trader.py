@@ -81,6 +81,20 @@ FILL_CONFIRM_TIMEOUT_S   = 4.0    # Hard timeout for feed+poll confirmation race
 BSE_TICK_SIZE            = 0.05   # BSE BFO minimum price increment — all order prices MUST be multiples of this
 
 
+def _parse_snap_levels(value):
+    """Parse snap_levels from DB (may be JSON string) or return as-is if already a list."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        import json as _json
+        try:
+            return _json.loads(value)
+        except Exception:
+            return None
+    return None
+
 def _round_to_tick(price: float, tick: float = BSE_TICK_SIZE) -> float:
     """Round price DOWN to nearest valid tick size.
 
@@ -297,8 +311,20 @@ class RealTrader:
         activation_points    = float(strategy.get("activationPoints") or DEFAULT_ACTIVATION_PTS)
         activation_sl_offset = float(strategy.get("activationSLOffset") or 0.0)
         trail_gap            = float(strategy.get("trailGap")         or DEFAULT_TRAIL_GAP)
-        entry_slippage    = float(strategy.get("entrySlippage")    or DEFAULT_ENTRY_SLIPPAGE)
-        exit_slippage     = float(strategy.get("exitSlippage")     or DEFAULT_EXIT_SLIPPAGE)
+        _es = strategy.get("entrySlippage")
+        entry_slippage    = float(_es if _es is not None else DEFAULT_ENTRY_SLIPPAGE)
+        _xs = strategy.get("exitSlippage")
+        exit_slippage     = float(_xs if _xs is not None else DEFAULT_EXIT_SLIPPAGE)
+
+        # SL mode
+        sl_mode             = strategy.get("slMode", "signal_trail")
+        snap_levels         = strategy.get("snapLevels") or [
+            {"snapPts": 10, "offset": 2},
+            {"snapPts": 10, "offset": 2},
+            {"snapPts": 10, "offset": 2},
+        ]
+        snap_trail_after_l3 = bool(strategy.get("snapTrailAfterL3", False))
+        snap_trail_gap      = float(strategy.get("snapTrailGap") or 3.0)
 
         signal_trail_initial_sl        = strategy.get("signalTrailInitialSL", "telegram")
         signal_trail_initial_sl_points = float(strategy.get("signalTrailInitialSLPoints") or 5.0)
@@ -328,11 +354,14 @@ class RealTrader:
             "strike":            signal.get("strike"),
             "option_type":       signal.get("option_type"),
             "created_at":        datetime.now(timezone.utc),
-            "sl_mode":           "signal_trail",
+            "sl_mode":           sl_mode,
             "signal_stoploss":   float(signal_stoploss) if signal_stoploss else None,
             "activation_points":    activation_points,
             "activation_sl_offset": activation_sl_offset,
             "trail_gap":            trail_gap,
+            "snap_levels":          snap_levels,
+            "snap_trail_after_l3":  snap_trail_after_l3,
+            "snap_trail_gap":       snap_trail_gap,
             "bounce_points":     bounce_points,
             "entry_logic":       "code",
             "entry_label":       signal.get("entry_label"),
@@ -355,8 +384,8 @@ class RealTrader:
 
         self._pending_orders.append(order)
         log.info(
-            "Real order pending: %s — Entry: bounce-back — SL: signal_trail — EntryTimer: %dmin",
-            order["trading_symbol"], entry_timer_mins,
+            "Real order pending: %s — Entry: bounce-back — SL: %s — EntryTimer: %dmin",
+            order["trading_symbol"], sl_mode, entry_timer_mins,
         )
 
         return {"status": "pending", "trade_id": trade_id, "order": order}
@@ -828,11 +857,16 @@ class RealTrader:
             "entry_price":       fill_price,
             "max_ltp":           fill_price,
             "trailing_sl":       initial_sl,
-            "sl_mode":           "signal_trail",
-            "signal_stoploss":   order.get("signal_stoploss"),
+            "sl_mode":           order.get("sl_mode", "signal_trail"),
+            "signal_stoploss":   initial_sl,
             "activation_points":    order.get("activation_points", DEFAULT_ACTIVATION_PTS),
             "activation_sl_offset": order.get("activation_sl_offset", DEFAULT_ACTIVATION_SL_OFFSET),
             "trail_gap":            order.get("trail_gap", DEFAULT_TRAIL_GAP),
+            "snap_levels":          order.get("snap_levels"),
+            "snap_trail_after_l3":  order.get("snap_trail_after_l3", False),
+            "snap_trail_gap":       order.get("snap_trail_gap", 3.0),
+            "snap_level_hit":       0,
+            "snap_trailing_active": False,
             "sl_activated":      False,
             "exit_timer_mins":   order.get("exit_timer_mins", POSITION_TIMEOUT_MINS),
         }
@@ -1112,15 +1146,14 @@ class RealTrader:
     # ── Position Tick Processor ───────────────────────────────────────────────
 
     async def _process_position_tick(self, pos: dict, ltp: float):
-        """Process a tick for an open position — signal_trail SL logic.
+        """Process a tick for an open position.
 
-        Software SL: when ltp drops to/below trailing_sl we fire an IOC SELL
-        immediately.  This replaces exchange DAY SL orders which require option
-        writing margin (~₹1.43L) that retail buyers don't have.
+        Supports two SL modes:
+        - signal_trail: existing activation + continuous trail logic.
+        - snap_levels:  L1/L2/L3 chain, each SL = trigger - offset.
+                        Optional trailing after L3.
 
-        FIX #1: On activation, SL is anchored at entry_price + activation_points
-        (the breakeven+ level), not at the current LTP which could be much higher
-        and would cause immediate SL triggers on the next dip.
+        Software SL: when ltp drops to/below trailing_sl we fire an IOC SELL.
         """
         if ltp <= 0:
             return
@@ -1132,37 +1165,104 @@ class RealTrader:
         entry_price          = pos["entry_price"]
         activation_points    = pos.get("activation_points", DEFAULT_ACTIVATION_PTS)
         activation_sl_offset = pos.get("activation_sl_offset", DEFAULT_ACTIVATION_SL_OFFSET)
-        trail_gap            = pos.get("trail_gap", DEFAULT_TRAIL_GAP)
+        sl_mode              = pos.get("sl_mode", "signal_trail")
 
-        if not pos.get("sl_activated") and ltp >= entry_price + activation_points:
-            # FIX #1: Anchor initial SL at entry + activation_points (breakeven+), not at ltp.
-            # activationSLOffset (default 0) lets user soften the anchor:
-            #   new_sl = entry + activation_points - offset
-            pos["sl_activated"] = True
-            pos["max_ltp"]      = ltp
-            new_sl              = entry_price + activation_points - activation_sl_offset
-            try:
-                await db.update_position(pos["id"], {"sl_activated": 1, "max_ltp": ltp})
-            except Exception:
-                log.exception("_process_position_tick: persist sl_activated failed")
+        if sl_mode == "snap_levels":
+            # ── Snap-level SL logic ──────────────────────────────────────────
+            snap_levels          = pos.get("snap_levels") or []
+            snap_level_hit       = pos.get("snap_level_hit", 0)
+            snap_trailing_active = bool(pos.get("snap_trailing_active", False))
+            snap_trail_gap       = float(pos.get("snap_trail_gap") or 3.0)
+            snap_trail_after_l3  = bool(pos.get("snap_trail_after_l3", False))
 
-        elif pos.get("sl_activated"):
-            if ltp > pos.get("max_ltp", 0):
-                pos["max_ltp"] = ltp
-                new_sl         = ltp - trail_gap
+            activation_trigger = entry_price + activation_points
+            triggers = []
+            t = activation_trigger
+            for lvl in snap_levels:
+                t = t + float(lvl.get("snapPts", 10))
+                triggers.append(t)
 
-        if new_sl is not None and new_sl > pos.get("trailing_sl", 0):
-            pos["trailing_sl"] = new_sl
-            log.info("[signal_trail] SL → %.2f for %s", new_sl, pos["trading_symbol"])
+            db_updates = {}
+            for i, trigger in enumerate(triggers):
+                if snap_level_hit > i:
+                    continue
+                if ltp >= trigger:
+                    offset = float(snap_levels[i].get("offset", 2))
+                    candidate_sl = trigger - offset
+                    if candidate_sl > pos.get("trailing_sl", 0):
+                        new_sl = candidate_sl
+                        pos["trailing_sl"] = new_sl
+                    snap_level_hit = i + 1
+                    pos["snap_level_hit"] = snap_level_hit
+                    db_updates["snap_level_hit"] = snap_level_hit
+                    log.info(
+                        "[snap_levels] L%d hit @ %.2f — SL snapped to %.2f for %s",
+                        i + 1, trigger, pos["trailing_sl"], pos["trading_symbol"],
+                    )
 
-            await self._update_sl_order(pos, new_sl)
+            if (snap_trail_after_l3 and snap_level_hit >= len(snap_levels)
+                    and not snap_trailing_active):
+                snap_trailing_active = True
+                pos["snap_trailing_active"] = True
+                db_updates["snap_trailing_active"] = 1
+                pos["max_ltp"] = max(pos.get("max_ltp", ltp), ltp)
+                log.info(
+                    "[snap_levels] Trailing SL activated after L3 for %s (gap=%.1f)",
+                    pos["trading_symbol"], snap_trail_gap,
+                )
 
-            await self._broadcast("position_update", {
-                "id":          pos["id"],
-                "trailing_sl": new_sl,
-                "max_ltp":     pos.get("max_ltp", ltp),
-                "status_note": f"SL trailed to {new_sl:.2f} [signal_trail]",
-            })
+            if snap_trailing_active:
+                if ltp > pos.get("max_ltp", 0):
+                    pos["max_ltp"] = ltp
+                trail_sl = pos["max_ltp"] - snap_trail_gap
+                if trail_sl > pos.get("trailing_sl", 0):
+                    new_sl = trail_sl
+                    pos["trailing_sl"] = new_sl
+
+            if new_sl is not None:
+                log.info("[snap_levels] SL → %.2f for %s", new_sl, pos["trading_symbol"])
+                label = f"L{snap_level_hit}" if not snap_trailing_active else "trail"
+                await self._update_sl_order(pos, new_sl)
+                await self._broadcast("position_update", {
+                    "id":          pos["id"],
+                    "trailing_sl": new_sl,
+                    "max_ltp":     pos.get("max_ltp", ltp),
+                    "status_note": f"SL snapped to {new_sl:.2f} [{label}]",
+                })
+
+            if db_updates:
+                try:
+                    await db.update_position(pos["id"], db_updates)
+                except Exception:
+                    log.exception("_process_position_tick: snap db update failed")
+
+        else:
+            # ── signal_trail SL logic (original) ──
+            trail_gap            = pos.get("trail_gap", DEFAULT_TRAIL_GAP)
+
+            if not pos.get("sl_activated") and ltp >= entry_price + activation_points:
+                pos["sl_activated"] = True
+                pos["max_ltp"]      = ltp
+                new_sl              = entry_price + activation_points - activation_sl_offset
+                try:
+                    await db.update_position(pos["id"], {"sl_activated": 1, "max_ltp": ltp})
+                except Exception:
+                    log.exception("_process_position_tick: persist sl_activated failed")
+            elif pos.get("sl_activated"):
+                if ltp > pos.get("max_ltp", 0):
+                    pos["max_ltp"] = ltp
+                    new_sl         = ltp - trail_gap
+
+            if new_sl is not None and new_sl > pos.get("trailing_sl", 0):
+                pos["trailing_sl"] = new_sl
+                log.info("[signal_trail] SL → %.2f for %s", new_sl, pos["trading_symbol"])
+                await self._update_sl_order(pos, new_sl)
+                await self._broadcast("position_update", {
+                    "id":          pos["id"],
+                    "trailing_sl": new_sl,
+                    "max_ltp":     pos.get("max_ltp", ltp),
+                    "status_note": f"SL trailed to {new_sl:.2f} [signal_trail]",
+                })
 
         # ── Software SL trigger ────────────────────────────────────────────────
         # Fire immediately when price hits or breaks the SL level.
@@ -1711,12 +1811,17 @@ class RealTrader:
                 "activation_sl_offset": float(t.get("activation_sl_offset") or DEFAULT_ACTIVATION_SL_OFFSET),
                 "trail_gap":            float(t.get("trail_gap")          or DEFAULT_TRAIL_GAP),
                 "bounce_points":     float(t.get("bounce_points")      or DEFAULT_BOUNCE_POINTS),
+                "snap_levels":          _parse_snap_levels(t.get("snap_levels")),
+                "snap_trail_after_l3":  bool(t.get("snap_trail_after_l3", False)),
+                "snap_trail_gap":       float(t.get("snap_trail_gap") or 3.0),
+                "snap_level_hit":       int(t.get("snap_level_hit") or 0),
+                "snap_trailing_active": bool(t.get("snap_trailing_active", 0)),
                 "entry_logic":       t.get("entry_logic", "code"),
                 "entry_label":       t.get("entry_label"),
                 "entry_timer_mins":  int(t.get("entry_timer_mins") or ENTRY_TIMEOUT_MINS),
                 "exit_timer_mins":   int(t.get("exit_timer_mins")  or POSITION_TIMEOUT_MINS),
-                "entry_slippage":    float(t.get("entry_slippage") or DEFAULT_ENTRY_SLIPPAGE),
-                "exit_slippage":     float(t.get("exit_slippage")  or DEFAULT_EXIT_SLIPPAGE),
+                "entry_slippage":    float(t.get("entry_slippage") if t.get("entry_slippage") is not None else DEFAULT_ENTRY_SLIPPAGE),
+                "exit_slippage":     float(t.get("exit_slippage")  if t.get("exit_slippage")  is not None else DEFAULT_EXIT_SLIPPAGE),
                 "signal_trail_initial_sl":        t.get("signal_trail_initial_sl", "telegram"),
                 "signal_trail_initial_sl_points": float(t.get("signal_trail_initial_sl_points") or 5.0),
             }
@@ -1762,7 +1867,7 @@ class RealTrader:
                 "sl_activated":      bool(p.get("sl_activated", 0)),
                 "exit_reason":       p.get("exit_reason"),
                 "exit_timer_mins":   int(p.get("exit_timer_mins") or POSITION_TIMEOUT_MINS),
-                "exit_slippage":     float(p.get("exit_slippage") or DEFAULT_EXIT_SLIPPAGE),
+                "exit_slippage":     float(p.get("exit_slippage") if p.get("exit_slippage") is not None else DEFAULT_EXIT_SLIPPAGE),
                 "kotak_entry_order_id": p.get("kotak_entry_order_id"),
                 "sl_order_id":          p.get("sl_order_id"),
             }

@@ -630,6 +630,13 @@ class StrategyRequest(BaseModel):
     exitTimerMins:             int             = 10
     signalTrailInitialSL:      str             = "telegram"
     signalTrailInitialSLPoints: Optional[float] = 5.0
+    entrySlippage:             Optional[float] = 1.0
+    exitSlippage:              Optional[float] = 1.0
+    # Snap-level SL
+    slMode:                    str             = "signal_trail"  # "signal_trail" | "snap_levels"
+    snapLevels:                Optional[list]  = None  # [{snapPts, offset}, x3]
+    snapTrailAfterL3:          bool            = False
+    snapTrailGap:              Optional[float] = 3.0
 
 
 # ── REST Endpoints ────────────────────────────────────────────────────────────

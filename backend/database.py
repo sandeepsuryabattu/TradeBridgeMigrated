@@ -37,6 +37,8 @@ _ALLOWED_POSITION_FIELDS = {
     "kotak_entry_order_id", "sl_order_id",
     # Real trading runtime controls for restart-safe behavior
     "exit_timer_mins", "exit_slippage",
+    # Snap-level SL runtime state
+    "snap_levels", "snap_level_hit", "snap_trailing_active",
 }
 
 _ALLOWED_PENDING_ORDER_FIELDS = {
@@ -244,6 +246,10 @@ async def init_db():
         ("positions",       "sl_order_id",              "TEXT"),
         ("positions",       "exit_timer_mins",          "INTEGER"),
         ("positions",       "exit_slippage",            "REAL"),
+        # Snap-level SL state
+        ("positions",       "snap_levels",              "TEXT"),
+        ("positions",       "snap_level_hit",           "INTEGER DEFAULT 0"),
+        ("positions",       "snap_trailing_active",     "INTEGER DEFAULT 0"),
     ]
 
     for table, col, typedef in migrations:
@@ -513,14 +519,16 @@ async def get_trades(mode: str = None, limit: int = 200, date: str = None) -> li
 
 async def save_position(trade_id: int, pos_data: dict) -> int:
     db = await _get_db()
+    snap_levels_json = json.dumps(pos_data["snap_levels"]) if pos_data.get("snap_levels") else None
     cursor = await db.execute(
         """INSERT INTO positions
            (trade_id, mode, trading_symbol, strike, option_type,
             quantity, entry_price, max_ltp, trailing_sl, status,
             sl_mode, sl_gap, sl_points, signal_stoploss,
             activation_points, trail_gap, sl_activated, exit_reason,
-            exit_timer_mins, exit_slippage)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            exit_timer_mins, exit_slippage,
+            snap_levels, snap_level_hit, snap_trailing_active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             trade_id,
             pos_data.get("mode", "paper"),
@@ -542,6 +550,9 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
             pos_data.get("exit_reason"),
             pos_data.get("exit_timer_mins"),
             pos_data.get("exit_slippage"),
+            snap_levels_json,
+            pos_data.get("snap_level_hit", 0),
+            int(pos_data.get("snap_trailing_active", False)),
         ),
     )
     await db.commit()

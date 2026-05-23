@@ -2003,6 +2003,15 @@ const STRATEGY_DEFAULTS = {
     signalTrailInitialSL: 'telegram',
     signalTrailInitialSLPoints: 5.0,
     entrySlippage: 1.0,
+    // Snap-level SL
+    slMode: 'signal_trail',
+    snapLevels: [
+        { snapPts: 10, offset: 2 },
+        { snapPts: 10, offset: 2 },
+        { snapPts: 10, offset: 2 },
+    ],
+    snapTrailAfterL3: false,
+    snapTrailGap: 3.0,
 };
 
 async function loadStrategy() {
@@ -2060,15 +2069,27 @@ function renderCurrentStrategySummary() {
     const box = $('#strategy-current-summary');
     if (!box) return;
     const s = { ...STRATEGY_DEFAULTS, ...state.strategy };
+    const slModeLabel = s.slMode === 'snap_levels' ? '🔒 Snap Levels' : '📈 Trailing SL';
     const rows = [
         ['Lots', `${s.lots || 1}`],
         ['Bounce', `${s.bouncePoints || 5} pts`],
         ['Entry Timer', `${s.entryTimerMins ?? 10} min`],
         ['Exit Timer', `${s.exitTimerMins ?? 10} min`],
         ['Buffer', s.bufferEnabled ? `ON (+/-${s.bufferPoints || 2})` : 'OFF'],
-        ['Trail', `Act ${s.activationPoints ?? 5} / Offset ${s.activationSLOffset ?? 0} / Gap ${s.trailGap ?? 2}`],
+        ['SL Mode', slModeLabel],
+        ...(s.slMode === 'snap_levels'
+            ? [
+                ['Activation', `${s.activationPoints ?? 5} pts / offset ${s.activationSLOffset ?? 0}`],
+                ['L1', `+${s.snapLevels?.[0]?.snapPts ?? 10} pts, offset ${s.snapLevels?.[0]?.offset ?? 2}`],
+                ['L2', `+${s.snapLevels?.[1]?.snapPts ?? 10} pts, offset ${s.snapLevels?.[1]?.offset ?? 2}`],
+                ['L3', `+${s.snapLevels?.[2]?.snapPts ?? 10} pts, offset ${s.snapLevels?.[2]?.offset ?? 2}`],
+                ...(s.snapTrailAfterL3 ? [['Trail after L3', `${s.snapTrailGap ?? 3} pts gap`]] : []),
+              ]
+            : [
+                ['Trail', `Act ${s.activationPoints ?? 5} / Offset ${s.activationSLOffset ?? 0} / Gap ${s.trailGap ?? 2}`],
+                ['Initial SL', formatInitialSLSummary(s)],
+              ]),
         ['Entry Slippage', `${s.entrySlippage ?? 1} pts`],
-        ['Initial SL', formatInitialSLSummary(s)],
     ];
     box.innerHTML = rows.map(([k, v]) =>
         `<div class="strategy-summary-item"><span class="strategy-summary-key">${k}</span><span class="strategy-summary-val">${v}</span></div>`
@@ -2135,6 +2156,34 @@ function syncStrategyModalToState() {
     const initPointsInput = $('#sl-init-points-value');
     if (initPointsInput) initPointsInput.value = s.signalTrailInitialSLPoints ?? 5;
 
+    // SL mode toggle
+    const slMode = s.slMode || 'signal_trail';
+    $$('input[name="sl-mode"]').forEach(r => { r.checked = r.value === slMode; });
+    const trailPanel = $('#sl-trail-panel');
+    const snapPanel  = $('#sl-snap-panel');
+    if (trailPanel) trailPanel.style.display = slMode === 'signal_trail' ? 'block' : 'none';
+    if (snapPanel)  snapPanel.style.display  = slMode === 'snap_levels'  ? 'block' : 'none';
+
+    // Snap level inputs (mirror activation fields into snap panel)
+    const lvls = s.snapLevels || STRATEGY_DEFAULTS.snapLevels;
+    const snapActPts = $('#sl-snap-activation-pts');
+    if (snapActPts) snapActPts.value = s.activationPoints ?? 5;
+    const snapActOff = $('#sl-snap-activation-offset');
+    if (snapActOff) snapActOff.value = s.activationSLOffset ?? 0;
+    [1, 2, 3].forEach(n => {
+        const lvl = lvls[n - 1] || {};
+        const ptsEl = $(`#snap-l${n}-pts`);
+        const offEl = $(`#snap-l${n}-offset`);
+        if (ptsEl) ptsEl.value = lvl.snapPts ?? 10;
+        if (offEl) offEl.value = lvl.offset  ?? 2;
+    });
+    const snapTrailChk = $('#snap-trail-after-l3');
+    if (snapTrailChk) snapTrailChk.checked = !!s.snapTrailAfterL3;
+    const snapTrailGapRow = $('#snap-trail-gap-row');
+    if (snapTrailGapRow) snapTrailGapRow.style.display = s.snapTrailAfterL3 ? 'block' : 'none';
+    const snapTrailGapEl = $('#snap-trail-gap');
+    if (snapTrailGapEl) snapTrailGapEl.value = s.snapTrailGap ?? 3;
+
     renderCurrentStrategySummary();
 }
 
@@ -2185,6 +2234,30 @@ function bindStrategyModal() {
         });
     });
 
+    // SL mode toggle — show/hide panels
+    $$('input[name="sl-mode"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            const isSnap = radio.value === 'snap_levels';
+            const trailPanel = $('#sl-trail-panel');
+            const snapPanel  = $('#sl-snap-panel');
+            if (trailPanel) trailPanel.style.display = isSnap ? 'none' : 'block';
+            if (snapPanel)  snapPanel.style.display  = isSnap ? 'block' : 'none';
+            // Mirror activation inputs into snap panel when switching to snap
+            if (isSnap) {
+                const snapActPts = $('#sl-snap-activation-pts');
+                if (snapActPts && !snapActPts.value) snapActPts.value = $('#sl-activation-points')?.value || 5;
+                const snapActOff = $('#sl-snap-activation-offset');
+                if (snapActOff && !snapActOff.value) snapActOff.value = $('#sl-activation-sl-offset')?.value || 0;
+            }
+        });
+    });
+
+    // Snap trail-after-L3 toggle
+    $('#snap-trail-after-l3')?.addEventListener('change', (e) => {
+        const row = $('#snap-trail-gap-row');
+        if (row) row.style.display = e.target.checked ? 'block' : 'none';
+    });
+
     $('#btn-strategy-reset')?.addEventListener('click', () => {
         state.strategy = { ...STRATEGY_DEFAULTS };
         populateLotDropdown();
@@ -2200,12 +2273,18 @@ function bindStrategyModal() {
         const bouncePoints = parseInt($('#bounce-points-input')?.value) || 5;
         const bufferEnabled = !!$('#buffer-enabled-toggle')?.checked;
         const bufferPoints = parseFloat($('#buffer-points-input')?.value) || 2;
-        const activationPoints = parseFloat($('#sl-activation-points')?.value) || 5;
-        const activationSLOffset = parseFloat($('#sl-activation-sl-offset')?.value) || 0;
-        const trailGap = parseFloat($('#sl-trail-gap')?.value) || 2;
         const entryTimerMins = parseInt($('#entry-timer-mins')?.value) || 10;
         const exitTimerMins = parseInt($('#exit-timer-mins')?.value) || 10;
         const entrySlippage = parseFloat($('#entry-slippage-input')?.value);
+
+        // SL mode
+        const slModeRadio = document.querySelector('input[name="sl-mode"]:checked');
+        const slMode = slModeRadio?.value || 'signal_trail';
+
+        // Trailing SL fields
+        const activationPoints = parseFloat($('#sl-activation-points')?.value) || 5;
+        const activationSLOffset = parseFloat($('#sl-activation-sl-offset')?.value) || 0;
+        const trailGap = parseFloat($('#sl-trail-gap')?.value) || 2;
 
         // Signal trail initial SL
         const initSLRadio = document.querySelector('input[name="signal-trail-initial-sl"]:checked');
@@ -2214,11 +2293,23 @@ function bindStrategyModal() {
             ? (parseFloat($('#sl-init-points-value')?.value) || 5)
             : null;
 
+        // Snap level fields (if snap mode)
+        let snapActPts   = parseFloat($('#sl-snap-activation-pts')?.value);
+        let snapActOff   = parseFloat($('#sl-snap-activation-offset')?.value);
+        if (!isFinite(snapActPts)) snapActPts = activationPoints;
+        if (!isFinite(snapActOff)) snapActOff = activationSLOffset;
+        const snapLevels = [1, 2, 3].map(n => ({
+            snapPts: parseFloat($(`#snap-l${n}-pts`)?.value) || 10,
+            offset:  parseFloat($(`#snap-l${n}-offset`)?.value) || 2,
+        }));
+        const snapTrailAfterL3 = !!$('#snap-trail-after-l3')?.checked;
+        const snapTrailGap = parseFloat($('#snap-trail-gap')?.value) || 3;
+
         // Validation
-        if (!activationPoints || !trailGap) {
+        if (slMode === 'signal_trail' && (!activationPoints || !trailGap)) {
             return toast('Please enter activation pts and trail gap', 'warning');
         }
-        if (signalTrailInitialSL === 'points_from_ltp' && !signalTrailInitialSLPoints) {
+        if (slMode === 'signal_trail' && signalTrailInitialSL === 'points_from_ltp' && !signalTrailInitialSLPoints) {
             return toast('Please enter points below entry for initial SL', 'warning');
         }
         if (entryTimerMins < 1 || exitTimerMins < 1) {
@@ -2230,13 +2321,22 @@ function bindStrategyModal() {
         if (!Number.isFinite(entrySlippage) || entrySlippage < 0) {
             return toast('Entry slippage must be 0 or more', 'warning');
         }
+        // In snap mode, sync activation inputs from snap panel
+        const finalActivationPoints   = slMode === 'snap_levels' ? snapActPts   : activationPoints;
+        const finalActivationSLOffset = slMode === 'snap_levels' ? snapActOff   : activationSLOffset;
 
         state.strategy = {
             lots, bouncePoints, bufferEnabled, bufferPoints,
-            activationPoints, activationSLOffset, trailGap,
+            activationPoints: finalActivationPoints,
+            activationSLOffset: finalActivationSLOffset,
+            trailGap,
             entryTimerMins, exitTimerMins,
             signalTrailInitialSL, signalTrailInitialSLPoints,
             entrySlippage,
+            slMode,
+            snapLevels,
+            snapTrailAfterL3,
+            snapTrailGap,
         };
         persistStrategy();
 
@@ -2260,7 +2360,8 @@ function bindStrategyModal() {
         } catch { console.warn('Could not sync lot size to backend'); }
 
         const bufLabel = bufferEnabled ? ` | Buffer: +/-${bufferPoints}` : '';
-        toast(`Strategy saved: ${lots} lot(s) | Bounce: ${bouncePoints}pts${bufLabel} | Entry slip: ${entrySlippage}pt`, 'success');
+        const modeLabel = slMode === 'snap_levels' ? '🔒 Snap Levels' : '📈 Trailing SL';
+        toast(`Strategy saved: ${lots} lot(s) | ${modeLabel} | Bounce: ${bouncePoints}pts${bufLabel} | Entry slip: ${entrySlippage}pt`, 'success');
         $('#strategy-modal').style.display = 'none';
     });
 }
