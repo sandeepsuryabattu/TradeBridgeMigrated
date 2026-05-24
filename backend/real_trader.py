@@ -1176,13 +1176,31 @@ class RealTrader:
             snap_trail_after_l3  = bool(pos.get("snap_trail_after_l3", False))
 
             activation_trigger = entry_price + activation_points
+
+            # ── Activation snap (L0): first time price crosses activation_trigger ──
+            # Snaps SL to activation_trigger - activation_sl_offset (breakeven+).
+            # Uses sl_activated flag so it only fires once.
+            db_updates = {}
+            if not pos.get("sl_activated") and ltp >= activation_trigger:
+                pos["sl_activated"] = True
+                activation_sl = activation_trigger - activation_sl_offset
+                if activation_sl > pos.get("trailing_sl", 0):
+                    new_sl = activation_sl
+                    pos["trailing_sl"] = new_sl
+                db_updates["sl_activated"] = 1
+                db_updates["max_ltp"] = ltp
+                pos["max_ltp"] = ltp
+                log.info(
+                    "[snap_levels] Activation hit @ %.2f — SL snapped to %.2f (L0) for %s",
+                    activation_trigger, pos.get("trailing_sl", 0), pos["trading_symbol"],
+                )
+
             triggers = []
             t = activation_trigger
             for lvl in snap_levels:
                 t = t + float(lvl.get("snapPts", 10))
                 triggers.append(t)
 
-            db_updates = {}
             for i, trigger in enumerate(triggers):
                 if snap_level_hit > i:
                     continue

@@ -1,6 +1,6 @@
 {
-  "lots": 1,
-  "activationPoints": 11.0,
+  "lots": 2,
+  "activationPoints": 10.0,
   "activationSLOffset": 2.0,
   "trailGap": 4.0,
   "bouncePoints": 4,
@@ -10,10 +10,23 @@
   "exitTimerMins": 60,
   "signalTrailInitialSL": "telegram",
   "signalTrailInitialSLPoints": null,
-  "entrySlippage": 4.0,
+  "entrySlippage": 2.0,
   "exitSlippage": 1.0,
-  "slMode": "signal_trail",
-  "snapLevels": null,
-  "snapTrailAfterL3": false,
-  "snapTrailGap": 3.0
+  "slMode": "snap_levels",
+  "snapLevels": [
+    {
+      "snapPts": 8,
+      "offset": 2
+    },
+    {
+      "snapPts": 10,
+      "offset": 2
+    },
+    {
+      "snapPts": 10,
+      "offset": 2
+    }
+  ],
+  "snapTrailAfterL3": true,
+  "snapTrailGap": 4.0
 }
