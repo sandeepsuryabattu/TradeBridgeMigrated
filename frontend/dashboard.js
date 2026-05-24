@@ -1388,7 +1388,12 @@ function renderPositions() {
             const ltpSpan = existing.querySelector('.pos-meta .mono');
             if (ltpSpan) ltpSpan.textContent = `₹${(p.current_price || 0).toFixed(2)}`;
             const slTag = existing.querySelector('.sl-tag');
-            if (slTag) slTag.textContent = `SL: ₹${(p.trailing_sl || 0).toFixed(2)}`;
+            if (slTag) {
+                const snapBadge = p.sl_mode === 'snap_levels'
+                    ? ` <span class="snap-level-badge">${getSnapLevelLabel(p)}</span>`
+                    : '';
+                slTag.innerHTML = `SL: ₹${(p.trailing_sl || 0).toFixed(2)}${snapBadge}`;
+            }
             const maxTag = existing.querySelector('.max-tag');
             if (maxTag && p.max_ltp) maxTag.textContent = `Max: ₹${p.max_ltp.toFixed(2)}`;
         } else {
@@ -1410,7 +1415,7 @@ function renderPositions() {
                         LTP: <span class="mono">₹${(p.current_price || 0).toFixed(2)}</span>
                     </span>
                     <div class="pos-strategy">
-                        <span class="sl-tag">SL: ₹${(p.trailing_sl || 0).toFixed(2)}</span>
+                        <span class="sl-tag">SL: ₹${(p.trailing_sl || 0).toFixed(2)}${p.sl_mode === 'snap_levels' ? ` <span class="snap-level-badge">${getSnapLevelLabel(p)}</span>` : ''}</span>
                         ${p.max_ltp ? `<span class="max-tag">Max: ₹${p.max_ltp.toFixed(2)}</span>` : ''}
                     </div>
                 </div>
@@ -1697,7 +1702,18 @@ const CHARGES = {
     gst_rate: 0.18            // 18%
 };
 
+function getSnapLevelLabel(p) {
+    if (p.snap_trailing_active) return '🔁 Trail';
+    const hit = p.snap_level_hit || 0;
+    if (hit >= 3) return '✅ L3';
+    if (hit === 2) return '✅ L2';
+    if (hit === 1) return '✅ L1';
+    if (p.sl_activated) return '🟢 L0';
+    return '⏳ Wait';
+}
+
 function calculateNetPnL(trade) {
+
     // Support both trade and position field names
     const fillPrice = trade.fill_price || trade.entry_price || 0;
     const exitPrice = trade.exit_price || trade.current_price || 0;
@@ -2010,7 +2026,7 @@ const STRATEGY_DEFAULTS = {
         { snapPts: 10, offset: 2 },
         { snapPts: 10, offset: 2 },
     ],
-    snapTrailAfterL3: false,
+    snapTrailAfterL3: true,
     snapTrailGap: 3.0,
 };
 
@@ -2080,10 +2096,11 @@ function renderCurrentStrategySummary() {
         ...(s.slMode === 'snap_levels'
             ? [
                 ['Activation', `${s.activationPoints ?? 5} pts / offset ${s.activationSLOffset ?? 0}`],
+                ['Initial SL', formatInitialSLSummary(s)],
                 ['L1', `+${s.snapLevels?.[0]?.snapPts ?? 10} pts, offset ${s.snapLevels?.[0]?.offset ?? 2}`],
                 ['L2', `+${s.snapLevels?.[1]?.snapPts ?? 10} pts, offset ${s.snapLevels?.[1]?.offset ?? 2}`],
                 ['L3', `+${s.snapLevels?.[2]?.snapPts ?? 10} pts, offset ${s.snapLevels?.[2]?.offset ?? 2}`],
-                ...(s.snapTrailAfterL3 ? [['Trail after L3', `${s.snapTrailGap ?? 3} pts gap`]] : []),
+                ['Trail after L3', `${s.snapTrailGap ?? 3} pts gap`],
               ]
             : [
                 ['Trail', `Act ${s.activationPoints ?? 5} / Offset ${s.activationSLOffset ?? 0} / Gap ${s.trailGap ?? 2}`],
@@ -2148,13 +2165,18 @@ function syncStrategyModalToState() {
     const gapInput = $('#sl-trail-gap');
     if (gapInput) gapInput.value = s.trailGap ?? 2;
 
-    // Signal trail initial SL source
+    // Signal trail initial SL source (trail panel)
     const initSL = s.signalTrailInitialSL || 'telegram';
     $$('input[name="signal-trail-initial-sl"]').forEach(r => { r.checked = r.value === initSL; });
     const initPointsRow = $('#sl-init-points-row');
     if (initPointsRow) initPointsRow.style.display = initSL === 'points_from_ltp' ? 'block' : 'none';
     const initPointsInput = $('#sl-init-points-value');
     if (initPointsInput) initPointsInput.value = s.signalTrailInitialSLPoints ?? 5;
+    // Snap panel initial SL points input
+    const snapInitPointsInput = $('#sl-init-points-value-snap');
+    if (snapInitPointsInput) snapInitPointsInput.value = s.signalTrailInitialSLPoints ?? 5;
+    const snapInitPointsRow = $('#sl-snap-init-points-row');
+    if (snapInitPointsRow) snapInitPointsRow.style.display = initSL === 'points_from_ltp' ? 'block' : 'none';
 
     // SL mode toggle
     const slMode = s.slMode || 'signal_trail';
@@ -2177,10 +2199,6 @@ function syncStrategyModalToState() {
         if (ptsEl) ptsEl.value = lvl.snapPts ?? 10;
         if (offEl) offEl.value = lvl.offset  ?? 2;
     });
-    const snapTrailChk = $('#snap-trail-after-l3');
-    if (snapTrailChk) snapTrailChk.checked = !!s.snapTrailAfterL3;
-    const snapTrailGapRow = $('#snap-trail-gap-row');
-    if (snapTrailGapRow) snapTrailGapRow.style.display = s.snapTrailAfterL3 ? 'block' : 'none';
     const snapTrailGapEl = $('#snap-trail-gap');
     if (snapTrailGapEl) snapTrailGapEl.value = s.snapTrailGap ?? 3;
 
@@ -2226,11 +2244,14 @@ function bindStrategyModal() {
         });
     });
 
-    // Signal trail initial SL — show/hide points input
+    // Signal trail initial SL — show/hide points input (both panels)
     $$('input[name="signal-trail-initial-sl"]').forEach(radio => {
         radio.addEventListener('change', () => {
+            const isPoints = radio.value === 'points_from_ltp';
             const row = $('#sl-init-points-row');
-            if (row) row.style.display = radio.value === 'points_from_ltp' ? 'block' : 'none';
+            if (row) row.style.display = isPoints ? 'block' : 'none';
+            const snapRow = $('#sl-snap-init-points-row');
+            if (snapRow) snapRow.style.display = isPoints ? 'block' : 'none';
         });
     });
 
@@ -2252,11 +2273,6 @@ function bindStrategyModal() {
         });
     });
 
-    // Snap trail-after-L3 toggle
-    $('#snap-trail-after-l3')?.addEventListener('change', (e) => {
-        const row = $('#snap-trail-gap-row');
-        if (row) row.style.display = e.target.checked ? 'block' : 'none';
-    });
 
     $('#btn-strategy-reset')?.addEventListener('click', () => {
         state.strategy = { ...STRATEGY_DEFAULTS };
@@ -2289,8 +2305,12 @@ function bindStrategyModal() {
         // Signal trail initial SL
         const initSLRadio = document.querySelector('input[name="signal-trail-initial-sl"]:checked');
         const signalTrailInitialSL = initSLRadio?.value || 'telegram';
+        // Read points value from whichever panel is active
+        const pointsValEl = slMode === 'snap_levels'
+            ? $('#sl-init-points-value-snap')
+            : $('#sl-init-points-value');
         const signalTrailInitialSLPoints = signalTrailInitialSL === 'points_from_ltp'
-            ? (parseFloat($('#sl-init-points-value')?.value) || 5)
+            ? (parseFloat(pointsValEl?.value) || 5)
             : null;
 
         // Snap level fields (if snap mode)
@@ -2302,14 +2322,14 @@ function bindStrategyModal() {
             snapPts: parseFloat($(`#snap-l${n}-pts`)?.value) || 10,
             offset:  parseFloat($(`#snap-l${n}-offset`)?.value) || 2,
         }));
-        const snapTrailAfterL3 = !!$('#snap-trail-after-l3')?.checked;
+        const snapTrailAfterL3 = true; // mandatory — trailing after L3 is always active
         const snapTrailGap = parseFloat($('#snap-trail-gap')?.value) || 3;
 
         // Validation
         if (slMode === 'signal_trail' && (!activationPoints || !trailGap)) {
             return toast('Please enter activation pts and trail gap', 'warning');
         }
-        if (slMode === 'signal_trail' && signalTrailInitialSL === 'points_from_ltp' && !signalTrailInitialSLPoints) {
+        if (signalTrailInitialSL === 'points_from_ltp' && !signalTrailInitialSLPoints) {
             return toast('Please enter points below entry for initial SL', 'warning');
         }
         if (entryTimerMins < 1 || exitTimerMins < 1) {
