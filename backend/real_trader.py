@@ -26,6 +26,9 @@ FIXES applied (v2):
   #9  _verify_fill / _verify_exit_fill: consolidated into _poll_order_fill()
   #10 _resolve_symbol: cache keyed by (date, strike, opt_type) — cleared daily
   #11 RECONCILE_INTERVAL_S wiring note added; constant confirmed used in main.py
+  #12 close_position: margin-exceeds rejection triggers broker position verification
+      to distinguish genuine shortfall from already-exited (zombie) positions
+  #13 auto-heal: retry cap + broker verification prevents infinite close_failed loops
 """
 import asyncio
 from contextlib import suppress
@@ -64,6 +67,7 @@ RECONCILE_INTERVAL_S     = 30     # Used by the scheduler in main.py
 MAX_SL_REPROTECT_ATTEMPTS = 3    # Cap re-placement attempts per position to prevent runaway loops
 EOD_EXIT_MINUTES_BEFORE  = 5      # Close positions N minutes before market close
 MAX_EXIT_SELL_ATTEMPTS   = 6      # Hard cap on IOC SELL retry loop before declaring close_failed
+MAX_CLOSE_FAILED_RETRIES = 10     # [FIX #13] Hard cap on auto-heal retries per position before broker verification
 
 # Rejection reasons that mean "position already gone" (exchange confirmed no holding)
 # Anything matching these lets us safely close in DB without placing another SELL.
@@ -71,6 +75,9 @@ _ALREADY_EXITED_REASONS  = frozenset({
     "no holdings", "insufficient qty", "position closed",
     "no open position", "net qty is zero", "quantity exceeds",
 })
+# [FIX #12] Margin-exceeds rejections need special handling: could mean position is
+# gone (naked short margin) OR genuine shortfall. Verified via get_positions().
+_MARGIN_EXCEEDS_PATTERN  = "margin exceeds"
 POS_FLUSH_INTERVAL_S     = 2.0    # Batch position DB writes — flush every N seconds
 
 # Fill confirmation tuning (extended to handle real-world latency)
@@ -127,6 +134,11 @@ class RealTrader:
         self._open_positions: list[dict] = []
         self._ws_broadcast: Optional[Callable] = None
         self._on_trade_expired: Optional[Callable] = None
+
+        # [FIX #13] Per-position close_failed retry counter — prevents infinite loops.
+        # Key: position_id, value: consecutive close_failed count.
+        # Reset when position closes successfully or is removed.
+        self._close_fail_counts: dict[int, int] = {}
 
         # FIX #10: Symbol cache keyed by (trading_date, strike, opt_type) so it
         # auto-invalidates across days without any explicit eviction call.
@@ -1288,11 +1300,31 @@ class RealTrader:
         trailing_sl = pos.get("trailing_sl", 0)
 
         # Auto-heal: if a previous close attempt was rejected at exchange level,
-        # status is 'close_failed'. Retry close on every tick until it succeeds.
+        # status is 'close_failed'. Retry close with a cap to prevent infinite loops.
+        # [FIX #13] After MAX_CLOSE_FAILED_RETRIES, verify position on broker before retrying.
         if pos.get("status") == "close_failed":
+            fail_count = self._close_fail_counts.get(pos["id"], 0)
+
+            if fail_count >= MAX_CLOSE_FAILED_RETRIES:
+                # Verify with broker — position may already be gone
+                still_exists = await self._verify_position_on_broker(pos)
+                if not still_exists:
+                    log.warning(
+                        "AUTO-HEAL: position %s NOT found on broker after %d retries — closing in DB",
+                        pos["trading_symbol"], fail_count,
+                    )
+                    await self._force_close_zombie(pos, "auto_heal_broker_check")
+                    return
+                # Position still exists — reset counter, keep retrying with backoff
+                log.warning(
+                    "AUTO-HEAL: position %s STILL on broker after %d retries — resetting counter",
+                    pos["trading_symbol"], fail_count,
+                )
+                self._close_fail_counts[pos["id"]] = 0
+
             log.warning(
-                "AUTO-HEAL: retrying close for %s (close_failed) ltp=%.2f",
-                pos["trading_symbol"], ltp,
+                "AUTO-HEAL: retrying close for %s (close_failed) ltp=%.2f [attempt %d/%d]",
+                pos["trading_symbol"], ltp, fail_count + 1, MAX_CLOSE_FAILED_RETRIES,
             )
             pos["status"] = "open"  # Reset so close_position accepts it
             await self.close_position(pos["id"], exit_price=ltp, exit_reason="software_sl")
@@ -1453,15 +1485,57 @@ class RealTrader:
                                     })
                                     break
 
+                                # [FIX #12] Margin-exceeds: could be genuine shortfall OR
+                                # position already gone (naked short margin). Verify with broker.
+                                elif _MARGIN_EXCEEDS_PATTERN in rej_lower:
+                                    log.warning(
+                                        "EXIT SELL REJECTED (margin exceeds) for %s (#%s): %s "
+                                        "— verifying position with broker",
+                                        pos["trading_symbol"], sell_order_id, rej_reason,
+                                    )
+                                    still_exists = await self._verify_position_on_broker(pos)
+                                    if not still_exists:
+                                        log.warning(
+                                            "EXIT SELL: position %s NOT on broker — closing as manual_exit",
+                                            pos["trading_symbol"],
+                                        )
+                                        exchange_exit_confirmed = True
+                                        await self._broadcast("order_alert", {
+                                            "level":   "warning",
+                                            "message": (
+                                                f"⚠️ Margin rejection for {pos['trading_symbol']} — "
+                                                f"position not found on broker. Closing in DB (manual exit)."
+                                            ),
+                                        })
+                                        break
+                                    else:
+                                        # Position IS on broker — genuine margin shortfall.
+                                        # Increment fail count and let auto-heal retry with backoff.
+                                        self._close_fail_counts[pos["id"]] = self._close_fail_counts.get(pos["id"], 0) + 1
+                                        log.error(
+                                            "EXIT SELL REJECTED (genuine margin shortfall) for %s (#%s): %s "
+                                            "— position confirmed on broker. Will retry. [fail_count=%d]",
+                                            pos["trading_symbol"], sell_order_id, rej_reason,
+                                            self._close_fail_counts[pos["id"]],
+                                        )
+                                        await self._broadcast("order_alert", {
+                                            "level":   "error",
+                                            "message": (
+                                                f"🚨 Margin shortfall for {pos['trading_symbol']}: "
+                                                f"{rej_reason} — position still on broker, will retry"
+                                            ),
+                                        })
+                                        break
+
                                 else:
                                     # Genuine price/circuit rejection — do NOT assume position is gone.
-                                    # Log, alert, and break WITHOUT setting exchange_exit_confirmed.
-                                    # The finally block will set status='close_failed' and the
-                                    # next tick's auto-heal will retry.
+                                    # Increment fail count; the finally block sets close_failed → auto-heal.
+                                    self._close_fail_counts[pos["id"]] = self._close_fail_counts.get(pos["id"], 0) + 1
                                     log.error(
                                         "EXIT SELL REJECTED (genuine) for %s (#%s): %s "
-                                        "— NOT treating as closed. Will retry on next tick.",
+                                        "— NOT treating as closed. Will retry. [fail_count=%d]",
                                         pos["trading_symbol"], sell_order_id, rej_reason,
+                                        self._close_fail_counts[pos["id"]],
                                     )
                                     await self._broadcast("order_alert", {
                                         "level":   "error",
@@ -1525,6 +1599,7 @@ class RealTrader:
                 db_sync_ok = True
 
                 pos["status"] = "closed"
+                self._close_fail_counts.pop(position_id, None)  # [FIX #13] Clear retry counter
                 if pos in self._open_positions:
                     self._open_positions.remove(pos)
 
@@ -1561,15 +1636,117 @@ class RealTrader:
                     if exit_reason in ("software_sl", "timer", "eod"):
                         # Don't reset to "open" — prevents re-entrant SL triggers
                         pos["status"] = "close_failed"
+                        self._close_fail_counts[position_id] = self._close_fail_counts.get(position_id, 0) + 1
+                        fail_count = self._close_fail_counts[position_id]
                         log.error(
-                            "CLOSE FAILED: %s — manual exit required (exit_reason=%s)",
+                            "CLOSE FAILED: %s — exit_reason=%s [fail_count=%d/%d]",
                             pos.get("trading_symbol"), exit_reason,
+                            fail_count, MAX_CLOSE_FAILED_RETRIES,
                         )
                     else:
                         pos["status"] = "open"  # Only for manual UI exits
                 # Always clear the SL guard
                 if pos:
                     pos.pop("_sl_exit_pending", None)
+
+    # ── Broker Position Verification [FIX #12/#13] ─────────────────────────
+
+    async def _verify_position_on_broker(self, pos: dict) -> bool:
+        """Check if a position still exists on the broker (Kotak).
+
+        Returns True if position is found with net qty > 0, False otherwise.
+        On API errors, returns True (assume position exists — safer than false close).
+        """
+        if not self.kotak or not self.kotak.is_authenticated:
+            log.warning("_verify_position_on_broker: not authenticated — assuming position exists")
+            return True
+
+        try:
+            raw = await asyncio.to_thread(self.kotak.get_positions)
+            if not raw or not isinstance(raw, dict):
+                log.warning("_verify_position_on_broker: empty response — assuming position exists")
+                return True
+
+            # Kotak positions response: {'data': [{'trdSym': ..., 'netQty': ...}, ...]}
+            positions_data = raw.get("data", raw)
+            if isinstance(positions_data, dict):
+                positions_data = positions_data.get("data", [])
+            if not isinstance(positions_data, list):
+                log.warning("_verify_position_on_broker: unexpected format — assuming position exists")
+                return True
+
+            symbol = pos.get("trading_symbol", "")
+            for broker_pos in positions_data:
+                if not isinstance(broker_pos, dict):
+                    continue
+                broker_symbol = broker_pos.get("trdSym", "") or broker_pos.get("trading_symbol", "")
+                if broker_symbol == symbol:
+                    net_qty = int(broker_pos.get("netQty", 0) or broker_pos.get("flBuyQty", 0) or 0)
+                    if net_qty > 0:
+                        log.info(
+                            "_verify_position_on_broker: %s found on broker with qty=%d",
+                            symbol, net_qty,
+                        )
+                        return True
+                    else:
+                        log.info(
+                            "_verify_position_on_broker: %s found on broker but net_qty=%d — position closed",
+                            symbol, net_qty,
+                        )
+                        return False
+
+            log.info("_verify_position_on_broker: %s NOT found in broker positions list", symbol)
+            return False
+
+        except Exception:
+            log.exception("_verify_position_on_broker: API call failed — assuming position exists")
+            return True
+
+    async def _force_close_zombie(self, pos: dict, reason: str):
+        """Close a zombie position in DB without placing exchange orders.
+
+        Used when broker verification confirms the position no longer exists.
+        """
+        position_id = pos["id"]
+        closed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        exit_reason = f"manual_exit_{reason}"
+
+        try:
+            await db.update_position(position_id, {
+                "status":      "closed",
+                "closed_at":   closed_at,
+                "exit_reason": exit_reason,
+            })
+            await db.update_trade(pos.get("trade_id", 0), {
+                "status":      "closed",
+                "closed_at":   closed_at,
+                "exit_reason": exit_reason,
+            })
+        except Exception:
+            log.exception("_force_close_zombie: DB update failed for %s", pos.get("trading_symbol"))
+            return
+
+        pos["status"] = "closed"
+        self._close_fail_counts.pop(position_id, None)
+        if pos in self._open_positions:
+            self._open_positions.remove(pos)
+
+        await self._broadcast("position_update", {
+            "id":          position_id,
+            "status":      "closed",
+            "exit_reason": exit_reason,
+        })
+        await self._broadcast("order_alert", {
+            "level":   "warning",
+            "message": (
+                f"⚠️ {pos.get('trading_symbol')} closed as zombie — "
+                f"position not found on broker ({reason})"
+            ),
+        })
+        log.warning(
+            "ZOMBIE CLOSED: %s (position %d) — %s",
+            pos.get("trading_symbol"), position_id, reason,
+        )
 
     # ── Timeout Checker ───────────────────────────────────────────────────────
 
@@ -1604,9 +1781,31 @@ class RealTrader:
         for pos in list(self._open_positions):
             pos_status = pos.get("status")
             # Retry close_failed positions even if the timer hasn't elapsed — they're already stuck
+            # [FIX #13] Cap retries and verify with broker after cap.
             if pos_status == "close_failed":
+                fail_count = self._close_fail_counts.get(pos["id"], 0)
+
+                if fail_count >= MAX_CLOSE_FAILED_RETRIES:
+                    still_exists = await self._verify_position_on_broker(pos)
+                    if not still_exists:
+                        log.warning(
+                            "TIMEOUT-HEAL: position %s NOT found on broker after %d retries — closing in DB",
+                            pos["trading_symbol"], fail_count,
+                        )
+                        await self._force_close_zombie(pos, "timeout_heal_broker_check")
+                        continue
+                    # Position still exists — reset counter and keep retrying
+                    log.warning(
+                        "TIMEOUT-HEAL: position %s STILL on broker after %d retries — resetting counter",
+                        pos["trading_symbol"], fail_count,
+                    )
+                    self._close_fail_counts[pos["id"]] = 0
+
                 exit_price = pos.get("current_price", pos["entry_price"])
-                log.warning("TIMEOUT-HEAL: retrying close_failed for %s @ %s", pos["trading_symbol"], exit_price)
+                log.warning(
+                    "TIMEOUT-HEAL: retrying close_failed for %s @ %s [attempt %d/%d]",
+                    pos["trading_symbol"], exit_price, fail_count + 1, MAX_CLOSE_FAILED_RETRIES,
+                )
                 pos["status"] = "open"  # Reset so close_position accepts it
                 await self.close_position(pos["id"], exit_price=exit_price, exit_reason="software_sl")
                 continue
