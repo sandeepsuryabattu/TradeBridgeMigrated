@@ -1,6 +1,6 @@
 {
   "lots": 2,
-  "activationPoints": 10.0,
+  "activationPoints": 8.0,
   "activationSLOffset": 2.0,
   "trailGap": 4.0,
   "bouncePoints": 4,

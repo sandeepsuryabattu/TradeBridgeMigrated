@@ -1,0 +1,7 @@
+{
+  "securityRules": [
+    {"direction":"INGRESS","protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":80,"max":80}},"description":"HTTP 80"},
+    {"direction":"INGRESS","protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":8001,"max":8001}},"description":"Bot 8001"},
+    {"direction":"INGRESS","protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":22,"max":22}},"description":"SSH 22"}
+  ]
+}
