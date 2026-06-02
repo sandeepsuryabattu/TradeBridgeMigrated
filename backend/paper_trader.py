@@ -207,6 +207,18 @@ class PaperTrader:
                 buffer_points, entry_low, entry_high, signal_stoploss,
             )
 
+        # ── [FIX #29] Auto-widen zero-width entry ranges ──
+        # When telegram gives a single entry price (entry_low == entry_high),
+        # the exact-match requirement makes fills unreliable — LTP can jump
+        # over the price between ticks. Widen by ±DEFAULT_BUFFER_POINTS.
+        if entry_low == entry_high and entry_low > 0:
+            entry_low  -= DEFAULT_BUFFER_POINTS
+            entry_high += DEFAULT_BUFFER_POINTS
+            log.info(
+                "Zero-width entry auto-widened (±%.1f): range=%s-%s",
+                DEFAULT_BUFFER_POINTS, entry_low, entry_high,
+            )
+
         activation_points   = float(strategy.get("activationPoints") or DEFAULT_ACTIVATION_PTS)
         activation_sl_offset = float(strategy.get("activationSLOffset") or 0.0)
         trail_gap           = float(strategy.get("trailGap")         or DEFAULT_TRAIL_GAP)
