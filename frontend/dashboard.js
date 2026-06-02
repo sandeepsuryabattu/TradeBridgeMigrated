@@ -2217,9 +2217,29 @@ function populateLotDropdown() {
 }
 
 function bindStrategyModal() {
+    // Tab switching event listeners (bind once)
+    $$('.strategy-tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            $$('.strategy-tab-btn').forEach(b => b.classList.remove('active'));
+            $$('.strategy-tab-content').forEach(c => c.classList.remove('active'));
+            btn.classList.add('active');
+            const targetContent = $(`#tab-${btn.dataset.tab}`);
+            if (targetContent) targetContent.classList.add('active');
+        });
+    });
+
     $('#btn-strategy')?.addEventListener('click', () => {
         populateLotDropdown();
         syncStrategyModalToState();
+        
+        // Reset active tab to General when opening
+        $$('.strategy-tab-btn').forEach(b => b.classList.remove('active'));
+        $$('.strategy-tab-content').forEach(c => c.classList.remove('active'));
+        const genTab = $('.strategy-tab-btn[data-tab="general"]');
+        const genContent = $('#tab-general');
+        if (genTab) genTab.classList.add('active');
+        if (genContent) genContent.classList.add('active');
+
         $('#strategy-modal').style.display = 'flex';
     });
 
@@ -2244,10 +2264,15 @@ function bindStrategyModal() {
         });
     });
 
-    // Signal trail initial SL — show/hide points input (both panels)
+    // Signal trail initial SL — show/hide points input (both panels) and keep them in sync
     $$('input[name="signal-trail-initial-sl"]').forEach(radio => {
         radio.addEventListener('change', () => {
-            const isPoints = radio.value === 'points_from_ltp';
+            const val = radio.value;
+            // Programmatically check the matching radio in the other panel so they stay synced
+            $$(`input[name="signal-trail-initial-sl"][value="${val}"]`).forEach(r => {
+                r.checked = true;
+            });
+            const isPoints = val === 'points_from_ltp';
             const row = $('#sl-init-points-row');
             if (row) row.style.display = isPoints ? 'block' : 'none';
             const snapRow = $('#sl-snap-init-points-row');

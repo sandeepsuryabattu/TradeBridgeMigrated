@@ -256,7 +256,10 @@
     <div class="modal-overlay" id="strategy-modal" style="display:none;">
         <div class="modal modal-strategy">
             <div class="modal-header">
-                <h2>🎯 Strategy Setup</h2>
+                <div class="modal-header-title">
+                    <h2>🎯 Strategy Setup</h2>
+                    <p class="modal-header-subtitle">Configure entry criteria, position sizing, and stop-loss levels</p>
+                </div>
                 <button class="modal-close" id="btn-close-strategy">&times;</button>
             </div>
             <div class="modal-body">
@@ -265,221 +268,329 @@
                     <div class="strategy-current-grid" id="strategy-current-summary"></div>
                 </div>
 
-                <!-- Lots Section -->
-                <div class="settings-section">
-                    <h3>Lots</h3>
-                    <div class="strategy-row">
-                        <select id="strategy-lots-select" class="strategy-select">
-                            <!-- Options 1-50 injected by JS -->
-                        </select>
-                        <div class="lot-pills" id="lot-pills">
-                            <label class="pill-option">
-                                <input type="radio" name="lots-quick" value="1"> <span>1 Lot</span>
-                            </label>
-                            <label class="pill-option">
-                                <input type="radio" name="lots-quick" value="5"> <span>5 Lots</span>
-                            </label>
-                            <label class="pill-option">
-                                <input type="radio" name="lots-quick" value="10"> <span>10 Lots</span>
-                            </label>
+                <!-- Tabs Navigation -->
+                <div class="strategy-tabs">
+                    <button class="strategy-tab-btn active" data-tab="general">⚙️ General</button>
+                    <button class="strategy-tab-btn" data-tab="entry">📈 Entry Logic</button>
+                    <button class="strategy-tab-btn" data-tab="stoploss">🛡️ Stop Loss</button>
+                </div>
+
+                <!-- Tab: General Settings -->
+                <div class="strategy-tab-content active" id="tab-general">
+                    <!-- Lots Section -->
+                    <div class="settings-section">
+                        <h3>Sizing (Lots)</h3>
+                        <div class="strategy-row">
+                            <select id="strategy-lots-select" class="strategy-select">
+                                <!-- Options 1-50 injected by JS -->
+                            </select>
+                            <div class="lot-pills" id="lot-pills">
+                                <label class="pill-option">
+                                    <input type="radio" name="lots-quick" value="1"> <span>1 Lot</span>
+                                </label>
+                                <label class="pill-option">
+                                    <input type="radio" name="lots-quick" value="5"> <span>5 Lots</span>
+                                </label>
+                                <label class="pill-option">
+                                    <input type="radio" name="lots-quick" value="10"> <span>10 Lots</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Timers Section -->
+                    <div class="settings-section">
+                        <h3>Execution Timers</h3>
+                        <div class="inputs-grid-2">
+                            <div class="form-group">
+                                <label for="entry-timer-mins">⏳ Entry timer</label>
+                                <div class="input-group">
+                                    <input type="number" id="entry-timer-mins" class="strategy-number-input" min="1" max="60" placeholder="10">
+                                    <span class="input-addon">mins</span>
+                                </div>
+                                <span class="form-hint">Time window to trigger entry after Telegram alert</span>
+                            </div>
+                            <div class="form-group">
+                                <label for="exit-timer-mins">⏱️ Exit timer</label>
+                                <div class="input-group">
+                                    <input type="number" id="exit-timer-mins" class="strategy-number-input" min="1" max="60" placeholder="10">
+                                    <span class="input-addon">mins</span>
+                                </div>
+                                <span class="form-hint">Default holding duration for open positions</span>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Timers Section -->
-                <div class="settings-section">
-                    <h3>Timers</h3>
-                    <div class="strategy-suboption" style="display:block;">
-                        <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-                            <span style="min-width:110px;">⏳ Entry timer (mins):</span>
-                            <input type="number" id="entry-timer-mins" class="strategy-number-input" min="1" max="60" style="width:70px;" placeholder="10">
-                            <span style="font-size:11px; color:var(--text-muted);">How long to wait before entering after a signal</span>
-                        </label>
-                        <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
-                            <span style="min-width:110px;">⏱️ Exit timer (mins):</span>
-                            <input type="number" id="exit-timer-mins" class="strategy-number-input" min="1" max="60" style="width:70px;" placeholder="10">
-                            <span style="font-size:11px; color:var(--text-muted);">Hold time shown on open positions</span>
-                        </label>
-                    </div>
-                </div>
-
-                <!-- Bounce Points Section -->
-                <div class="settings-section">
-                    <h3>📈 Entry Logic — Bounce-Back</h3>
-                    <p style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">
-                        Waits for price to dip within the entry range, then enters when it bounces back by the specified points.
-                    </p>
-                    <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-                        <span style="min-width:120px;">Bounce-back points:</span>
-                        <input type="number" id="bounce-points-input" class="strategy-number-input" min="1" max="999" style="width:80px;" placeholder="5">
-                        <span style="font-size:11px; color:var(--text-muted);">pts from lowest dip to trigger entry</span>
-                    </label>
-                    <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
-                        <span style="min-width:120px;">Entry slippage:</span>
-                        <input type="number" id="entry-slippage-input" class="strategy-number-input" min="0" max="50" step="0.05" style="width:80px;" placeholder="1.0" value="1.0">
-                        <span style="font-size:11px; color:var(--text-muted);">added to bounce trigger for real BUY limit</span>
-                    </label>
-                </div>
-
-                <!-- Buffer Points Section -->
-                <div class="settings-section">
-                    <h3>Buffer Points</h3>
-                    <label class="compare-toggle-row">
-                        <div class="toggle-switch">
-                            <input type="checkbox" id="buffer-enabled-toggle">
-                            <span class="toggle-slider"></span>
-                        </div>
-                        <div class="compare-toggle-text">
-                            <span class="option-title">🔀 Widen Entry Band & Extend SL</span>
-                            <span class="option-desc">Expands both ends of the entry range and extends stop loss by the buffer amount. E.g. 230-240 becomes 228-242 with SL 220 → 218.</span>
-                        </div>
-                    </label>
-                    <div style="margin-top:8px;">
-                        <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
-                            <span style="min-width:100px;">Buffer points:</span>
-                            <input type="number" id="buffer-points-input" class="strategy-number-input" min="0.5" max="99" step="0.5" style="width:80px;" placeholder="2" value="2">
-                            <span style="font-size:11px; color:var(--text-muted);">pts added/subtracted from band edges & SL</span>
-                        </label>
-                    </div>
-                </div>
-
-                <!-- Stop-Loss Mode Section -->
-                <div class="settings-section">
-                    <h3>🛡️ Stop-Loss Mode</h3>
-
-                    <!-- Mode radio toggle -->
-                    <div style="display:flex; gap:12px; margin-bottom:14px;">
-                        <label style="font-size:13px; display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:500;">
-                            <input type="radio" name="sl-mode" value="signal_trail" id="sl-mode-trail" checked>
-                            <span>📈 Trailing SL</span>
-                        </label>
-                        <label style="font-size:13px; display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:500;">
-                            <input type="radio" name="sl-mode" value="snap_levels" id="sl-mode-snap">
-                            <span>🔒 Snap Levels</span>
-                        </label>
-                    </div>
-
-                    <!-- ── Trailing SL panel (existing) ── -->
-                    <div id="sl-trail-panel">
-                        <p style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">
-                            SL holds at initial level until activation points are gained, then trails behind LTP by the gap amount.
+                <!-- Tab: Entry Logic -->
+                <div class="strategy-tab-content" id="tab-entry">
+                    <!-- Bounce Points Section -->
+                    <div class="settings-section">
+                        <h3>📈 Bounce-Back Entry</h3>
+                        <p class="section-description">
+                            Waits for price to dip within the entry range, then enters when it bounces back by the specified points.
                         </p>
-                        <div class="strategy-suboption" id="sl-signal-trail-row" style="display:block;">
+                        <div class="inputs-grid-2">
+                            <div class="form-group">
+                                <label for="bounce-points-input">Bounce-back</label>
+                                <div class="input-group">
+                                    <input type="number" id="bounce-points-input" class="strategy-number-input" min="1" max="999" placeholder="5">
+                                    <span class="input-addon">pts</span>
+                                </div>
+                                <span class="form-hint">Required rise from lowest dip</span>
+                            </div>
+                            <div class="form-group">
+                                <label for="entry-slippage-input">Entry slippage</label>
+                                <div class="input-group">
+                                    <input type="number" id="entry-slippage-input" class="strategy-number-input" min="0" max="50" step="0.05" placeholder="1.0" value="1.0">
+                                    <span class="input-addon">pts</span>
+                                </div>
+                                <span class="form-hint">Added to bounce trigger for BUY limit</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Buffer Points Section -->
+                    <div class="settings-section">
+                        <h3>🛡️ Entry Buffer</h3>
+                        <label class="compare-toggle-row">
+                            <div class="toggle-switch">
+                                <input type="checkbox" id="buffer-enabled-toggle">
+                                <span class="toggle-slider"></span>
+                            </div>
+                            <div class="compare-toggle-text">
+                                <span class="option-title">Widen Entry Band & Extend SL</span>
+                                <span class="option-desc">Expands both ends of the entry range and extends stop loss by the buffer amount. E.g. 230-240 becomes 228-242 with SL 220 → 218.</span>
+                            </div>
+                        </label>
+                        <div class="form-group" style="margin-top:16px;">
+                            <label for="buffer-points-input">Buffer points</label>
+                            <div class="input-group" style="width: 150px;">
+                                <input type="number" id="buffer-points-input" class="strategy-number-input" min="0.5" max="99" step="0.5" placeholder="2" value="2">
+                                <span class="input-addon">pts</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab: Stop Loss Settings -->
+                <div class="strategy-tab-content" id="tab-stoploss">
+                    <!-- Stop-Loss Mode Section -->
+                    <div class="settings-section">
+                        <h3>🛡️ Stop-Loss Mode</h3>
+
+                        <!-- Mode card-style radio toggle -->
+                        <div class="sl-mode-cards">
+                            <label class="sl-mode-card" for="sl-mode-trail">
+                                <input type="radio" name="sl-mode" value="signal_trail" id="sl-mode-trail" checked class="hidden-radio">
+                                <div class="sl-card-content">
+                                    <span class="sl-card-icon">📈</span>
+                                    <div class="sl-card-text">
+                                        <span class="sl-card-title">Trailing SL</span>
+                                        <span class="sl-card-desc">Trails behind Maximum LTP</span>
+                                    </div>
+                                </div>
+                            </label>
+                            <label class="sl-mode-card" for="sl-mode-snap">
+                                <input type="radio" name="sl-mode" value="snap_levels" id="sl-mode-snap" class="hidden-radio">
+                                <div class="sl-card-content">
+                                    <span class="sl-card-icon">🔒</span>
+                                    <div class="sl-card-text">
+                                        <span class="sl-card-title">Snap Levels</span>
+                                        <span class="sl-card-desc">Snaps SL to fixed levels</span>
+                                    </div>
+                                </div>
+                            </label>
+                        </div>
+
+                        <!-- ── Trailing SL panel ── -->
+                        <div id="sl-trail-panel" class="sl-mode-panel">
+                            <p class="section-description">
+                                SL holds at initial level until activation points are gained, then trails behind LTP by the gap amount.
+                            </p>
+                            
                             <!-- Initial SL source -->
-                            <div style="margin-bottom:10px;">
-                                <div style="font-size:12px; color:var(--text-muted); margin-bottom:6px; font-weight:500;">Initial Stop-Loss source:</div>
-                                <div style="display:flex; flex-direction:column; gap:6px;">
-                                    <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <div class="form-group" style="margin-bottom:16px;">
+                                <span class="group-label">Initial Stop-Loss Source</span>
+                                <div class="sl-source-cards">
+                                    <label class="sl-source-card" for="sl-init-telegram">
                                         <input type="radio" name="signal-trail-initial-sl" value="telegram" id="sl-init-telegram">
-                                        <span>📩 From Telegram signal</span>
+                                        <div class="source-card-content">
+                                            <span>📩 Telegram Signal</span>
+                                        </div>
                                     </label>
-                                    <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; cursor:pointer;">
+                                    <label class="sl-source-card" for="sl-init-points">
                                         <input type="radio" name="signal-trail-initial-sl" value="points_from_ltp" id="sl-init-points">
-                                        <span>📏 Points below entry price (LTP at fill)</span>
+                                        <div class="source-card-content">
+                                            <span>📏 Fixed Points from entry</span>
+                                        </div>
                                     </label>
-                                    <div id="sl-init-points-row" style="display:none; padding-left:20px;">
-                                        <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
-                                            Points below entry:
-                                            <input type="number" id="sl-init-points-value" class="strategy-number-input" placeholder="e.g. 10" min="1" max="999" style="width:80px;">
-                                        </label>
-                                        <p class="suboption-hint" style="margin-top:4px;">Initial SL = entry price − N points</p>
+                                </div>
+                                
+                                <div id="sl-init-points-row" class="sub-panel" style="display:none; margin-top:8px;">
+                                    <div class="form-group">
+                                        <label for="sl-init-points-value">Points below entry</label>
+                                        <div class="input-group" style="width: 150px;">
+                                            <input type="number" id="sl-init-points-value" class="strategy-number-input" placeholder="e.g. 10" min="1" max="999">
+                                            <span class="input-addon">pts</span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
+
                             <!-- Activation + Trail gap -->
-                            <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-                                Activation pts:
-                                <input type="number" id="sl-activation-points" class="strategy-number-input" placeholder="e.g. 5" min="1" max="999" style="width:80px;">
-                            </label>
-                            <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-                                SL offset on activation:
-                                <input type="number" id="sl-activation-sl-offset" class="strategy-number-input" placeholder="0" min="0" max="999" step="0.5" style="width:80px;">
-                                <span style="font-size:11px; color:var(--text-muted);">pts below breakeven SL (0 = exact breakeven)</span>
-                            </label>
-                            <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
-                                Trail gap pts:
-                                <input type="number" id="sl-trail-gap" class="strategy-number-input" placeholder="e.g. 2" min="1" max="999" style="width:80px;">
-                            </label>
-                        </div>
-                    </div>
-
-                    <!-- ── Snap Levels panel (new) ── -->
-                    <div id="sl-snap-panel" style="display:none;">
-                        <p style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">
-                            Activation (entry + act. pts) sets initial SL. Each level snaps SL to <code>trigger − offset</code> when LTP hits the trigger.
-                        </p>
-
-                        <!-- Shared activation (reuses same inputs as trailing, always visible) -->
-                        <div style="margin-bottom:10px; padding:8px; background:var(--bg); border-radius:6px; border:1px solid var(--border);">
-                            <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px; font-weight:500;">⚡ Activation (shared with Trailing SL)</div>
-                            <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-                                Activation pts:
-                                <input type="number" id="sl-snap-activation-pts" class="strategy-number-input" placeholder="e.g. 10" min="0" max="999" style="width:80px;">
-                                <span style="font-size:11px; color:var(--text-muted);">points above entry to arm</span>
-                            </label>
-                            <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
-                                Activation offset:
-                                <input type="number" id="sl-snap-activation-offset" class="strategy-number-input" placeholder="e.g. 2" min="0" max="999" step="0.5" style="width:80px;">
-                                <span style="font-size:11px; color:var(--text-muted);">SL = activation trigger − offset</span>
-                            </label>
-                        </div>
-
-                        <!-- Initial SL source (same as trail panel — used by _fill_order for both modes) -->
-                        <div style="margin-bottom:10px; padding:8px; background:var(--bg); border-radius:6px; border:1px solid var(--border);">
-                            <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px; font-weight:500;">📍 Initial Stop-Loss source (before activation)</div>
-                            <div style="display:flex; flex-direction:column; gap:6px;">
-                                <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; cursor:pointer;">
-                                    <input type="radio" name="signal-trail-initial-sl" value="telegram" id="sl-snap-init-telegram">
-                                    <span>📩 From Telegram signal</span>
-                                </label>
-                                <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; cursor:pointer;">
-                                    <input type="radio" name="signal-trail-initial-sl" value="points_from_ltp" id="sl-snap-init-points">
-                                    <span>📏 Points below entry price (LTP at fill)</span>
-                                </label>
-                                <div id="sl-snap-init-points-row" style="display:none; padding-left:20px;">
-                                    <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
-                                        Points below entry:
-                                        <input type="number" id="sl-init-points-value-snap" class="strategy-number-input" placeholder="e.g. 10" min="1" max="999" style="width:80px;">
-                                    </label>
-                                    <p class="suboption-hint" style="margin-top:4px;">Initial SL = entry price − N points (until activation)</p>
+                            <div class="inputs-grid-2">
+                                <div class="form-group">
+                                    <label for="sl-activation-points">Activation points</label>
+                                    <div class="input-group">
+                                        <input type="number" id="sl-activation-points" class="strategy-number-input" placeholder="e.g. 5" min="1" max="999">
+                                        <span class="input-addon">pts</span>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="sl-activation-sl-offset">SL offset on activation</label>
+                                    <div class="input-group">
+                                        <input type="number" id="sl-activation-sl-offset" class="strategy-number-input" placeholder="0" min="0" max="999" step="0.5">
+                                        <span class="input-addon">pts</span>
+                                    </div>
+                                    <span class="form-hint">pts below breakeven (0 = exact breakeven)</span>
+                                </div>
+                            </div>
+                            <div class="form-group" style="margin-top:12px;">
+                                <label for="sl-trail-gap">Trail gap points</label>
+                                <div class="input-group" style="width: 150px;">
+                                    <input type="number" id="sl-trail-gap" class="strategy-number-input" placeholder="e.g. 2" min="1" max="999">
+                                    <span class="input-addon">pts</span>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Snap level table -->
-                        <table style="width:100%; border-collapse:collapse; font-size:12px; color:var(--text-muted); margin-bottom:10px;">
-                            <thead>
-                                <tr style="border-bottom:1px solid var(--border);">
-                                    <th style="text-align:left; padding:4px 6px; font-weight:600; color:var(--text);">Level</th>
-                                    <th style="text-align:left; padding:4px 6px; font-weight:600; color:var(--text);">Snap pts<br><span style="font-weight:400; font-size:10px; color:var(--text-muted);">above prev trigger</span></th>
-                                    <th style="text-align:left; padding:4px 6px; font-weight:600; color:var(--text);">SL offset<br><span style="font-weight:400; font-size:10px; color:var(--text-muted);">trigger − offset = SL</span></th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr style="border-bottom:1px solid var(--border);">
-                                    <td style="padding:6px 6px; color:var(--accent);">L1</td>
-                                    <td style="padding:4px 6px;"><input type="number" id="snap-l1-pts" class="strategy-number-input" min="0" max="999" style="width:70px;" placeholder="10"></td>
-                                    <td style="padding:4px 6px;"><input type="number" id="snap-l1-offset" class="strategy-number-input" min="0" max="999" step="0.5" style="width:70px;" placeholder="2"></td>
-                                </tr>
-                                <tr style="border-bottom:1px solid var(--border);">
-                                    <td style="padding:6px 6px; color:var(--accent);">L2</td>
-                                    <td style="padding:4px 6px;"><input type="number" id="snap-l2-pts" class="strategy-number-input" min="0" max="999" style="width:70px;" placeholder="10"></td>
-                                    <td style="padding:4px 6px;"><input type="number" id="snap-l2-offset" class="strategy-number-input" min="0" max="999" step="0.5" style="width:70px;" placeholder="2"></td>
-                                </tr>
-                                <tr>
-                                    <td style="padding:6px 6px; color:var(--accent);">L3</td>
-                                    <td style="padding:4px 6px;"><input type="number" id="snap-l3-pts" class="strategy-number-input" min="0" max="999" style="width:70px;" placeholder="10"></td>
-                                    <td style="padding:4px 6px;"><input type="number" id="snap-l3-offset" class="strategy-number-input" min="0" max="999" step="0.5" style="width:70px;" placeholder="2"></td>
-                                </tr>
-                            </tbody>
-                        </table>
+                        <!-- ── Snap Levels panel ── -->
+                        <div id="sl-snap-panel" class="sl-mode-panel" style="display:none;">
+                            <p class="section-description">
+                                Activation (entry + act. pts) sets initial SL. Each level snaps SL to <code>trigger − offset</code> when LTP hits the trigger.
+                            </p>
 
-                        <!-- Trailing SL after L3 (mandatory) -->
-                        <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:8px; margin-top:4px;">
-                            📈 Trail gap after L3:
-                            <input type="number" id="snap-trail-gap" class="strategy-number-input" min="0.5" max="999" step="0.5" style="width:70px;" placeholder="3">
-                            <span style="font-size:11px; color:var(--text-muted);">pts behind max LTP</span>
-                        </label>
+                            <!-- Shared activation -->
+                            <div class="sub-panel-card">
+                                <div class="panel-card-header">⚡ Activation (shared with Trailing SL)</div>
+                                <div class="inputs-grid-2">
+                                    <div class="form-group">
+                                        <label for="sl-snap-activation-pts">Activation points</label>
+                                        <div class="input-group">
+                                            <input type="number" id="sl-snap-activation-pts" class="strategy-number-input" placeholder="e.g. 10" min="0" max="999">
+                                            <span class="input-addon">pts</span>
+                                        </div>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="sl-snap-activation-offset">Activation offset</label>
+                                        <div class="input-group">
+                                            <input type="number" id="sl-snap-activation-offset" class="strategy-number-input" placeholder="e.g. 2" min="0" max="999" step="0.5">
+                                            <span class="input-addon">pts</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Initial SL source -->
+                            <div class="sub-panel-card" style="margin-top:12px;">
+                                <div class="panel-card-header">📍 Initial Stop-Loss Source (before activation)</div>
+                                <div class="sl-source-cards">
+                                    <label class="sl-source-card" for="sl-snap-init-telegram">
+                                        <input type="radio" name="signal-trail-initial-sl" value="telegram" id="sl-snap-init-telegram">
+                                        <div class="source-card-content">
+                                            <span>📩 Telegram Signal</span>
+                                        </div>
+                                    </label>
+                                    <label class="sl-source-card" for="sl-snap-init-points">
+                                        <input type="radio" name="signal-trail-initial-sl" value="points_from_ltp" id="sl-snap-init-points">
+                                        <div class="source-card-content">
+                                            <span>📏 Fixed Points from entry</span>
+                                        </div>
+                                    </label>
+                                </div>
+                                <div id="sl-snap-init-points-row" class="sub-panel" style="display:none; margin-top:8px;">
+                                    <div class="form-group">
+                                        <label for="sl-init-points-value-snap">Points below entry</label>
+                                        <div class="input-group" style="width: 150px;">
+                                            <input type="number" id="sl-init-points-value-snap" class="strategy-number-input" placeholder="e.g. 10" min="1" max="999">
+                                            <span class="input-addon">pts</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Snap level table -->
+                            <div style="margin-top:16px;">
+                                <span class="group-label">Snap Levels Matrix</span>
+                                <table class="strategy-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Level</th>
+                                            <th>Snap pts <span class="table-th-desc">(above prev trigger)</span></th>
+                                            <th>SL offset <span class="table-th-desc">(trigger − offset = SL)</span></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td class="lvl-name">L1</td>
+                                            <td>
+                                                <div class="input-group">
+                                                    <input type="number" id="snap-l1-pts" class="strategy-number-input" min="0" max="999" placeholder="10">
+                                                    <span class="input-addon">pts</span>
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <div class="input-group">
+                                                    <input type="number" id="snap-l1-offset" class="strategy-number-input" min="0" max="999" step="0.5" placeholder="2">
+                                                    <span class="input-addon">pts</span>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        <tr>
+                                            <td class="lvl-name">L2</td>
+                                            <td>
+                                                <div class="input-group">
+                                                    <input type="number" id="snap-l2-pts" class="strategy-number-input" min="0" max="999" placeholder="10">
+                                                    <span class="input-addon">pts</span>
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <div class="input-group">
+                                                    <input type="number" id="snap-l2-offset" class="strategy-number-input" min="0" max="999" step="0.5" placeholder="2">
+                                                    <span class="input-addon">pts</span>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        <tr>
+                                            <td class="lvl-name">L3</td>
+                                            <td>
+                                                <div class="input-group">
+                                                    <input type="number" id="snap-l3-pts" class="strategy-number-input" min="0" max="999" placeholder="10">
+                                                    <span class="input-addon">pts</span>
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <div class="input-group">
+                                                    <input type="number" id="snap-l3-offset" class="strategy-number-input" min="0" max="999" step="0.5" placeholder="2">
+                                                    <span class="input-addon">pts</span>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <!-- Trailing SL after L3 -->
+                            <div class="form-group" style="margin-top:14px;">
+                                <label for="snap-trail-gap">📈 Trail gap after L3</label>
+                                <div class="input-group" style="width: 150px;">
+                                    <input type="number" id="snap-trail-gap" class="strategy-number-input" min="0.5" max="999" step="0.5" placeholder="3">
+                                    <span class="input-addon">pts</span>
+                                </div>
+                                <span class="form-hint">pts behind max LTP once L3 is hit</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -488,7 +599,7 @@
                     <button class="btn btn-secondary" id="btn-strategy-reset">Reset Defaults</button>
                     <button class="btn btn-primary" id="btn-strategy-save">Save Strategy</button>
                 </div>
-                <p style="font-size:11px; color: var(--text-muted); margin-top: 8px; text-align: center;">
+                <p style="font-size:11px; color: var(--text-muted); margin-top: 12px; text-align: center; line-height: 1.4;">
                     ⚡ Applies to new trades &amp; unfilled pending orders. Open positions keep their original mode.
                 </p>
             </div>
