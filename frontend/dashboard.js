@@ -733,8 +733,30 @@ async function cancelPendingOrder(tradeId, signalId) {
                     renderSignals();
                 }
             }
+        } else if (data.status === 'already_done') {
+            // Order already filled/expired/cancelled — update UI to actual status
+            // so the timer stops and cancel button disappears
+            toast(`${data.trading_symbol || 'Order'}: ${data.message}`, 'warning');
+            if (signalId) {
+                const sigIdx = state.signals.findIndex(s => s.id === signalId);
+                if (sigIdx !== -1) {
+                    state.signals[sigIdx].trade_status = data.actual_status || 'cancelled';
+                    state.signals[sigIdx].status_note = data.message || `Already ${data.actual_status}`;
+                    renderSignals();
+                }
+            }
         } else {
             toast(data.message || 'Cancel failed', 'error');
+            // Even on error, update UI to unstick the card — the order is
+            // clearly not pending anymore if the backend can't find it
+            if (signalId) {
+                const sigIdx = state.signals.findIndex(s => s.id === signalId);
+                if (sigIdx !== -1) {
+                    state.signals[sigIdx].trade_status = 'cancelled';
+                    state.signals[sigIdx].status_note = data.message || 'Cancel failed';
+                    renderSignals();
+                }
+            }
         }
     } catch { toast('Cancel request failed', 'error'); }
 }

@@ -1908,7 +1908,8 @@ class RealTrader:
                     break
 
             if target is None:
-                return {"status": "error", "message": "Pending order not found — may already be filled or expired"}
+                # Order not in memory — check DB for actual status so frontend can update
+                return await self._cancel_stale_pending(trade_id)
 
             self._pending_orders.remove(target)
 
@@ -1928,6 +1929,63 @@ class RealTrader:
 
         log.info("Pending order cancelled (real): trade_id=%d symbol=%s", trade_id, target.get("trading_symbol"))
         return {"status": "ok", "trade_id": trade_id, "trading_symbol": target.get("trading_symbol")}
+
+    async def _cancel_stale_pending(self, trade_id: int) -> dict:
+        """Handle cancel when order is not in memory.
+
+        Queries DB for actual status so the frontend can update the UI
+        (stop timer, remove cancel button) instead of staying stuck on 'pending'.
+        If DB still says 'pending' (stale record), mark it cancelled.
+        """
+        try:
+            adb = await db._get_db()
+            cursor = await adb.execute(
+                "SELECT id, signal_id, status, trading_symbol FROM trades WHERE id = ?",
+                (trade_id,),
+            )
+            row = await cursor.fetchone()
+        except Exception:
+            log.exception("_cancel_stale_pending: DB lookup failed for trade %d", trade_id)
+            return {"status": "error", "message": "Pending order not found — may already be filled or expired"}
+
+        if row is None:
+            return {"status": "error", "message": "Trade not found in database"}
+
+        actual_status = row["status"]
+        signal_id = row["signal_id"]
+        symbol = row["trading_symbol"]
+
+        if actual_status == "pending":
+            # Stale DB record — order left memory but DB wasn't updated. Cancel it.
+            try:
+                await db.update_trade(trade_id, {"status": "cancelled"})
+            except Exception:
+                log.exception("_cancel_stale_pending: DB update failed for trade %d", trade_id)
+
+            await self._broadcast("order_update", {
+                "id":          trade_id,
+                "signal_id":   signal_id,
+                "status":      "cancelled",
+                "status_note": "Cancelled by user (stale)",
+            })
+            log.info("Stale pending order cancelled: trade_id=%d symbol=%s", trade_id, symbol)
+            return {"status": "ok", "trade_id": trade_id, "trading_symbol": symbol}
+
+        # Order already reached a terminal state — tell frontend the actual status
+        await self._broadcast("order_update", {
+            "id":          trade_id,
+            "signal_id":   signal_id,
+            "status":      actual_status,
+            "status_note": f"Already {actual_status}",
+        })
+        log.info("Cancel requested for already-%s order: trade_id=%d symbol=%s", actual_status, trade_id, symbol)
+        return {
+            "status":       "already_done",
+            "actual_status": actual_status,
+            "trade_id":      trade_id,
+            "trading_symbol": symbol,
+            "message":       f"Order already {actual_status}",
+        }
 
     # ── Kill Switch ───────────────────────────────────────────────────────────
 
