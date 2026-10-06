@@ -155,12 +155,15 @@ class MarketFeed:
                     # Flush pending subscriptions
                     tokens_to_sub = []
                     for s in self._pending_subs:
-                        tokens_to_sub.append(WsToken(s["exchange_segment"], str(s["instrument_token"])))
+                        tokens_to_sub.append(WsToken(s["exchange_segment"], str(s["instrument_token"]).strip()))
                     self._pending_subs.clear()
                     
                     # Plus known active subs
                     for tk, info in self._subscriptions.items():
-                        tokens_to_sub.append(WsToken(info.get("exchange_segment", "bse_fo"), str(tk)))
+                        tokens_to_sub.append(WsToken(info.get("exchange_segment", "bse_fo"), str(tk).strip()))
+                        
+                    # Deduplicate tokens
+                    tokens_to_sub = list(set(tokens_to_sub))
                         
                     if tokens_to_sub:
                         await ws.subscribe_scrips(tokens_to_sub)
@@ -169,17 +172,21 @@ class MarketFeed:
                     async for message in ws:
                         if not self._running:
                             break
-                        if isinstance(message, SFeedScrip):
+                        
+                        # Duck typing to handle both SFeedScrip and SFeedIndex, or unexpected types
+                        if hasattr(message, "instrument_token") and hasattr(message, "last_traded_price"):
                             tick = {
-                                "tk": message.instrument_token,
-                                "ltp": float(message.last_traded_price or 0),
-                                "v": int(message.volume_traded_today or 0),
-                                "o": float(message.open_price or 0),
-                                "h": float(message.high_price or 0),
-                                "l": float(message.low_price or 0),
-                                "c": float(message.close_price or 0),
+                                "tk": str(getattr(message, "instrument_token", "")),
+                                "ltp": float(getattr(message, "last_traded_price", 0) or 0),
+                                "v": int(getattr(message, "volume_traded_today", 0) or 0),
+                                "o": float(getattr(message, "open_price", 0) or 0),
+                                "h": float(getattr(message, "high_price", 0) or 0),
+                                "l": float(getattr(message, "low_price", 0) or 0),
+                                "c": float(getattr(message, "close_price", 0) or 0),
                             }
                             self._process_tick(tick)
+                        else:
+                            log.debug(f"SFeed unhandled message type: {type(message)} -> {message}")
                             
             except asyncio.CancelledError:
                 break
