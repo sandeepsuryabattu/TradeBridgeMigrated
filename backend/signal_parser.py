@@ -77,10 +77,10 @@ def parse_signal(text: str) -> ParsedSignal:
     if "price" not in lower:
         return ParsedSignal(status="ignored", reason='Does not contain "price"')
 
-    # ── Rule 3: Strike price — exactly 5 digits + CE/PE ──
-    option_match = re.search(r"(\d{5})\s*(CE|PE)", stripped, re.IGNORECASE)
+    # ── Rule 3: Strike price — 4-6 digits + CE/PE (SENSEX crossed 100k) ──
+    option_match = re.search(r"(\d{4,6})\s*(CE|PE)\b", stripped, re.IGNORECASE)
     if not option_match:
-        return ParsedSignal(status="ignored", reason="Strike (5 digits) + CE/PE not found")
+        return ParsedSignal(status="ignored", reason="Strike (4-6 digits) + CE/PE not found")
 
     strike = option_match.group(1)
     option_type = option_match.group(2).upper()
@@ -108,21 +108,37 @@ def parse_signal(text: str) -> ParsedSignal:
 
     # ── Rule 5.5: Stoploss — handles both inline and next-line formats ──
     #   "STOPLOSS 250"  OR  "STOPLOSS\n250"
-    sl_match = re.search(r"(?:stoploss|sl|stls)[^\d]*(\d{1,5})", stripped, re.IGNORECASE)
+    #   Word boundaries prevent false positives from "scalpers"/"also"/"stls-talking".
+    #   The negative lookbehind rejects matches inside longer words.
+    sl_match = re.search(
+        r"(?<![A-Za-z])(?:stop\s*loss|stoploss|stls|\bsl\b)[^\d]{0,20}(\d{1,5}(?:\.\d+)?)",
+        stripped, re.IGNORECASE,
+    )
     stoploss = float(sl_match.group(1)) if sl_match else None
+    # Sanity: SL must sit below the entry band for a long entry; if the
+    # parsed SL is at/above entry_high it is almost certainly a mis-parse
+    # (e.g. grabbed a target) — drop it rather than trading on it.
+    if stoploss is not None and stoploss >= high:
+        stoploss = None
 
     # ── Rule 5.6: Targets — slash-separated after TARGETS keyword ──
     #   "🎯 TARGETS\n300/500/650"  OR  "🎯 TARGETS 300/500/650"
-    targets = []
-    tgt_match = re.search(r"targets?\s*\n?\s*([\d/]+)", stripped, re.IGNORECASE)
+    #   Only accept the line immediately after TARGETS so dates/expiry text
+    #   ("23rd APRIL EXPIRY") can never be mistaken for targets.
+    targets: list[float] = []
+    tgt_match = re.search(r"targets?\s*[:\-]?\s*\n?\s*([\d][\d\s/,\.]*)", stripped, re.IGNORECASE)
     if tgt_match:
-        targets = [float(t) for t in tgt_match.group(1).split("/") if t.strip().isdigit()]
-
-    # Fallback: comma-separated targets
-    if not targets:
-        tgt_match2 = re.search(r"targets?\s*[:\-]?\s*([\d,\s]+)", stripped, re.IGNORECASE)
-        if tgt_match2:
-            targets = [float(t) for t in re.findall(r"\d+", tgt_match2.group(1))]
+        raw = tgt_match.group(1).split("\n")[0]  # first line only — never bleed into expiry
+        for tok in re.split(r"[/,]", raw):
+            tok = tok.strip().split()[0] if tok.strip() else ""
+            if tok.replace(".", "", 1).isdigit():
+                try:
+                    targets.append(float(tok))
+                except ValueError:
+                    pass
+    # Keep only targets above the entry band; drop expiry-day numbers etc.
+    targets = [t for t in targets if t > high]
+    targets = targets[:5]  # cap — ignore pathological long lists
 
     # ── Rule 5.7: Expiry date — "23rd APRIL EXPIRY" ──
     expiry_match = re.search(

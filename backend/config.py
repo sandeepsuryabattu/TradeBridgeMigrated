@@ -34,6 +34,22 @@ class Config:
     API_PORT = int(os.getenv("API_PORT", "8000"))
     FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
+    # API auth — when set, all mutating POST/DELETE endpoints require
+    # header X-API-Token: <token> (or ?token= query param for WS-adjacent tools).
+    # Empty = auth disabled (dev/test), but a warning is logged.
+    API_TOKEN = os.getenv("API_TOKEN", "")
+
+    # Comma-separated extra origins, e.g. "https://trader.example.com,http://192.168.1.10:8001"
+    ALLOWED_ORIGINS = [
+        o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()
+    ]
+
+    @classmethod
+    def allowed_origins(cls) -> list[str]:
+        origins = {cls.FRONTEND_ORIGIN, "http://localhost:3000", "http://127.0.0.1:8001"}
+        origins.update(cls.ALLOWED_ORIGINS)
+        return sorted(o for o in origins if o)
+
     @classmethod
     def kotak_env(cls) -> dict:
         """Return all Kotak-related env values (for logging / diagnostics)."""

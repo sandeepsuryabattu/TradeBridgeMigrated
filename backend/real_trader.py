@@ -43,7 +43,8 @@ from . import database as db
 log = logging.getLogger(__name__)
 
 # Pre-compiled regex for symbol matching — avoids recompile on every tick
-_SYMBOL_RE = re.compile(r'^([A-Z]+?)(\d{5}(?:CE|PE))$')
+# Supports 4-6 digit strikes (SENSEX moved beyond 5-digit-only range)
+_SYMBOL_RE = re.compile(r'^([A-Z]+?)(\d{4,6}(?:CE|PE))$')
 
 # ── Constants ────────────────────────────────────────────────────────────────
 ENTRY_TIMEOUT_MINS       = 10
@@ -168,6 +169,46 @@ class RealTrader:
         Prevents real_trader.on_tick from placing exchange orders while in paper mode.
         """
         self._active_mode = fn
+
+    async def check_feed_health(self, stale_threshold_s: float = 90.0) -> dict:
+        """Software-SL gap guard: alert when ticks stop with open real positions.
+
+        Software SL only fires on ticks — a dead feed leaves positions
+        unprotected. This surfaces a critical `order_alert` via WS so the
+        dashboard shows it, and logs loudly. It does NOT auto-square-off
+        (that could surprise); set env STALE_FEED_SQUARE_OFF=1 to opt into
+        best-effort emergency exits.
+        """
+        import os as _os
+        open_pos = [p for p in self._open_positions if p.get("status") == "open"]
+        if not open_pos:
+            return {"status": "ok", "open": 0}
+        feed = self.market_feed
+        if feed is None:
+            return {"status": "ok", "open": len(open_pos)}
+        stale_s = feed.seconds_since_last_tick if hasattr(feed, "seconds_since_last_tick") else float("inf")
+        if stale_s < stale_threshold_s:
+            return {"status": "ok", "open": len(open_pos), "stale_s": round(stale_s, 1)}
+        log.error(
+            "STALE-FEED: no ticks for %.0fs with %d REAL positions open — "
+            "software SL is NOT protecting them. Check market feed!",
+            stale_s, len(open_pos),
+        )
+        await self._broadcast("order_alert", {
+            "level": "error",
+            "message": (
+                f"⚠️ STALE FEED: no ticks for {stale_s:.0f}s with "
+                f"{len(open_pos)} real position(s) open — SL unprotected"
+            ),
+        })
+        if _os.getenv("STALE_FEED_SQUARE_OFF", "0") == "1":
+            log.warning("STALE-FEED: STALE_FEED_SQUARE_OFF=1 — emergency square-off")
+            try:
+                result = await self.square_off_all(exit_reason="stale_feed")
+                return {"status": "squared_off", "open": len(open_pos), "stale_s": stale_s, "result": result}
+            except Exception:
+                log.exception("STALE-FEED: emergency square-off failed")
+        return {"status": "stale", "open": len(open_pos), "stale_s": round(stale_s, 1)}
 
     # ── Wiring ────────────────────────────────────────────────────────────────
 
@@ -2094,23 +2135,23 @@ class RealTrader:
                 "min_ltp":           t.get("min_ltp"),
                 "sl_mode":           t.get("sl_mode", "signal_trail"),
                 "signal_stoploss":   t.get("signal_stoploss"),
-                "activation_points":    float(t.get("activation_points") or DEFAULT_ACTIVATION_PTS),
-                "activation_sl_offset": float(t.get("activation_sl_offset") or DEFAULT_ACTIVATION_SL_OFFSET),
-                "trail_gap":            float(t.get("trail_gap")          or DEFAULT_TRAIL_GAP),
-                "bounce_points":     float(t.get("bounce_points")      or DEFAULT_BOUNCE_POINTS),
+                "activation_points":    float(t.get("activation_points") if t.get("activation_points") is not None else DEFAULT_ACTIVATION_PTS),
+                "activation_sl_offset": float(t.get("activation_sl_offset") if t.get("activation_sl_offset") is not None else DEFAULT_ACTIVATION_SL_OFFSET),
+                "trail_gap":            float(t.get("trail_gap") if t.get("trail_gap") is not None else DEFAULT_TRAIL_GAP),
+                "bounce_points":     float(t.get("bounce_points") if t.get("bounce_points") is not None else DEFAULT_BOUNCE_POINTS),
                 "snap_levels":          _parse_snap_levels(t.get("snap_levels")),
                 "snap_trail_after_l3":  bool(t.get("snap_trail_after_l3", False)),
-                "snap_trail_gap":       float(t.get("snap_trail_gap") or 3.0),
+                "snap_trail_gap":       float(t.get("snap_trail_gap") if t.get("snap_trail_gap") is not None else 3.0),
                 "snap_level_hit":       int(t.get("snap_level_hit") or 0),
                 "snap_trailing_active": bool(t.get("snap_trailing_active", 0)),
                 "entry_logic":       t.get("entry_logic", "code"),
                 "entry_label":       t.get("entry_label"),
-                "entry_timer_mins":  int(t.get("entry_timer_mins") or ENTRY_TIMEOUT_MINS),
-                "exit_timer_mins":   int(t.get("exit_timer_mins")  or POSITION_TIMEOUT_MINS),
+                "entry_timer_mins":  int(t.get("entry_timer_mins") if t.get("entry_timer_mins") is not None else ENTRY_TIMEOUT_MINS),
+                "exit_timer_mins":   int(t.get("exit_timer_mins") if t.get("exit_timer_mins") is not None else POSITION_TIMEOUT_MINS),
                 "entry_slippage":    float(t.get("entry_slippage") if t.get("entry_slippage") is not None else DEFAULT_ENTRY_SLIPPAGE),
                 "exit_slippage":     float(t.get("exit_slippage")  if t.get("exit_slippage")  is not None else DEFAULT_EXIT_SLIPPAGE),
                 "signal_trail_initial_sl":        t.get("signal_trail_initial_sl", "telegram"),
-                "signal_trail_initial_sl_points": float(t.get("signal_trail_initial_sl_points") or 5.0),
+                "signal_trail_initial_sl_points": float(t.get("signal_trail_initial_sl_points") if t.get("signal_trail_initial_sl_points") is not None else 5.0),
             }
 
             notes_str   = t.get("notes", "")
@@ -2119,7 +2160,7 @@ class RealTrader:
                 order["entry_low"]  = float(range_match.group(1))
                 order["entry_high"] = float(range_match.group(2))
 
-            sym_match = re.match(r'^[A-Z]+?(\d{5})(CE|PE)$', t.get("trading_symbol", "").upper())
+            sym_match = re.match(r'^[A-Z]+?(\d{4,6})(CE|PE)$', t.get("trading_symbol", "").upper())
             if sym_match:
                 order["strike"]      = sym_match.group(1)
                 order["option_type"] = sym_match.group(2)
@@ -2148,13 +2189,18 @@ class RealTrader:
                 "opened_at":     p.get("opened_at", ""),
                 "sl_mode":           p.get("sl_mode", "signal_trail"),
                 "signal_stoploss":   p.get("signal_stoploss"),
-                "activation_points":    p.get("activation_points") or DEFAULT_ACTIVATION_PTS,
-                "activation_sl_offset": p.get("activation_sl_offset") or DEFAULT_ACTIVATION_SL_OFFSET,
-                "trail_gap":            p.get("trail_gap")          or DEFAULT_TRAIL_GAP,
+                "activation_points":    p.get("activation_points") if p.get("activation_points") is not None else DEFAULT_ACTIVATION_PTS,
+                "activation_sl_offset": p.get("activation_sl_offset") if p.get("activation_sl_offset") is not None else DEFAULT_ACTIVATION_SL_OFFSET,
+                "trail_gap":            p.get("trail_gap") if p.get("trail_gap") is not None else DEFAULT_TRAIL_GAP,
                 "sl_activated":      bool(p.get("sl_activated", 0)),
                 "exit_reason":       p.get("exit_reason"),
-                "exit_timer_mins":   int(p.get("exit_timer_mins") or POSITION_TIMEOUT_MINS),
+                "exit_timer_mins":   int(p.get("exit_timer_mins") if p.get("exit_timer_mins") is not None else POSITION_TIMEOUT_MINS),
                 "exit_slippage":     float(p.get("exit_slippage") if p.get("exit_slippage") is not None else DEFAULT_EXIT_SLIPPAGE),
+                "snap_levels":          _parse_snap_levels(p.get("snap_levels")),
+                "snap_level_hit":       int(p.get("snap_level_hit") or 0),
+                "snap_trailing_active": bool(p.get("snap_trailing_active", 0)),
+                "snap_trail_after_l3":  bool(p.get("snap_trail_after_l3", False)),
+                "snap_trail_gap":       float(p.get("snap_trail_gap") if p.get("snap_trail_gap") is not None else 3.0),
                 "kotak_entry_order_id": p.get("kotak_entry_order_id"),
                 "sl_order_id":          p.get("sl_order_id"),
             }

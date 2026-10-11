@@ -39,6 +39,8 @@ _ALLOWED_POSITION_FIELDS = {
     "exit_timer_mins", "exit_slippage",
     # Snap-level SL runtime state
     "snap_levels", "snap_level_hit", "snap_trailing_active",
+    # Activation/snap config (previously written but rejected by whitelist)
+    "activation_sl_offset", "snap_trail_gap", "snap_trail_after_l3",
 }
 
 _ALLOWED_PENDING_ORDER_FIELDS = {
@@ -250,6 +252,10 @@ async def init_db():
         ("positions",       "snap_levels",              "TEXT"),
         ("positions",       "snap_level_hit",           "INTEGER DEFAULT 0"),
         ("positions",       "snap_trailing_active",     "INTEGER DEFAULT 0"),
+        # Activation/snap config — previously lost on rehydrate / rejected writes
+        ("positions",       "activation_sl_offset",     "REAL DEFAULT 0"),
+        ("positions",       "snap_trail_gap",           "REAL DEFAULT 3.0"),
+        ("positions",       "snap_trail_after_l3",      "INTEGER DEFAULT 0"),
     ]
 
     for table, col, typedef in migrations:
@@ -527,8 +533,9 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
             sl_mode, sl_gap, sl_points, signal_stoploss,
             activation_points, trail_gap, sl_activated, exit_reason,
             exit_timer_mins, exit_slippage,
-            snap_levels, snap_level_hit, snap_trailing_active)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            snap_levels, snap_level_hit, snap_trailing_active,
+            activation_sl_offset, snap_trail_gap, snap_trail_after_l3)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             trade_id,
             pos_data.get("mode", "paper"),
@@ -553,6 +560,9 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
             snap_levels_json,
             pos_data.get("snap_level_hit", 0),
             int(pos_data.get("snap_trailing_active", False)),
+            pos_data.get("activation_sl_offset", 0),
+            pos_data.get("snap_trail_gap", 3.0),
+            int(pos_data.get("snap_trail_after_l3", False)),
         ),
     )
     await db.commit()

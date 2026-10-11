@@ -40,7 +40,8 @@ from . import database as db
 log = logging.getLogger(__name__)
 
 # Pre-compiled regex for symbol matching — avoids recompile on every tick
-_SYMBOL_RE = re.compile(r'^([A-Z]+?)(\d{5}(?:CE|PE))$')
+# Supports 4-6 digit strikes (SENSEX moved beyond 5-digit-only range)
+_SYMBOL_RE = re.compile(r'^([A-Z]+?)(\d{4,6}(?:CE|PE))$')
 
 # ── [FIX #21] Module-level constants — no more magic numbers buried in logic ──
 ENTRY_TIMEOUT_MINS       = 10     # Default — overridden per-order by strategy.entryTimerMins
@@ -824,9 +825,10 @@ class PaperTrader:
                 "bounce_points":     DEFAULT_BOUNCE_POINTS,
                 "entry_logic":       "code",
                 "entry_label":       t.get("entry_label"),
-                # [FIX #26] Rehydrate with defaults
-                "entry_timer_mins":  ENTRY_TIMEOUT_MINS,
-                "exit_timer_mins":   POSITION_TIMEOUT_MINS,
+                # Restore per-order timers persisted at creation; fall back to
+                # module defaults only for rows written before the columns existed.
+                "entry_timer_mins":  t.get("entry_timer_mins") if t.get("entry_timer_mins") is not None else ENTRY_TIMEOUT_MINS,
+                "exit_timer_mins":   t.get("exit_timer_mins") if t.get("exit_timer_mins") is not None else POSITION_TIMEOUT_MINS,
                 # [FIX #27] Rehydrate initial SL config defaults
                 "signal_trail_initial_sl":        "telegram",
                 "signal_trail_initial_sl_points": 5.0,
@@ -840,7 +842,7 @@ class PaperTrader:
                 log.info("Rehydrated entry range for trade %s: %s-%s",
                          t["id"], order["entry_low"], order["entry_high"])
 
-            sym_match = re.match(r'^[A-Z]+?(\d{5})(CE|PE)$', t.get("trading_symbol", "").upper())
+            sym_match = re.match(r'^[A-Z]+?(\d{4,6})(CE|PE)$', t.get("trading_symbol", "").upper())
             if sym_match:
                 order["strike"]      = sym_match.group(1)
                 order["option_type"] = sym_match.group(2)
@@ -869,19 +871,19 @@ class PaperTrader:
                 "opened_at":     p.get("opened_at", ""),
                 "sl_mode":           p.get("sl_mode", "signal_trail"),
                 "signal_stoploss":   p.get("signal_stoploss"),
-                "activation_points":    p.get("activation_points") or DEFAULT_ACTIVATION_PTS,
-                "activation_sl_offset": p.get("activation_sl_offset") or DEFAULT_ACTIVATION_SL_OFFSET,
-                "trail_gap":            p.get("trail_gap")          or DEFAULT_TRAIL_GAP,
+                "activation_points":    p.get("activation_points") if p.get("activation_points") is not None else DEFAULT_ACTIVATION_PTS,
+                "activation_sl_offset": p.get("activation_sl_offset") if p.get("activation_sl_offset") is not None else DEFAULT_ACTIVATION_SL_OFFSET,
+                "trail_gap":            p.get("trail_gap") if p.get("trail_gap") is not None else DEFAULT_TRAIL_GAP,
                 "sl_activated":      bool(p.get("sl_activated", 0)),
                 "exit_reason":       p.get("exit_reason"),
                 # Snap-level SL state
                 "snap_levels":          _parse_snap_levels(p.get("snap_levels")),
                 "snap_trail_after_l3":  bool(p.get("snap_trail_after_l3", False)),
-                "snap_trail_gap":       float(p.get("snap_trail_gap") or 3.0),
+                "snap_trail_gap":       float(p.get("snap_trail_gap") if p.get("snap_trail_gap") is not None else 3.0),
                 "snap_level_hit":       int(p.get("snap_level_hit") or 0),
                 "snap_trailing_active": bool(p.get("snap_trailing_active", 0)),
-                # [FIX #26] Exit timer defaults on rehydrate
-                "exit_timer_mins":   POSITION_TIMEOUT_MINS,
+                # Restore per-position exit timer; default only for legacy rows.
+                "exit_timer_mins":   p.get("exit_timer_mins") if p.get("exit_timer_mins") is not None else POSITION_TIMEOUT_MINS,
             }
             self._open_positions.append(pos)
             restored_positions += 1

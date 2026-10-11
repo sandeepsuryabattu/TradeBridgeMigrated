@@ -72,6 +72,13 @@ class MarketFeed:
     def is_running(self) -> bool:
         return self._running
 
+    @property
+    def seconds_since_last_tick(self) -> float:
+        """Seconds since the last LTP tick (inf if never received)."""
+        if not self._last_tick_time:
+            return float("inf")
+        return time.time() - self._last_tick_time
+
     def add_tick_callback(self, callback: Callable):
         if callback not in self._tick_callbacks:
             self._tick_callbacks.append(callback)
@@ -119,11 +126,16 @@ class MarketFeed:
         log.info("Market feed: Async tasks started")
         return True
 
-    def stop(self):
-        """Intentionally stop the market feed tasks."""
+    def stop(self, clear_callbacks: bool = False):
+        """Intentionally stop the market feed tasks.
+
+        Callbacks are PRESERVED by default so a subsequent start() +
+        resubscribe restores the full pipeline. Pass clear_callbacks=True
+        only on final shutdown.
+        """
         self._running = False
         self._flush_tick_buffer()
-        
+
         if self._sfeed_task:
             self._sfeed_task.cancel()
         if self._orderfeed_task:
@@ -131,11 +143,18 @@ class MarketFeed:
         if self._watchdog_task:
             self._watchdog_task.cancel()
 
-        self._tick_callbacks.clear()
-        self._raw_tick_callbacks.clear()
-        self._order_callbacks.clear()
+        if clear_callbacks:
+            self._tick_callbacks.clear()
+            self._raw_tick_callbacks.clear()
+            self._order_callbacks.clear()
+            self._reconnect_callback = None
 
-        log.info("Market feed stopped intentionally")
+        log.info("Market feed stopped intentionally (callbacks %s)",
+                 "cleared" if clear_callbacks else "preserved")
+
+    def shutdown(self):
+        """Final shutdown — stop tasks and drop all callbacks."""
+        self.stop(clear_callbacks=True)
 
     # ── WebSocket Tasks ───────────────────────────────────────────────────────
 

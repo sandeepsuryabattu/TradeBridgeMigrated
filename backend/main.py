@@ -39,7 +39,7 @@ from datetime import datetime, timezone, timedelta, time as dt_time
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -49,6 +49,29 @@ from .config import Config
 from .trade_manager import TradeManager
 from .telegram_listener import TelegramListener
 from . import database as db
+
+if not Config.API_TOKEN:
+    _log_no_token = logging.getLogger(__name__)
+    _log_no_token.warning(
+        "API_TOKEN not set — mutating endpoints are unauthenticated. "
+        "Set API_TOKEN in .env to protect /api/kill, /api/mode, /api/clear, etc."
+    )
+
+
+async def require_api_token(
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+    token: Optional[str] = Query(None),
+) -> None:
+    """Enforce API_TOKEN on mutating endpoints when configured.
+
+    Empty API_TOKEN = auth disabled (dev/test/back-compat). When set,
+    callers must send `X-API-Token` header (or `?token=`).
+    """
+    if not Config.API_TOKEN:
+        return
+    provided = x_api_token or token
+    if not provided or provided != Config.API_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid or missing API token")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -283,6 +306,10 @@ async def lifespan(app: FastAPI):
     )
     await db.init_db()
     await manager.paper_trader.rehydrate_from_db()
+    try:
+        await manager.real_trader.rehydrate_from_db()
+    except Exception:
+        log.exception("Real trader rehydrate failed on startup")
     manager.set_ws_broadcast(ws_manager.broadcast)
     async def _gated_process_message(text, sender, timestamp):
         """Gate process_message on the stop_trading flag.
@@ -301,6 +328,10 @@ async def lifespan(app: FastAPI):
             try:
                 await manager.paper_trader.check_timeouts()
                 await manager.real_trader.check_timeouts()   # [FIX #29]
+                try:
+                    await manager.real_trader.check_feed_health()
+                except Exception:
+                    log.exception("Feed health check error")
             except Exception:
                 log.exception("Timeout checker error")  # [FIX #23]
             await asyncio.sleep(10)
@@ -339,17 +370,16 @@ async def lifespan(app: FastAPI):
                 log.info("Kotak Neo auto-login successful")
 
                 manager.market_feed.start()
-                manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
-                manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
-                manager.market_feed.add_raw_tick_callback(enqueue_tick)
+                _wire_feed_callbacks()
 
                 # [FIX #31] Wire self-healing reconnect callback
                 async def _auto_reconnect_feed():
                     """Full stop→start→resubscribe cycle, called by watchdog thread.
 
                     [FIX #33] Now re-logins to Kotak when the watchdog detects the
-                    token has expired (overnight). Also re-registers the order feed
-                    callback that was being lost on every stop() call.
+                    token has expired (overnight). Uses the unified
+                    _restart_feed_with_resubscribe() helper so callbacks can never
+                    be lost on stop().
                     """
                     log.info("[FIX #31] Auto-reconnect triggered by watchdog")
                     try:
@@ -373,45 +403,14 @@ async def lifespan(app: FastAPI):
                             except Exception:
                                 log.exception("[FIX #33] Re-login exception during reconnect")
 
-                        try:
-                            manager.market_feed.stop()
-                        except Exception:
-                            log.exception("auto_reconnect: stop() failed")
-
-                        await asyncio.sleep(2)
-
-                        manager.market_feed._started_once = False
-                        manager.market_feed._session_expired = False
-                        manager.market_feed.start()
-                        manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
-                        manager.market_feed.add_tick_callback(manager.real_trader.on_tick)
-                        manager.market_feed.add_raw_tick_callback(enqueue_tick)
-                        manager.market_feed.add_order_callback(manager.real_trader.handle_order_feed)  # [FIX #33]
-                        manager.market_feed.set_reconnect_callback(_auto_reconnect_feed)
-
-                        # Restart tick consumer if dead
-                        if _tick_drain_task:
-                            old = _tick_drain_task[0]
-                            if old.done():
-                                _tick_drain_task.clear()
-                        if not _tick_drain_task:
-                            new_task = asyncio.create_task(tick_consumer())
-                            _tick_drain_task.clear()
-                            _tick_drain_task.append(new_task)
-
-                        await asyncio.sleep(3)
-                        manager.market_feed.subscribe_batch([
-                            {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                            {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                            {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                        ])
-                        await manager.resubscribe_recent_signals(limit=20)
+                        await _restart_feed_with_resubscribe("watchdog")
                         log.info("[FIX #31] Auto-reconnect complete — feed should resume")
                         await ws_manager.broadcast({"type": "status_update", "data": {"market_feed": True, "auto_reconnect": True}})
                     except Exception:
                         log.exception("[FIX #31] Auto-reconnect failed")
 
-                manager.market_feed.set_reconnect_callback(_auto_reconnect_feed)
+                _restart_feed_with_resubscribe._cb = _auto_reconnect_feed  # type: ignore[attr-defined]
+                _wire_feed_callbacks(_auto_reconnect_feed)
 
                 task = asyncio.create_task(tick_consumer())
                 _tick_drain_task.clear()
@@ -492,90 +491,17 @@ async def lifespan(app: FastAPI):
                         _tick_drain_task.clear()
                         log.info("daily_contract_refresh: old tick drain task cancelled")
 
-                    try:
-                        manager.market_feed.stop()
-                    except Exception:
-                        log.exception("daily_contract_refresh: market_feed.stop() failed")
-
-                    # Let SDK WS threads fully terminate before starting new connections
-                    await asyncio.sleep(2)
-
-                    manager.market_feed._started_once = False
-                    manager.market_feed._session_expired = False
-                    manager.market_feed.start()
-                    manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
-                    manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
-                    manager.market_feed.add_raw_tick_callback(enqueue_tick)
-                    manager.market_feed.add_order_callback(manager.real_trader.handle_order_feed)  # [FIX #33]
-
-                    # [FIX #31] Re-wire self-healing reconnect callback after daily refresh
                     async def _auto_reconnect_feed_daily():
-                        log.info("[FIX #31] Auto-reconnect triggered by watchdog (post daily-refresh)")
-                        try:
-                            # [FIX #33] Re-login if token expired
-                            needs_relogin = manager.market_feed._needs_relogin
-                            if needs_relogin or not manager.kotak.is_token_valid():
-                                log.info("[FIX #33] Token expired — re-logging in before reconnect (post daily-refresh)")
-                                _loop = asyncio.get_running_loop()
-                                try:
-                                    await _loop.run_in_executor(None, manager.initialize_kotak)
-                                    def _force_relogin_daily():
-                                        manager.kotak.is_authenticated = False
-                                        manager.kotak.session_active = False
-                                        return manager.login_kotak()
-                                    lr = await _loop.run_in_executor(None, _force_relogin_daily)
-                                    if lr.get("status") == "ok":
-                                        log.info("[FIX #33] Re-login successful (post daily-refresh)")
-                                        manager.market_feed._needs_relogin = False
-                                    else:
-                                        log.error("[FIX #33] Re-login FAILED: %s", lr.get("message"))
-                                except Exception:
-                                    log.exception("[FIX #33] Re-login exception (post daily-refresh)")
-
-                            try:
-                                manager.market_feed.stop()
-                            except Exception:
-                                log.exception("auto_reconnect: stop() failed")
-                            await asyncio.sleep(2)
-                            manager.market_feed._started_once = False
-                            manager.market_feed._session_expired = False
-                            manager.market_feed.start()
-                            manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
-                            manager.market_feed.add_tick_callback(manager.real_trader.on_tick)
-                            manager.market_feed.add_raw_tick_callback(enqueue_tick)
-                            manager.market_feed.add_order_callback(manager.real_trader.handle_order_feed)  # [FIX #33]
-                            manager.market_feed.set_reconnect_callback(_auto_reconnect_feed_daily)
-                            if _tick_drain_task:
-                                old = _tick_drain_task[0]
-                                if old.done():
-                                    _tick_drain_task.clear()
-                            if not _tick_drain_task:
-                                new_task = asyncio.create_task(tick_consumer())
-                                _tick_drain_task.clear()
-                                _tick_drain_task.append(new_task)
-                            await asyncio.sleep(3)
-                            manager.market_feed.subscribe_batch([
-                                {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                                {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                                {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                            ])
-                            await manager.resubscribe_recent_signals(limit=20)
-                            log.info("[FIX #31] Auto-reconnect complete (post daily-refresh)")
-                        except Exception:
-                            log.exception("[FIX #31] Auto-reconnect failed (post daily-refresh)")
-
-                    manager.market_feed.set_reconnect_callback(_auto_reconnect_feed_daily)
+                        await _restart_feed_with_resubscribe("watchdog-post-daily-refresh")
+                    _restart_feed_with_resubscribe._cb = _auto_reconnect_feed_daily  # type: ignore[attr-defined]
+                    _wire_feed_callbacks(_auto_reconnect_feed_daily)
+                    await _restart_feed_with_resubscribe("daily-refresh")
 
                     new_task = asyncio.create_task(tick_consumer())
                     _tick_drain_task.clear()
                     _tick_drain_task.append(new_task)
                     log.info("daily_contract_refresh: tick pipeline restarted")
 
-                    manager.market_feed.subscribe_batch([
-                        {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                        {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                        {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                    ])
                     await loop.run_in_executor(None, manager.download_contracts)
                     await manager.resubscribe_recent_signals(limit=20)
                     manager.real_trader.reset_eod_flag()
@@ -641,7 +567,7 @@ async def lifespan(app: FastAPI):
     yield
 
     await telegram.stop()
-    manager.market_feed.stop()
+    manager.market_feed.shutdown()
 
     if _tick_drain_task:
         _tick_drain_task[0].cancel()
@@ -660,10 +586,56 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=Config.allowed_origins(),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Token", "Authorization"],
 )
+
+
+def _wire_feed_callbacks(auto_reconnect_fn=None):
+    """Single source of truth for (re)attaching feed callbacks.
+
+    market_feed.stop() preserves callbacks by default, but every
+    (re)start path must still ensure all 4 callbacks are attached exactly
+    once (add_* dedups). Call this after every start().
+    """
+    manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
+    manager.market_feed.add_tick_callback(manager.real_trader.on_tick)
+    manager.market_feed.add_raw_tick_callback(enqueue_tick)
+    manager.market_feed.add_order_callback(manager.real_trader.handle_order_feed)
+    if auto_reconnect_fn is not None:
+        manager.market_feed.set_reconnect_callback(auto_reconnect_fn)
+
+
+async def _restart_feed_with_resubscribe(reason: str):
+    """Full stop → start → rewire → resubscribe cycle shared by all reconnect paths."""
+    log.info("feed restart (%s): stopping", reason)
+    try:
+        manager.market_feed.stop()
+    except Exception:
+        log.exception("feed restart (%s): stop() failed", reason)
+    await asyncio.sleep(2)
+    manager.market_feed._started_once = False
+    manager.market_feed._session_expired = False
+    manager.market_feed.start()
+    _wire_feed_callbacks(getattr(_restart_feed_with_resubscribe, "_cb", None))
+    if _tick_drain_task:
+        old = _tick_drain_task[0]
+        if old.done():
+            _tick_drain_task.clear()
+    if not _tick_drain_task:
+        new_task = asyncio.create_task(tick_consumer())
+        _tick_drain_task.clear()
+        _tick_drain_task.append(new_task)
+    await asyncio.sleep(3)
+    manager.market_feed.subscribe_batch([
+        {"instrument_token": "1", "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+        {"instrument_token": "999901", "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+        {"instrument_token": "50060", "exchange_segment": "bse_cm", "symbol": "SENSEX"},
+    ])
+    await manager.resubscribe_recent_signals(limit=20)
+    log.info("feed restart (%s): complete", reason)
 
 
 @app.middleware("http")
@@ -787,7 +759,7 @@ async def get_pnl():
     return manager.paper_trader.get_pnl_summary()
 
 
-@app.post("/api/mode")
+@app.post("/api/mode", dependencies=[Depends(require_api_token)])
 async def set_mode(req: ModeRequest):
     # TOTP gate: require valid code when switching to real trading
     if req.mode == "real":
@@ -826,7 +798,7 @@ async def set_mode(req: ModeRequest):
     return result
 
 
-@app.post("/api/positions/{position_id}/exit")
+@app.post("/api/positions/{position_id}/exit", dependencies=[Depends(require_api_token)])
 async def exit_position(position_id: int):
     """[FIX #1] close_position() already broadcasts position_update — no duplicate here."""
     if manager.mode == "real":
@@ -836,7 +808,7 @@ async def exit_position(position_id: int):
     return result
 
 
-@app.post("/api/orders/{trade_id}/cancel")
+@app.post("/api/orders/{trade_id}/cancel", dependencies=[Depends(require_api_token)])
 async def cancel_pending_order(trade_id: int):
     """Cancel a single pending entry order.
     Routes to the active engine's cancel_pending_order() which acquires
@@ -862,7 +834,7 @@ async def get_balance():
         return {"status": "error", "message": "Failed to fetch balance"}
 
 
-@app.post("/api/kill")
+@app.post("/api/kill", dependencies=[Depends(require_api_token)])
 async def kill_switch():
     if manager.mode == "real":
         result = await manager.real_trader.square_off_all()
@@ -884,14 +856,14 @@ async def get_settings():
     return {"lot_size": manager.lot_size, "strategy": manager.strategy}
 
 
-@app.post("/api/settings/lot-size")
+@app.post("/api/settings/lot-size", dependencies=[Depends(require_api_token)])
 async def set_lot_size(req: LotSizeRequest):
     result = manager.set_lot_size(req.lots)
     await ws_manager.broadcast({"type": "settings_update", "data": result})
     return result
 
 
-@app.post("/api/settings/strategy")
+@app.post("/api/settings/strategy", dependencies=[Depends(require_api_token)])
 async def set_strategy(req: StrategyRequest):
     manager.strategy = req.dict()
     if req.lots and req.lots != manager.lot_size:
@@ -922,7 +894,7 @@ async def kotak_2fa(req: OTPRequest):
 
 # ── Test & Maintenance ────────────────────────────────────────────────────────
 
-@app.post("/api/clear")
+@app.post("/api/clear", dependencies=[Depends(require_api_token)])
 async def clear_data(req: ClearRequest):
     """Clear dashboard data.
     req.date = "YYYY-MM-DD" → clears only that day's records.
@@ -942,7 +914,7 @@ async def clear_data(req: ClearRequest):
     return {"status": "ok", "message": msg}
 
 
-@app.post("/api/stop-trading")
+@app.post("/api/stop-trading", dependencies=[Depends(require_api_token)])
 async def set_stop_trading(req: StopTradingRequest):
     """Toggle the stop-trading flag.
     When enabled=True, incoming Telegram signals are ignored (not traded).
@@ -956,7 +928,7 @@ async def set_stop_trading(req: StopTradingRequest):
     return {"status": "ok", "enabled": _stop_trading}
 
 
-@app.post("/api/test-signal")
+@app.post("/api/test-signal", dependencies=[Depends(require_api_token)])
 async def test_signal(req: TestSignalRequest):
     if _stop_trading:
         return {"status": "ignored", "reason": "Stop trading is enabled"}
@@ -969,82 +941,15 @@ async def test_signal(req: TestSignalRequest):
 
 # ── Fallback Action Endpoints [FIX #25] ──────────────────────────────────────
 
-@app.post("/api/reconnect-market-feed")
+@app.post("/api/reconnect-market-feed", dependencies=[Depends(require_api_token)])
 async def reconnect_market_feed():
-    """Restart the LTP WebSocket market feed if it has dropped."""
+    """Restart the LTP WebSocket market feed if it has dropped (unified helper)."""
     try:
-        try:
-            manager.market_feed.stop()
-            log.info("reconnect_market_feed: market feed stopped")
-        except Exception:
-            log.exception("reconnect_market_feed: stop() failed (may already be stopped)")
-
-        # Let SDK WS threads fully terminate before starting new connections
-        await asyncio.sleep(2)
-
-        manager.market_feed._started_once = False
-        manager.market_feed._session_expired = False
-        manager.market_feed.start()
-        manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
-        manager.market_feed.add_tick_callback(manager.real_trader.on_tick)  # [FIX #29]
-        manager.market_feed.add_raw_tick_callback(enqueue_tick)
-
-        # [FIX #31] Re-wire self-healing reconnect callback
-        async def _auto_reconnect_feed_manual():
-            log.info("[FIX #31] Auto-reconnect triggered by watchdog (post manual-reconnect)")
-            try:
-                try:
-                    manager.market_feed.stop()
-                except Exception:
-                    log.exception("auto_reconnect: stop() failed")
-                await asyncio.sleep(2)
-                manager.market_feed._started_once = False
-                manager.market_feed._session_expired = False
-                manager.market_feed.start()
-                manager.market_feed.add_tick_callback(manager.paper_trader.on_tick)
-                manager.market_feed.add_tick_callback(manager.real_trader.on_tick)
-                manager.market_feed.add_raw_tick_callback(enqueue_tick)
-                manager.market_feed.set_reconnect_callback(_auto_reconnect_feed_manual)
-                if _tick_drain_task:
-                    old = _tick_drain_task[0]
-                    if old.done():
-                        _tick_drain_task.clear()
-                if not _tick_drain_task:
-                    new_task = asyncio.create_task(tick_consumer())
-                    _tick_drain_task.clear()
-                    _tick_drain_task.append(new_task)
-                await asyncio.sleep(3)
-                manager.market_feed.subscribe_batch([
-                    {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                    {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                    {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                ])
-                await manager.resubscribe_recent_signals(limit=20)
-                log.info("[FIX #31] Auto-reconnect complete (post manual-reconnect)")
-            except Exception:
-                log.exception("[FIX #31] Auto-reconnect failed (post manual-reconnect)")
-
-        manager.market_feed.set_reconnect_callback(_auto_reconnect_feed_manual)
-
-        # [FIX #30] Restart the tick consumer task if it's dead
-        if _tick_drain_task:
-            old = _tick_drain_task[0]
-            if old.done():
-                _tick_drain_task.clear()
-        if not _tick_drain_task:
-            new_task = asyncio.create_task(tick_consumer())
-            _tick_drain_task.clear()
-            _tick_drain_task.append(new_task)
-            log.info("reconnect_market_feed: tick consumer task (re)started")
-
-        await asyncio.sleep(3)
-        manager.market_feed.subscribe_batch([
-            {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-            {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-            {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-        ])
-        await manager.resubscribe_recent_signals(limit=20)
-
+        async def _cb():
+            await _restart_feed_with_resubscribe("watchdog-post-manual")
+        _restart_feed_with_resubscribe._cb = _cb  # type: ignore[attr-defined]
+        _wire_feed_callbacks(_cb)
+        await _restart_feed_with_resubscribe("manual")
         log.info("reconnect_market_feed: market feed restarted successfully")
         await ws_manager.broadcast({"type": "status_update", "data": {"market_feed": True}})
         return {"status": "ok", "message": "Market feed reconnected and subscriptions restored"}
@@ -1053,7 +958,7 @@ async def reconnect_market_feed():
         return {"status": "error", "message": "Market feed reconnect failed — see logs"}
 
 
-@app.post("/api/reconnect-telegram")
+@app.post("/api/reconnect-telegram", dependencies=[Depends(require_api_token)])
 async def reconnect_telegram():
     """Stop and restart the Telegram bot listener."""
     try:
@@ -1074,7 +979,7 @@ async def reconnect_telegram():
         return {"status": "error", "message": "Telegram reconnect failed — see logs"}
 
 
-@app.post("/api/resubscribe-signals")
+@app.post("/api/resubscribe-signals", dependencies=[Depends(require_api_token)])
 async def resubscribe_signals():
     """Re-send instrument subscriptions for recent signals to the market feed.
     Lightweight fix for LTP showing '--' on signal cards even though the market
@@ -1094,11 +999,12 @@ async def resubscribe_signals():
         return {"status": "error", "message": "Re-subscribe failed — see logs"}
 
 
-@app.post("/api/restart-backend")
+@app.post("/api/restart-backend", dependencies=[Depends(require_api_token)])
 async def restart_backend():
     """Trigger a PM2 restart of this backend process.
     Fires after a 1.5s delay so the HTTP response can flush first.
     WARNING: causes ~10s downtime; open positions resume being managed after restart.
+    NOTE: command is allowlisted (no user input) to avoid shell injection.
     """
     import subprocess
 
@@ -1117,7 +1023,7 @@ async def restart_backend():
     }
 
 
-@app.post("/api/clear-signal-tracker")
+@app.post("/api/clear-signal-tracker", dependencies=[Depends(require_api_token)])
 async def clear_signal_tracker():
     """No-op — dedup is now fully DB-backed via open-position and pending-order checks."""
     manager.clear_duplicates()
