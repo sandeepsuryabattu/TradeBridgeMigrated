@@ -5,7 +5,7 @@ aiosqlite==0.20.0
 telethon==1.36.0
 kotakneoapi>=3.0.7
 pyotp==2.9.0
-websockets==8.1
+websockets>=12.0
 wsproto==1.2.0
 httpx==0.27.0
 pandas==2.2.3
