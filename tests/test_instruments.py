@@ -66,3 +66,26 @@ def test_sl_above_entry_dropped():
     s = parse_instrument_signal("NIFTY\n25600CE\nPRICE @ 120-128\nSL 500\nTARGETS 150/200")
     assert s.status == "valid" and s.stoploss is None
     assert s.targets == [150.0, 200.0]
+
+
+def test_recap_call_put_format():
+    s = parse_instrument_signal(
+        "📊 INDEX OPTIONS 📊\n🀄️ NIFTY 22500 CALL 🀄️\nENTRY PRICE ➖120-125\n"
+        "💰Target 1 ⛔️ 150 💰Target 2 ⛔️ 200 💰Target 3 ⛔️ 260\n🔴Stop Loss: 102"
+    )
+    assert s.status == "valid" and s.kind == "OPT"
+    assert s.underlying == "NIFTY" and s.option_type == "CE"
+    assert (s.entry_low, s.entry_high) == (120.0, 125.0)
+    assert s.stoploss == 102.0 and s.targets == [150.0, 200.0, 260.0]
+    assert s.display_symbol == "NIFTY22500CE"
+
+
+def test_recap_put_format():
+    s = parse_instrument_signal(
+        "📊 INDEX OPTIONS 📊\n🀄️ SENSEX 71600 PUT 🀄️\nENTRY PRICE ➖160-170\n"
+        "💰Target 1 ⛔️ 190 💰Target 2 ⛔️ 240 💰Target 3 ⛔️ 320\n🔴Stop Loss: 128"
+    )
+    assert s.status == "valid" and s.kind == "OPT"
+    assert s.underlying == "SENSEX" and s.option_type == "PE"
+    assert s.display_symbol == "SENSEX71600PE"
+    assert s.targets == [190.0, 240.0, 320.0]

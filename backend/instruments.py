@@ -98,7 +98,7 @@ def _detect_underlying(lower: str) -> Optional[tuple[str, str]]:
 
 
 def _parse_entry(after_price: str):
-    m = re.search(r"@?\s*(\d{1,6}(?:\.\d+)?)(?:\s*[-]\s*(\d{1,6}(?:\.\d+)?))?", after_price)
+    m = re.search(r"@?\s*-?\s*(\d{1,6}(?:\.\d+)?)(?:\s*[-]\s*(\d{1,6}(?:\.\d+)?))?", after_price)
     if not m:
         return None, None
     low = float(m.group(1))
@@ -129,6 +129,14 @@ def _parse_targets(stripped: str, entry_high: float) -> Optional[list]:
                     targets.append(float(tok))
                 except ValueError:
                     pass
+    # Recap cards: "Target 1 ⛔ 150  Target 2 ⛔ 200" — numbered labels
+    for m in re.finditer(
+        r"target\s*\d+\s*[⛔️︎\ufe0f:\-–—]+\s*(\d+(?:\.\d+)?)", stripped, re.IGNORECASE
+    ):
+        try:
+            targets.append(float(m.group(1)))
+        except ValueError:
+            pass
     targets = [t for t in targets if t > entry_high]
     return targets[:5] if targets else None
 
@@ -138,12 +146,24 @@ def _parse_expiry(stripped: str) -> Optional[str]:
     return m.group(1).strip() if m else None
 
 
+def _normalize_text(stripped: str) -> str:
+    """Normalize recap-format variants to the canonical signal vocabulary.
+
+    - CALL/PUT -> CE/PE (INDEX OPTIONS recap cards use CALL/PUT)
+    - Fancy dashes (➖ U+2796, en/em dash, minus sign) -> hyphen
+    """
+    s = re.sub(r"\bCALL\b", "CE", stripped, flags=re.IGNORECASE)
+    s = re.sub(r"\bPUT\b", "PE", s, flags=re.IGNORECASE)
+    s = re.sub(r"[➖–—−]", "-", s)
+    return s
+
+
 def parse_instrument_signal(text: str) -> ParsedInstrument:
     """Parse a Telegram signal for any supported instrument kind."""
     if not text or not text.strip():
         return ParsedInstrument(status="empty")
 
-    stripped = text.strip()
+    stripped = _normalize_text(text.strip())
     lower = stripped.lower()
 
     # ── Must contain a price structure ──
