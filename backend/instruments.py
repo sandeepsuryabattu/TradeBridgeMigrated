@@ -60,6 +60,9 @@ class ParsedInstrument:
     expiry: Optional[str] = None
     average: Optional[float] = None
     signal_type: Optional[str] = None
+    holding: str = "intraday"              # intraday | short_term | btst | positional
+    lots: Optional[int] = None             # explicit "2 lots" / "qty" from message
+    entry_trigger: Optional[str] = None    # 'above' | 'below' (Buy above/below X)
 
     def to_dict(self):
         return asdict(self)
@@ -137,6 +140,23 @@ def _parse_targets(stripped: str, entry_high: float) -> Optional[list]:
             targets.append(float(m.group(1)))
         except ValueError:
             pass
+    # Single-line style: "TGT 180/220", "Tgt: 180, 220"
+    for m in re.finditer(
+        r"\btgt\s*[:\-]?\s*([\d][\d\s/,\.]*)", stripped, re.IGNORECASE
+    ):
+        raw = m.group(1).split("\n")[0]
+        for tok in re.split(r"[/,]", raw):
+            tok = tok.strip().split()[0] if tok.strip() else ""
+            if tok.replace(".", "", 1).isdigit():
+                try:
+                    targets.append(float(tok))
+                except ValueError:
+                    pass
+    for m in re.finditer(r"\bT\s*([1-5])\s*[:\-]?\s*(\d+(?:\.\d+)?)", stripped):
+        try:
+            targets.append(float(m.group(2)))
+        except ValueError:
+            pass
     targets = [t for t in targets if t > entry_high]
     return targets[:5] if targets else None
 
@@ -155,7 +175,52 @@ def _normalize_text(stripped: str) -> str:
     s = re.sub(r"\bCALL\b", "CE", stripped, flags=re.IGNORECASE)
     s = re.sub(r"\bPUT\b", "PE", s, flags=re.IGNORECASE)
     s = re.sub(r"[➖–—−]", "-", s)
+    s = re.sub(r"(?<=\d),(?=\d)", "", s)  # 24,620 -> 24620
     return s
+
+
+# Words that look like equity symbols but are actually instructions/markets.
+_NON_SYMBOLS = frozenset({
+    "ABOVE", "BELOW", "AT", "CMP", "MORE", "LOT", "LOTS", "QTY", "SHARES",
+    "RS", "TARGET", "TARGETS", "ENTRY", "PRICE", "CALL", "PUT", "FUT",
+    "BUY", "SELL", "HOLD", "ADD", "WITH", "FROM", "NEAR", "AROUND", "ZONE",
+    "NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "BANK", "NIFTY50",
+})
+
+_FOLLOWUP_RE = re.compile(
+    r"ACHIEV|POINT'?S?\s+DONE|\bDONE\b|\bHIT\b|\bBOOK\b|»|ACTIVATED|TARGET\s+\d+\s+DONE",
+    re.IGNORECASE,
+)
+
+_HOLDING_PATTERNS: list[tuple[str, str]] = [
+    (r"\bSHORT\s+TERM\b|\bSWING\b|\bPOSITIONAL\b|\b\d+\s*-\s*\d+\s*TRADING\s+DAYS\b", "short_term"),
+    (r"\bBTST\b", "btst"),
+    (r"\bSTBT\b", "btst"),
+    (r"\bINTRADAY\b|\bSCALP", "intraday"),
+]
+
+
+def _detect_holding(stripped: str) -> str:
+    for pat, tag in _HOLDING_PATTERNS:
+        if re.search(pat, stripped, re.IGNORECASE):
+            return tag
+    return "intraday"
+
+
+def _detect_lots(stripped: str) -> Optional[int]:
+    m = re.search(r"(\d+)\s*LOTS?\b", stripped, re.IGNORECASE)
+    if m:
+        try:
+            return max(1, int(m.group(1)))
+        except ValueError:
+            pass
+    m = re.search(r"\bQTY\s*[:\-]?\s*(\d+)", stripped, re.IGNORECASE)
+    if m:
+        try:
+            return max(1, int(m.group(1)))
+        except ValueError:
+            pass
+    return None
 
 
 def parse_instrument_signal(text: str) -> ParsedInstrument:
@@ -165,6 +230,12 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
 
     stripped = _normalize_text(text.strip())
     lower = stripped.lower()
+
+    # ── Follow-up/commentary guard: celebrations, activations, admin notes ──
+    # Entry signals never contain these; recap/entry cards always carry an
+    # entry-price structure instead.
+    if _FOLLOWUP_RE.search(stripped):
+        return ParsedInstrument(status="ignored", reason="Follow-up/commentary, not an entry")
 
     # ── Must contain a price structure ──
     if not re.search(r"price|@|\bbuy\b|\bsell\b|\bcmp\b|\btgt\b|\btargets?\b|\bsl\b|stoploss",
@@ -179,8 +250,8 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
         strike = opt_match.group(1)
         option_type = opt_match.group(2).upper()
         remaining = stripped[opt_match.end():]
-        price_kw = re.search(r"price", remaining, re.IGNORECASE)
-        if not price_kw and "@" not in remaining:
+        price_kw = re.search(r"price|buy|sell|entry|@|cmp", remaining, re.IGNORECASE)
+        if not price_kw:
             return ParsedInstrument(status="ignored", reason='"price" not found after strike')
         after_price = remaining[price_kw.end():] if price_kw else remaining
         low, high = _parse_entry(after_price)
@@ -212,31 +283,64 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
             signal_type=_detect_signal_type(lower),
         )
 
-    # ── 3. Cash equity: known symbol + price (intraday only) ──
+    # ── 3. Cash equity: known symbol or BUY/SELL <SYMBOL> <price> (intraday) ──
     if not opt_match:
+        candidates: list[str] = []
         for sym in sorted(EQUITY_UNIVERSE, key=len, reverse=True):
             if re.search(rf"(?<![A-Z]){sym}(?![A-Z])", stripped.upper()):
-                price_kw = re.search(r"price|buy|sell|@|cmp", stripped, re.IGNORECASE)
-                if not price_kw:
-                    continue
-                low, high = _parse_entry(stripped[price_kw.end():])
+                candidates.append(sym)
+        # Generic channel style: "INTRADAY BUY 360ONE 1197", "SHORT TERM BUY KPRMILL 1135"
+        for m in re.finditer(
+            r"(?:INTRADAY|SHORT\s+TERM|BTST|STBT|SCALP\s+)?\s*(?:BUY|SELL)\s+([A-Z0-9]{2,14})\b",
+            stripped.upper(),
+        ):
+            sym = m.group(1)
+            if not any(c.isalpha() for c in sym):
+                continue  # pure number (a price), not a symbol
+            if sym not in _NON_SYMBOLS and sym not in candidates:
+                candidates.append(sym)
+        for sym in candidates:
+            # "Buy above 24620" / "Sell below 590" trigger style
+            trig = None
+            tm = re.search(rf"\bBUY\s+ABOVE\b|\bSELL\s+BELOW\b", stripped, re.IGNORECASE)
+            if tm:
+                trig = "above" if "ABOVE" in tm.group(0).upper() else "below"
+            # Parse entry from AFTER the symbol so digits inside the symbol
+            # itself (360ONE -> 360) can never be mistaken for the price.
+            sym_at = stripped.upper().find(sym)
+            entry_src = stripped[sym_at + len(sym):] if sym_at >= 0 else stripped
+            # Slash entry range right after the symbol: "SPECIALITY 146.50/147"
+            low, high = None, None
+            sm = re.search(
+                r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", entry_src
+            )
+            if sm:
+                low, high = float(sm.group(1)), float(sm.group(2))
+            if low is None:
+                low, high = _parse_entry(entry_src)
                 if low is None:
                     continue
-                avg_match = re.search(r"(?:average|avg)\s*@?\s*(\d{1,6}(?:\.\d+)?)", stripped, re.IGNORECASE)
-                average = float(avg_match.group(1)) if avg_match else None
-                if average is not None:
-                    low = average
-                sl = _parse_stoploss(stripped, high)
-                targets = _parse_targets(stripped, high)
-                if high < low:
-                    return ParsedInstrument(status="ignored", reason="High < Low")
-                return ParsedInstrument(
-                    status="valid", kind="EQ", underlying=sym,
-                    exchange_segment=EQUITY_SEGMENT, entry_low=low, entry_high=high,
-                    targets=targets, diff=abs(high - low), stoploss=sl,
-                    expiry=None, average=average,
-                    signal_type=_detect_signal_type(lower),
-                )
+            # "add more 1192" acts as the average override for equities
+            avg_match = re.search(
+                r"(?:average|avg|add\s+more)\s*@?\s*(\d{1,6}(?:\.\d+)?)",
+                stripped, re.IGNORECASE,
+            )
+            average = float(avg_match.group(1)) if avg_match else None
+            if average is not None:
+                low = average
+            sl = _parse_stoploss(stripped, high)
+            targets = _parse_targets(stripped, high)
+            if high < low:
+                return ParsedInstrument(status="ignored", reason="High < Low")
+            return ParsedInstrument(
+                status="valid", kind="EQ", underlying=sym,
+                exchange_segment=EQUITY_SEGMENT, entry_low=low, entry_high=high,
+                targets=targets, diff=abs(high - low), stoploss=sl,
+                expiry=None, average=average,
+                signal_type=_detect_signal_type(lower),
+                holding=_detect_holding(stripped), lots=_detect_lots(stripped),
+                entry_trigger=trig,
+            )
 
     if opt_match and not und:
         return ParsedInstrument(status="ignored", reason="Option strike found but no known underlying")

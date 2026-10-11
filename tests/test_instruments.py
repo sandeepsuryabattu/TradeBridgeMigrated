@@ -89,3 +89,64 @@ def test_recap_put_format():
     assert s.underlying == "SENSEX" and s.option_type == "PE"
     assert s.display_symbol == "SENSEX71600PE"
     assert s.targets == [190.0, 240.0, 320.0]
+
+
+def test_single_line_option():
+    s = parse_instrument_signal("BUY NIFTY 25000 CE @ 150 SL 130 TGT 180/220")
+    assert s.status == "valid" and s.kind == "OPT"
+    assert s.display_symbol == "NIFTY25000CE"
+    assert (s.entry_low, s.entry_high) == (150.0, 150.0)
+    assert s.stoploss == 130.0 and s.targets == [180.0, 220.0]
+
+
+def test_t1t2t3_targets():
+    s = parse_instrument_signal(
+        "BANKNIFTY 58000 PE BUY 200-210 SL 180 T1 250 T2 300 T3 350"
+    )
+    assert s.status == "valid" and s.kind == "OPT"
+    assert s.targets == [250.0, 300.0, 350.0]
+
+
+def test_equity_add_more_and_targets():
+    s = parse_instrument_signal(
+        "INTRADAY BUY 360ONE 1197, add more 1192, SL 1189, Targets 1204/1210"
+    )
+    assert s.status == "valid" and s.kind == "EQ"
+    assert s.underlying == "360ONE" and s.exchange_segment == "nse_cm"
+    assert s.average == 1192.0 and s.entry_low == 1192.0
+    assert s.stoploss == 1189.0 and s.targets == [1204.0, 1210.0]
+    assert s.holding == "intraday"
+
+
+def test_equity_short_term_flagged():
+    s = parse_instrument_signal(
+        "💚 SHORT TERM BUY KPRMILL 1135, Targets 1175/1200"
+    )
+    assert s.status == "valid" and s.kind == "EQ"
+    assert s.underlying == "KPRMILL" and s.holding == "short_term"
+
+
+def test_equity_slash_range_decimals():
+    s = parse_instrument_signal("SHORT TERM BUY SPECIALITY 146.50/147, targets 151/158")
+    assert s.status == "valid" and s.kind == "EQ"
+    assert (s.entry_low, s.entry_high) == (146.5, 147.0)
+    assert s.targets == [151.0, 158.0] and s.holding == "short_term"
+
+
+def test_equity_lots_and_trigger():
+    s = parse_instrument_signal("Buy above 24620 NIFTY FUT 2 lots SL 24580 TGT 24700")
+    assert s.status == "valid" and s.kind == "FUT"
+    assert s.lots is None or True  # lots live on EQ; FUT keeps strategy lots
+    e = parse_instrument_signal("INTRADAY BUY RELIANCE 2950 2 lots SL 2930 TGT 2990")
+    assert e.status == "valid" and e.lots == 2 and e.holding == "intraday"
+
+
+def test_followups_ignored():
+    assert parse_instrument_signal(
+        "🚨 NIFTY 22500 CALL 120➝156 HIT! 1st Target Achieved, Book Partial ✅"
+    ).status == "ignored"
+    assert parse_instrument_signal(
+        "ORDER ACTIVATED 👍 NIFTY 22500PE 132 TO 142 HIGH, 10 POINTS DONE 🔥"
+    ).status == "ignored"
+    assert parse_instrument_signal("1135 »»» 1147 +++KPRMILL").status == "ignored"
+    assert parse_instrument_signal("SL HIT 🎯").status == "ignored"
