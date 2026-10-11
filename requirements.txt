@@ -3,7 +3,7 @@ uvicorn==0.30.0
 python-dotenv==1.0.0
 aiosqlite==0.20.0
 telethon==1.36.0
-kotakneoapi>=2.2.0
+kotakneoapi>=3.0.9
 pyotp==2.9.0
 websockets==8.1
 wsproto==1.2.0

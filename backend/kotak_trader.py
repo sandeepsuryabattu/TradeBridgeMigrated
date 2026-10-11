@@ -238,8 +238,6 @@ class KotakTrader:
                 transaction_type=transaction_type,
                 amo="NO",
                 disclosed_quantity="0",
-                market_protection="0",
-                pf="N",
                 trigger_price=str(trigger_price),
                 tag=tag,
             )
@@ -260,10 +258,6 @@ class KotakTrader:
         quantity: int = 0,
         validity: str = "DAY",
         trigger_price: float = 0,
-        trading_symbol: str = "",
-        exchange_segment: str = "bse_fo",
-        product: str = "NRML",
-        transaction_type: str = "S",
     ) -> dict:
         if not self.client or not self.is_authenticated:
             return {"status": "error", "message": "Not authenticated"}
@@ -278,10 +272,6 @@ class KotakTrader:
                 quantity=str(quantity),
                 validity=validity,
                 trigger_price=str(trigger_price),
-                trading_symbol=trading_symbol,
-                exchange_segment=exchange_segment,
-                product=product,
-                transaction_type=transaction_type,
             )
             log.info(f"Order modified: {result}")
             err = self._extract_error_message(result)
@@ -324,7 +314,7 @@ class KotakTrader:
         if not self.client or not self.is_authenticated:
             return {"status": "error", "message": "Not authenticated"}
         try:
-            result = self.client.limits(segment="ALL", exchange="ALL", product="ALL")
+            result = self.client.limits()
             err = self._extract_error_message(result)
             if err:
                 return {"status": "error", "message": err, "data": result}
