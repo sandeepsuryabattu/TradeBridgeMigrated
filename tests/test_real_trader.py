@@ -1391,8 +1391,9 @@ class TestBrokerDownSafeguard:
         """
         GIVEN an open position with a software SL
         WHEN the SL triggers but Kotak place_order fails
-        THEN the position state must REVERT to 'open' (via finally block)
-        so that the monitor continues to attempt exit on next ticks.
+        THEN the position state must become 'close_failed' (auto-heal path,
+        FIX #13) so the monitor retries exit on next ticks instead of
+        re-firing SL re-entrantly from 'open'.
         """
         mock_db.update_position = AsyncMock()
         mock_db.update_trade = AsyncMock()
@@ -1417,9 +1418,9 @@ class TestBrokerDownSafeguard:
         tick = {"symbol": "SENSEX82000CE", "tk": "12345"}
         await rt.on_tick("12345", 140.0, tick)
 
-        # Position should revert to 'open' because exit failed
+        # Position stays tracked but in auto-heal state, NOT silently 'open'
         assert len(rt._open_positions) == 1
-        assert rt._open_positions[0]["status"] == "open"
+        assert rt._open_positions[0]["status"] == "close_failed"
         
         # update_trade('closed') should NOT have been called
         closed_calls = [c for c in mock_db.update_trade.call_args_list 
@@ -1464,6 +1465,7 @@ class TestExecutionEdgeCases:
 
         # Should have exited
         assert len(rt._open_positions) == 0
-        # The SELL order should have been placed with slippage from 135
+        # Software SL exits use LTP*0.90 floor (EXIT_FLOOR_DISCOUNT) to stay
+        # within BSE operating range, not LTP - slippage.
         sell_call = [c for c in mock_kotak.place_order.call_args_list if c.kwargs.get("transaction_type") == "S"][0]
-        assert float(sell_call.kwargs["price"]) == 134.0  # 135 - 1.0 slippage
+        assert float(sell_call.kwargs["price"]) == 121.5  # 135 * 0.90
