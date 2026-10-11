@@ -60,17 +60,16 @@ if not Config.API_TOKEN:
 
 async def require_api_token(
     x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
-    token: Optional[str] = Query(None),
 ) -> None:
     """Enforce API_TOKEN on mutating endpoints when configured.
 
     Empty API_TOKEN = auth disabled (dev/test/back-compat). When set,
-    callers must send `X-API-Token` header (or `?token=`).
+    callers must send `X-API-Token` header. Query-param auth was removed
+    to avoid leaking tokens into server logs, proxies, and browser history.
     """
     if not Config.API_TOKEN:
         return
-    provided = x_api_token or token
-    if not provided or provided != Config.API_TOKEN:
+    if not x_api_token or x_api_token != Config.API_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid or missing API token")
 
 logging.basicConfig(

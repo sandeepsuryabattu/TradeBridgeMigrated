@@ -29,10 +29,18 @@ const API_BASE = window.location.origin;
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 
 // ── API token (X-API-Token) — auto-attached to all /api/ POSTs ─────────────
-// Stored once in localStorage so you only type it one time.
+// Stored in sessionStorage (cleared on tab close) to limit XSS persistence
+// vs localStorage. Migrates any legacy localStorage value once.
 const API_TOKEN_KEY = 'tradebridge_api_token';
-function getApiToken() { try { return localStorage.getItem(API_TOKEN_KEY) || ''; } catch { return ''; } }
-function setApiToken(t) { try { localStorage.setItem(API_TOKEN_KEY, t); } catch {} }
+function getApiToken() { try { return sessionStorage.getItem(API_TOKEN_KEY) || ''; } catch { return ''; } }
+function setApiToken(t) { try { sessionStorage.setItem(API_TOKEN_KEY, t); } catch {} }
+try {
+    const legacy = localStorage.getItem(API_TOKEN_KEY);
+    if (legacy && !sessionStorage.getItem(API_TOKEN_KEY)) {
+        sessionStorage.setItem(API_TOKEN_KEY, legacy);
+        localStorage.removeItem(API_TOKEN_KEY);
+    }
+} catch {}
 const _origFetch = window.fetch.bind(window);
 window.fetch = async (url, opts = {}) => {
     const isApiPost = typeof url === 'string' && url.includes('/api/')
