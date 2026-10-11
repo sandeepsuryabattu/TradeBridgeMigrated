@@ -27,7 +27,7 @@ from typing import Optional, Callable, Any, Dict
 from zoneinfo import ZoneInfo
 
 from .config import Config
-from .signal_parser import parse_signal
+from .instruments import parse_instrument_signal
 from .paper_trader import PaperTrader
 from .real_trader import RealTrader
 from .kotak_trader import KotakTrader
@@ -114,8 +114,19 @@ class TradeManager:
         """Full pipeline: receive → parse → deduplicate → execute → broadcast."""
 
         # 1. Save raw message + parse signal in parallel (parse is pure CPU, no await needed)
-        signal      = parse_signal(text)
+        # Multi-instrument parser — field-compatible with the legacy SENSEX parser
+        # for OPT signals (verified: 0 mismatches on live history).
+        signal      = parse_instrument_signal(text)
         signal_dict = signal.to_dict()
+        # DB compat: signals table + LTP matcher expect index/strike/option_type.
+        kind = signal_dict.get("kind") or "OPT"
+        if kind == "EQ":
+            signal_dict["index"] = signal_dict.get("underlying")
+            signal_dict["strike"] = ""
+            signal_dict["option_type"] = ""
+        else:
+            signal_dict["index"] = signal_dict.get("underlying") or "SENSEX"
+        signal_dict["display_symbol"] = signal.display_symbol
 
         msg_id = await db.save_message(text, sender=sender)
 
@@ -133,13 +144,23 @@ class TradeManager:
         signal_dict["id"]           = signal_id
         signal_dict["message_id"]   = msg_id
 
-        # Attach live LTP if available
+        # Attach live LTP if available (generic resolve across segments)
         initial_ltp = 0
+        resolved = None
         if self.market_feed and self.contract_master:
-            op_type = signal_dict.get("option_type") or ""
-            lookup  = self.contract_master.lookup(str(signal_dict.get("strike") or ""), op_type)
-            if lookup:
-                initial_ltp = self.market_feed.get_ltp(lookup["instrument_token"])
+            try:
+                resolved = self.contract_master.resolve(signal_dict)
+            except Exception:
+                log.exception("process_message: contract resolve failed")
+            if resolved:
+                initial_ltp = self.market_feed.get_ltp(resolved["instrument_token"])
+        signal_dict["exchange_segment"] = (
+            (resolved or {}).get("exchange_segment")
+            or signal_dict.get("exchange_segment") or "bse_fo"
+        )
+        signal_dict["trading_symbol"] = (
+            (resolved or {}).get("trading_symbol") or signal.display_symbol
+        )
 
         signal_dict["created_at"] = _utc_now()
         signal_dict["live_ltp"]   = initial_ltp
@@ -149,43 +170,47 @@ class TradeManager:
             log.info("Signal ignored: %s", signal.reason)
             return {"message_id": msg_id, "signal": signal_dict, "trade": None}
 
-        # Subscribe to market feed for valid signals
+        # Subscribe to market feed for valid signals (segment-aware)
         if self.market_feed and self.contract_master:
-            op_type = signal_dict.get("option_type") or ""
-            lookup  = self.contract_master.lookup(str(signal_dict.get("strike") or ""), op_type)
-            if lookup:
-                token  = lookup["instrument_token"]
-                symbol = lookup.get(
-                    "trading_symbol",
-                    f"SENSEX{signal_dict['strike']}{signal_dict['option_type']}",
-                )
-                self.market_feed.subscribe_instrument(token, symbol)
-                log.info("Subscribed market feed for %s (token: %s)", symbol, token)
+            if resolved:
+                token  = resolved["instrument_token"]
+                symbol = resolved.get("trading_symbol") or signal.display_symbol
+                seg    = resolved.get("exchange_segment") or "bse_fo"
+                self.market_feed.subscribe_instrument(token, symbol, seg)
+                log.info("Subscribed market feed for %s (token: %s, %s)", symbol, token, seg)
                 # Attach contract lot_size so paper_trader can use it
                 try:
-                    signal_dict["contract_lot_size"] = int(float(lookup.get("lot_size") or 0)) or None
+                    signal_dict["contract_lot_size"] = int(float(resolved.get("lot_size") or 0)) or None
                 except (ValueError, TypeError):
                     signal_dict["contract_lot_size"] = None
             else:
                 log.warning(
-                    "Could not find instrument token for %s %s — ticks may not arrive",
-                    signal_dict.get("strike"), signal_dict.get("option_type"),
+                    "Could not resolve contract for %s — ticks may not arrive",
+                    signal.display_symbol,
                 )
 
         # [FIX #25] Stop-trading gate — signal saved and broadcast above,
         # but we skip ALL trade execution when the flag is set.
+        # Non-intraday holdings (SHORT TERM / BTST) skip the same way: this
+        # engine is intraday-only (EOD square-off, no holdings handling).
         # We DO save a trade row with status='stopped' so it appears in the
         # trade log, and we broadcast order_update so the signal card shows
         # 'stopped' status and the countdown timer is suppressed.
         # We do NOT add to _processed_signals so the signal can be traded
         # once trading is re-enabled (no dedup block on the next arrival).
+        holding = signal_dict.get("holding") or "intraday"
+        skip_kind, skip_note = None, ""
         if self.stop_trading:
+            skip_kind, skip_note = "stop_trading", "Trading stopped — signal not executed"
+        elif holding != "intraday":
+            skip_kind, skip_note = "non_intraday", f"Holding '{holding}' — intraday engine skipped"
+        if skip_kind:
             log.info(
-                "Stop trading enabled — signal %s %s received but not traded",
-                signal.strike, signal.option_type,
+                "Signal %s skipped (%s) — not traded",
+                signal.display_symbol, skip_kind,
             )
             # Save a minimal trade row so it appears in the log
-            trading_symbol = f"SENSEX{signal.strike}{signal.option_type}"
+            trading_symbol = signal_dict.get("trading_symbol") or signal.display_symbol
             stopped_trade_data = {
                 "mode":             self.mode,
                 "trading_symbol":   trading_symbol,
@@ -194,7 +219,7 @@ class TradeManager:
                 "quantity":         self.lot_size,
                 "price":            signal_dict.get("entry_low", 0),
                 "status":           "stopped",
-                "notes":            "Trading stopped — signal not executed",
+                "notes":            skip_note,
             }
             stopped_trade_id = await db.save_trade(signal_id, stopped_trade_data)
             stopped_trade_data["trade_id"] = stopped_trade_id
@@ -210,37 +235,54 @@ class TradeManager:
                 "id":          stopped_trade_id,
                 "signal_id":   signal_id,
                 "status":      "stopped",
-                "status_note": "Trading stopped",
+                "status_note": skip_note,
             })
 
             return {
                 "message_id": msg_id,
                 "signal":     signal_dict,
                 "trade":      stopped_trade_data,
-                "skipped":    "stop_trading",
+                "skipped":    skip_kind,
             }
 
         # ── Dedup: in-memory check — avoids DB round trips (~8ms saved) ──
 
         # 4a. Open-position duplicate check — use in-memory lists (cross-mode)
-        sig_strike    = str(signal.strike)
-        sig_opt       = signal.option_type.upper()
+        # OPT matches on strike+type (contract symbols carry expiry affixes);
+        # FUT/EQ match on the full display symbol.
+        disp_symbol = (signal_dict.get("trading_symbol") or signal.display_symbol or "").upper()
+        sig_strike    = str(signal.strike or "")
+        sig_opt       = str(signal.option_type or "").upper()
         sig_suffix    = f"{sig_strike}{sig_opt}"
 
         all_open = list(self.paper_trader._open_positions) + list(self.real_trader._open_positions)
-        for pos in all_open:
-            if (str(pos.get("strike")) == sig_strike and
-                    str(pos.get("option_type", "")).upper() == sig_opt):
-                log.info(
-                    "Signal skipped — position already open for %s-%s",
-                    signal.strike, signal.option_type,
-                )
-                return {
-                    "message_id": msg_id,
-                    "signal":     signal_dict,
-                    "trade":      None,
-                    "skipped":    "position_open",
-                }
+        if kind == "OPT":
+            for pos in all_open:
+                if (str(pos.get("strike")) == sig_strike and
+                        str(pos.get("option_type", "")).upper() == sig_opt):
+                    log.info(
+                        "Signal skipped — position already open for %s-%s",
+                        signal.strike, signal.option_type,
+                    )
+                    return {
+                        "message_id": msg_id,
+                        "signal":     signal_dict,
+                        "trade":      None,
+                        "skipped":    "position_open",
+                    }
+        elif disp_symbol:
+            for pos in all_open:
+                if str(pos.get("trading_symbol", "")).upper() == disp_symbol:
+                    log.info(
+                        "Signal skipped — position already open for %s",
+                        signal.display_symbol,
+                    )
+                    return {
+                        "message_id": msg_id,
+                        "signal":     signal_dict,
+                        "trade":      None,
+                        "skipped":    "position_open",
+                    }
 
         # [1] Cancel any existing pending order for this strike before placing a new one
         # In-memory scan — avoids db.get_trades() round trip
@@ -254,7 +296,11 @@ class TradeManager:
         replaced_signal_id = None
         for order in active_pending:
             order_sym = order.get("trading_symbol", "").upper()
-            if order_sym.endswith(sig_suffix):
+            if kind == "OPT":
+                matched = order_sym.endswith(sig_suffix)
+            else:
+                matched = bool(disp_symbol) and order_sym == disp_symbol
+            if matched:
                 trade_id = order.get("trade_id")
                 try:
                     await db.update_trade(trade_id, {"status": "replaced"})
@@ -271,7 +317,7 @@ class TradeManager:
                         po for po in self.paper_trader._pending_orders
                         if po.get("trade_id") != trade_id
                     ]
-                log.info("Cancelled old pending order %d for %s", trade_id, sig_suffix)
+                log.info("Cancelled old pending order %d for %s", trade_id, sig_suffix or disp_symbol)
                 replaced_signal_id = order.get("signal_id")
                 await self._broadcast("order_update", {
                     "id":          trade_id,
@@ -367,13 +413,31 @@ class TradeManager:
         recent_signals = await db.get_signals(limit=limit)
         subs_count = 0
         for sig in recent_signals:
-            if sig.get("status") == "valid" and sig.get("strike") and sig.get("option_type"):
-                lookup = self.contract_master.lookup(str(sig["strike"]), sig["option_type"])
-                if lookup:
-                    token  = lookup["instrument_token"]
-                    symbol = lookup.get("trading_symbol", f"SENSEX{sig['strike']}{sig['option_type']}")
+            if sig.get("status") == "valid" and (sig.get("strike") or sig.get("idx")):
+                und = str(sig.get("idx") or "SENSEX").upper()
+                strike = str(sig.get("strike") or "")
+                opt = str(sig.get("option_type") or "")
+                sig_kind = "OPT" if (strike and opt) else "EQ"
+                seg_guess = (
+                    "bse_fo" if (sig_kind == "OPT" and und == "SENSEX")
+                    else "nse_fo" if sig_kind == "OPT"
+                    else "nse_cm"
+                )
+                try:
+                    res = self.contract_master.resolve({
+                        "kind": sig_kind, "underlying": und,
+                        "strike": strike, "option_type": opt,
+                        "exchange_segment": seg_guess,
+                    })
+                except Exception:
+                    log.exception("resubscribe: resolve failed")
+                    res = None
+                if res:
+                    token  = res["instrument_token"]
+                    symbol = res.get("trading_symbol") or f"{und}{strike}{opt}"
                     if str(token) not in self.market_feed._subscriptions:
-                        self.market_feed.subscribe_instrument(token, symbol)
+                        self.market_feed.subscribe_instrument(
+                            token, symbol, res.get("exchange_segment") or seg_guess)
                         subs_count += 1
         if subs_count:
             log.info("Re-subscribed to %d recent signals from database", subs_count)
@@ -436,6 +500,14 @@ class TradeManager:
                     log.warning("Contract master download failed — using fallback symbol construction")
             except Exception:
                 log.exception("download_contracts failed")
+            # Phase 2: multi-segment masters (NSE FO + NSE CM). Best-effort —
+            # per-segment failures keep prior data; resolve() falls back to
+            # the legacy SENSEX master when segments are unavailable.
+            try:
+                seg_results = self.contract_master.download_all(self.kotak)
+                log.info("Multi-segment masters: %s", seg_results)
+            except Exception:
+                log.exception("download_all failed")
 
     # ── Utilities ─────────────────────────────────────────────────────────────
 

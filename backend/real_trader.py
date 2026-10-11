@@ -285,24 +285,39 @@ class RealTrader:
     def _resolve_symbol(self, signal: dict) -> str:
         """Resolve the exact pTrdSymbol via search_scrip, with day-scoped cache.
 
+        Phase 3: kind/underlying-aware. FUT/EQ signals already carry the
+        contract-master symbol in signal['trading_symbol'] and use it
+        directly. OPT resolves via search_scrip on its own underlying.
+
         FIX #10: Cache key includes today's date so it auto-invalidates between
         trading sessions without any explicit flush call.
         """
+        kind = str(signal.get("kind") or "OPT").upper()
+        und  = str(signal.get("underlying") or signal.get("index") or "SENSEX").upper()
+
+        if kind in ("FUT", "EQ"):
+            pre = signal.get("trading_symbol") or signal.get("display_symbol")
+            if pre:
+                return pre
+
         strike   = str(signal.get("strike", ""))
         opt_type = str(signal.get("option_type", "")).upper()
         today    = date.today()
-        cache_key = (today, strike, opt_type)
+        cache_key = (today, und, strike, opt_type)
 
         if cache_key in self._symbol_cache:
             return self._symbol_cache[cache_key]
 
-        fallback = f"SENSEX{int(strike)}{opt_type}"
+        try:
+            fallback = f"{und}{int(strike)}{opt_type}"
+        except (ValueError, TypeError):
+            fallback = f"{und}{strike}{opt_type}"
 
         # Try 1: search_scrip via Kotak API
         if self.kotak and self.kotak.is_authenticated:
             try:
                 scrip = self.kotak.search_scrip(
-                    symbol="SENSEX",
+                    symbol=und,
                     option_type=opt_type,
                     strike_price=strike,
                 )
@@ -323,7 +338,7 @@ class RealTrader:
             suffix = f"{strike}{opt_type}".upper()
             for _tk, info in self.market_feed._subscriptions.items():
                 sym = (info.get("symbol") or "").upper()
-                if sym.startswith("SENSEX") and sym.endswith(suffix):
+                if sym.startswith(und) and sym.endswith(suffix):
                     self._symbol_cache[cache_key] = info["symbol"]
                     log.info("Resolved symbol via market_feed: %s → %s", cache_key, info["symbol"])
                     return info["symbol"]
@@ -404,7 +419,7 @@ class RealTrader:
         order = {
             "signal_id":         signal_id,
             "mode":              "real",
-            "exchange_segment":  "bse_fo",
+            "exchange_segment":  signal.get("exchange_segment") or "bse_fo",
             "trading_symbol":    trading_symbol,
             "transaction_type":  "B",
             "order_type":        "L",
@@ -503,7 +518,7 @@ class RealTrader:
             result = await self._kotak_call_with_retry(
                 self.kotak.place_order,
                 f"BUY {order['trading_symbol']}",
-                exchange_segment="bse_fo",
+                exchange_segment=order.get("exchange_segment", "bse_fo"),
                 trading_symbol=order["trading_symbol"],
                 transaction_type="B",
                 order_type="L",
@@ -916,6 +931,7 @@ class RealTrader:
         pos_data = {
             "mode":              "real",
             "trading_symbol":    order["trading_symbol"],
+            "exchange_segment":  order.get("exchange_segment", "bse_fo"),
             "strike":            order.get("strike"),
             "option_type":       order.get("option_type"),
             "quantity":          qty,
@@ -1489,7 +1505,7 @@ class RealTrader:
                             sell_result = await self._kotak_call_with_retry(
                                 self.kotak.place_order,
                                 f"SELL {pos['trading_symbol']}",
-                                exchange_segment="bse_fo",
+                                exchange_segment=pos.get("exchange_segment", "bse_fo"),
                                 trading_symbol=pos["trading_symbol"],
                                 transaction_type="S",
                                 order_type="L",
@@ -2177,6 +2193,7 @@ class RealTrader:
                 "trade_id":      p.get("trade_id"),
                 "mode":          "real",
                 "trading_symbol": p.get("trading_symbol", ""),
+                "exchange_segment": p.get("exchange_segment") or "bse_fo",
                 "strike":        p.get("strike", ""),
                 "option_type":   p.get("option_type", ""),
                 "quantity":      p.get("quantity", 0),

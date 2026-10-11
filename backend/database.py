@@ -256,6 +256,8 @@ async def init_db():
         ("positions",       "activation_sl_offset",     "REAL DEFAULT 0"),
         ("positions",       "snap_trail_gap",           "REAL DEFAULT 3.0"),
         ("positions",       "snap_trail_after_l3",      "INTEGER DEFAULT 0"),
+        # Phase 3: segment persists so post-restart exits use the right exchange
+        ("positions",       "exchange_segment",         "TEXT DEFAULT 'bse_fo'"),
     ]
 
     for table, col, typedef in migrations:
@@ -534,8 +536,9 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
             activation_points, trail_gap, sl_activated, exit_reason,
             exit_timer_mins, exit_slippage,
             snap_levels, snap_level_hit, snap_trailing_active,
-            activation_sl_offset, snap_trail_gap, snap_trail_after_l3)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            activation_sl_offset, snap_trail_gap, snap_trail_after_l3,
+            exchange_segment)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             trade_id,
             pos_data.get("mode", "paper"),
@@ -563,6 +566,7 @@ async def save_position(trade_id: int, pos_data: dict) -> int:
             pos_data.get("activation_sl_offset", 0),
             pos_data.get("snap_trail_gap", 3.0),
             int(pos_data.get("snap_trail_after_l3", False)),
+            pos_data.get("exchange_segment", "bse_fo"),
         ),
     )
     await db.commit()

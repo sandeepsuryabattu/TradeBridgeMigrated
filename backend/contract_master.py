@@ -24,6 +24,10 @@ class ContractMaster:
         self._contracts: list[dict] = []
         self._lookup_index: dict[tuple, dict] = {}   # (strike_str, option_type) -> contract
         self._last_download: Optional[date] = None
+        # Phase 2: per-segment masters for the multi-instrument engine.
+        # Keys: bse_fo / nse_fo / nse_cm. The legacy SENSEX-only
+        # _contracts/_lookup_index above are left untouched.
+        self._segments: dict[str, list[dict]] = {}
 
     @property
     def is_loaded(self) -> bool:
@@ -320,6 +324,160 @@ class ContractMaster:
     def get_all(self) -> list[dict]:
         """Return all loaded contracts."""
         return list(self._contracts)
+
+    # ── Phase 2: multi-universe masters ──────────────────────────────────────
+
+    MULTI_SEGMENTS = ("bse_fo", "nse_fo", "nse_cm")
+
+    def download_all(self, kotak_client, segments=None) -> dict[str, bool]:
+        """Download scrip masters for every segment (BSE+NSE FO, NSE CM).
+
+        Failures fall back per-segment: in-memory contracts are kept, else the
+        legacy SENSEX CSV fallback is attempted for bse_fo. Returns per-segment
+        success flags. Never raises.
+        """
+        results: dict[str, bool] = {}
+        for seg in (segments or self.MULTI_SEGMENTS):
+            try:
+                result = kotak_client.client.scrip_master(exchange_segment=seg)
+                contracts = self._parse_scrip_master(result)
+                if contracts:
+                    self._segments[seg] = contracts
+                    log.info("Segment %s: %d contracts", seg, len(contracts))
+                    results[seg] = True
+                else:
+                    log.warning("Segment %s: empty master — keeping prior data", seg)
+                    results[seg] = bool(self._segments.get(seg))
+            except Exception:
+                log.exception("Segment %s: download failed", seg)
+                results[seg] = bool(self._segments.get(seg))
+        if not self._segments.get("bse_fo") and not self._contracts:
+            self._fallback_to_csv()
+        return results
+
+    @staticmethod
+    def _sym_of(contract: dict) -> str:
+        return str(
+            contract.get("pTrdSymbol", "") or contract.get("pSymbolName", "") or
+            contract.get("pSymbol", "") or contract.get("symbol", "") or ""
+        ).upper()
+
+    @staticmethod
+    def _strike_of(contract: dict) -> int:
+        raw = str(
+            contract.get("dStrikePrice;", "") or contract.get("pStrikePrice", "") or
+            contract.get("strike_price", "") or contract.get("dStrikePrice", "") or ""
+        ).strip()
+        try:
+            val = int(float(raw)) if raw else 0
+        except (ValueError, TypeError):
+            return 0
+        return val // 100 if val > 99999 else val  # Kotak strike*100 convention
+
+    @staticmethod
+    def _opt_of(contract: dict) -> str:
+        return str(contract.get("pOptionType", "") or contract.get("option_type", "") or "").upper()
+
+    def _nearest_expiry(self, contracts: list[dict]) -> Optional[str]:
+        raws = {
+            str(c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")).strip()
+            for c in contracts
+        }
+        raws.discard("")
+        today = date.today()
+        parsed: dict[str, date] = {}
+        for exp_str in raws:
+            exp_date = None
+            try:
+                ts = float(exp_str)
+                if ts > 1_000_000_000:
+                    exp_date = datetime.fromtimestamp(ts).date()
+            except (ValueError, TypeError, OSError):
+                pass
+            if exp_date is None:
+                for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d%b%Y"):
+                    try:
+                        exp_date = datetime.strptime(exp_str, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+            if exp_date and exp_date >= today:
+                parsed[exp_str] = exp_date
+        if not parsed:
+            return None
+        return min(parsed.keys(), key=lambda s: parsed[s])
+
+    def resolve(self, sig: dict) -> Optional[dict]:
+        """Resolve a parsed-instrument dict to a tradable contract.
+
+        sig keys: kind (OPT/FUT/EQ), underlying, strike, option_type,
+        exchange_segment. Returns instrument_token, trading_symbol,
+        exchange_segment, lot_size, tick_size — or None.
+        """
+        kind = (sig.get("kind") or "OPT").upper()
+        segment = sig.get("exchange_segment") or "bse_fo"
+        contracts = self._segments.get(segment, [])
+        if not contracts:
+            # Pre-Phase-2 state (only legacy SENSEX master loaded): delegate
+            if kind == "OPT" and segment == "bse_fo":
+                return self.lookup(str(sig.get("strike") or ""), sig.get("option_type") or "")
+            return None
+
+        def _out(c: dict) -> dict:
+            return {
+                "instrument_token": str(c.get("pSymbol", "") or c.get("pInstrumentToken", "") or c.get("instrument_token", "")),
+                "trading_symbol": self._sym_of(c),
+                "exchange_segment": segment,
+                "lot_size": c.get("lLotSize", "") or c.get("pLotSize", "") or c.get("lot_size", ""),
+                "tick_size": c.get("dTickSize", "") or c.get("pTickSize", "") or c.get("tick_size", ""),
+                "raw": c,
+            }
+
+        if kind == "EQ":
+            sym = str(sig.get("underlying") or "").upper()
+            for c in contracts:
+                s = self._sym_of(c)
+                if s == sym or s.startswith(sym + "-") or s.startswith(sym + " "):
+                    return _out(c)
+            # nse_cm master may be keyed differently — also try FO list
+            log.warning("No contract found for EQ %s (%s)", sym, segment)
+            return None
+
+        und = str(sig.get("underlying") or "").upper()
+        cands = [c for c in contracts if und in self._sym_of(c)]
+        if not cands:
+            log.warning("No contracts for underlying %s (%s)", und, segment)
+            return None
+
+        if kind == "FUT":
+            # Futures carry no strike in our signals — nearest expiry match.
+            expiry = self._nearest_expiry(cands)
+            pool = [c for c in cands if not expiry or str(
+                c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")).strip() == expiry]
+            # Prefer non-option rows (empty option type) when distinguishable.
+            for c in pool:
+                if not self._opt_of(c):
+                    return _out(c)
+            if pool:
+                return _out(pool[0])
+            return None
+
+        # OPT: strike + type + nearest expiry.
+        try:
+            want = int(float(str(sig.get("strike") or "")))
+        except (ValueError, TypeError):
+            return None
+        opt = str(sig.get("option_type") or "").upper()
+        cands = [c for c in cands if self._strike_of(c) == want and self._opt_of(c) == opt]
+        if not cands:
+            log.warning("No contract for %s %s %s (%s)", und, want, opt, segment)
+            return None
+        expiry = self._nearest_expiry(cands)
+        for c in cands:
+            if not expiry or str(
+                    c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")).strip() == expiry:
+                return _out(c)
+        return _out(cands[0])
 
     def _save_to_csv(self):
         """Save filtered contracts to CSV for reference/debugging."""

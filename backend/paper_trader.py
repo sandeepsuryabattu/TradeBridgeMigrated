@@ -240,7 +240,14 @@ class PaperTrader:
 
         order_price   = float(entry_high or entry_low or 0)
         bounce_points = float(strategy.get("bouncePoints") or DEFAULT_BOUNCE_POINTS)
-        trading_symbol = f"SENSEX{int(signal['strike'])}{str(signal.get('option_type', '')).upper()}"
+        # Phase 3: prefer the resolved contract symbol/segment from trade_manager;
+        # fall back to legacy SENSEX construction for old-style signals.
+        trading_symbol = (
+            signal.get("trading_symbol")
+            or signal.get("display_symbol")
+            or f"SENSEX{int(signal['strike'])}{str(signal.get('option_type', '')).upper()}"
+        )
+        exchange_segment = signal.get("exchange_segment") or "bse_fo"
 
         log.info("Entry mode=bounce-back: range=%s-%s, bounce=%spts", entry_low, entry_high, bounce_points)
 
@@ -251,7 +258,7 @@ class PaperTrader:
         order = {
             "signal_id":         signal_id,
             "mode":              "paper",
-            "exchange_segment":  "bse_fo",
+            "exchange_segment":  exchange_segment,
             "trading_symbol":    trading_symbol,
             "transaction_type":  "B",
             "order_type":        "L",
@@ -260,7 +267,7 @@ class PaperTrader:
             "trigger_price":     0,
             "status":            "pending",
             "order_id":          f"PAPER-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{signal_id}",
-            "notes":             f"Paper BUY {signal['strike']} {signal.get('option_type')} @ {entry_low}-{entry_high} [bounce-back]",
+            "notes":             f"Paper BUY {trading_symbol} @ {entry_low}-{entry_high} [bounce-back]",
             "entry_low":         entry_low,
             "entry_high":        entry_high,
             "strike":            signal.get("strike"),
@@ -646,6 +653,7 @@ class PaperTrader:
         pos_data = {
             "mode":              "paper",
             "trading_symbol":    order["trading_symbol"],
+            "exchange_segment":  order.get("exchange_segment", "bse_fo"),
             "strike":            order.get("strike"),
             "option_type":       order.get("option_type"),
             "quantity":          order["quantity"],
@@ -859,6 +867,7 @@ class PaperTrader:
                 "trade_id":      p.get("trade_id"),
                 "mode":          "paper",
                 "trading_symbol": p.get("trading_symbol", ""),
+                "exchange_segment": p.get("exchange_segment") or "bse_fo",
                 "strike":        p.get("strike", ""),
                 "option_type":   p.get("option_type", ""),
                 "quantity":      p.get("quantity", 0),
