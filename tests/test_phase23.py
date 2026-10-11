@@ -51,6 +51,16 @@ def test_resolve_future(master):
     assert r and r["trading_symbol"] == "NIFTY13OCT25FUT"
 
 
+def test_resolve_future_never_returns_option():
+    c = ContractMaster()
+    c._segments = {"nse_fo": [
+        _opt_row("NIFTY13OCT2522500CE", 2250000, "CE"),
+        _opt_row("NIFTY13OCT2522500PE", 2250000, "PE"),
+    ]}
+    assert c.resolve({"kind": "FUT", "underlying": "NIFTY",
+                      "exchange_segment": "nse_fo"}) is None
+
+
 def test_resolve_equity(master):
     r = master.resolve({"kind": "EQ", "underlying": "RELIANCE",
                     "exchange_segment": "nse_cm"})

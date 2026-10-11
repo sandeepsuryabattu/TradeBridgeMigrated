@@ -451,15 +451,15 @@ class ContractMaster:
 
         if kind == "FUT":
             # Futures carry no strike in our signals — nearest expiry match.
+            # Only accept non-option rows; NEVER fall back to a CE/PE row
+            # (that would buy the wrong instrument with real money).
             expiry = self._nearest_expiry(cands)
             pool = [c for c in cands if not expiry or str(
                 c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")).strip() == expiry]
-            # Prefer non-option rows (empty option type) when distinguishable.
             for c in pool:
-                if not self._opt_of(c):
+                if self._opt_of(c) in ("", "F", "FUT", "XX"):
                     return _out(c)
-            if pool:
-                return _out(pool[0])
+            log.warning("No future contract for %s (%s) — refusing option fallback", und, segment)
             return None
 
         # OPT: strike + type + nearest expiry.
