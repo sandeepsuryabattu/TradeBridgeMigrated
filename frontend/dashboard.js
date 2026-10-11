@@ -28,6 +28,31 @@
 const API_BASE = window.location.origin;
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 
+// ── API token (X-API-Token) — auto-attached to all /api/ POSTs ─────────────
+// Stored once in localStorage so you only type it one time.
+const API_TOKEN_KEY = 'tradebridge_api_token';
+function getApiToken() { try { return localStorage.getItem(API_TOKEN_KEY) || ''; } catch { return ''; } }
+function setApiToken(t) { try { localStorage.setItem(API_TOKEN_KEY, t); } catch {} }
+const _origFetch = window.fetch.bind(window);
+window.fetch = async (url, opts = {}) => {
+    const isApiPost = typeof url === 'string' && url.includes('/api/')
+        && (opts.method || 'GET').toUpperCase() !== 'GET';
+    if (isApiPost) {
+        const tok = getApiToken();
+        opts.headers = { ...(opts.headers || {}), ...(tok ? { 'X-API-Token': tok } : {}) };
+    }
+    let res = await _origFetch(url, opts);
+    if (res.status === 401 && isApiPost) {
+        const entered = window.prompt('This action needs the API token (API_TOKEN from your .env). Enter it once — it will be saved in this browser:');
+        if (entered) {
+            setApiToken(entered.trim());
+            opts.headers = { ...(opts.headers || {}), 'X-API-Token': entered.trim() };
+            res = await _origFetch(url, opts);
+        }
+    }
+    return res;
+};
+
 let ws = null;
 let reconnectTimer = null;
 
