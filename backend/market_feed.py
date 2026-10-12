@@ -246,6 +246,8 @@ class MarketFeed:
                                 })
                             if idx_key is None:
                                 continue
+                            if not idx_key.startswith("IDX:"):
+                                idx_key = f"IDX:{idx_key}"
                             tick = {
                                 "tk": idx_key,
                                 "ltp": float(getattr(message, "last_traded_price", 0) or 0),
