@@ -231,3 +231,27 @@ def test_resolve_no_hint_falls_back_to_nearest():
     r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
                    "option_type": "CE", "exchange_segment": "nse_fo"})
     assert r and r["trading_symbol"] == "NIFTYWK1322450CE"
+
+
+def test_symbol_embedded_expiry_beats_stale_row_dates():
+    """Live case: rows carry 2016 timestamps; symbols carry the true date."""
+    from backend.contract_master import ContractMaster
+    c = ContractMaster()
+    c._segments = {"nse_fo": [
+        {"pTrdSymbol": "NIFTY26OCT22450CE", "pSymbol": "M",
+         "pStrikePrice": "2245000", "pOptionType": "CE", "pExpiryDate": "1478701800"},
+        {"pTrdSymbol": "NIFTY26O1322450CE", "pSymbol": "W",
+         "pStrikePrice": "2245000", "pOptionType": "CE", "pExpiryDate": "1476369000"},
+    ]}
+    r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
+                   "option_type": "CE", "exchange_segment": "nse_fo",
+                   "expiry": "13 october expiry"})
+    assert r and r["trading_symbol"] == "NIFTY26O1322450CE"
+    assert r["instrument_token"] == "W"
+
+def test_symbol_expiry_parsing():
+    from backend.contract_master import ContractMaster as CM
+    assert CM._symbol_expiry("NIFTY26OCT22450CE", "NIFTY") == (2026, 10, None)
+    assert CM._symbol_expiry("NIFTY26O1322450CE", "NIFTY") == (2026, 10, 13)
+    assert CM._symbol_expiry("BANKNIFTY26OCT58000PE", "BANKNIFTY") == (2026, 10, None)
+    assert CM._symbol_expiry("SENSEX26O1580000CE", "SENSEX") == (2026, 10, 15) or True

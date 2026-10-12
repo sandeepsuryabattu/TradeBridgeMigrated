@@ -463,8 +463,64 @@ class ContractMaster:
                 return None
         return d
 
+    # Single-letter month codes (OCC-style + Kotak's O=Oct, D=Dec variants).
+    _MON1 = {"F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6, "N": 7,
+             "Q": 8, "U": 9, "V": 10, "O": 10, "X": 11, "Z": 12, "D": 12}
+
     @staticmethod
     def _row_expiry_date(contract: dict) -> Optional[date]:
+        raw = str(contract.get("pExpiryDate", "") or contract.get("expiry_date", "")
+                  or contract.get("expiry", "")).strip()
+        if not raw:
+            return None
+        try:
+            ts = float(raw)
+            if ts > 1_000_000_000:
+                return datetime.fromtimestamp(ts).date()
+        except (ValueError, TypeError, OSError, OverflowError):
+            pass
+        for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d%b%Y"):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    @classmethod
+    def _symbol_expiry(cls, sym: str, und: str):
+        """Extract (year, month, day|None) embedded in the broker symbol.
+
+        NIFTY26OCT22450CE -> (2026, 10, None); NIFTY26O1322450CE -> (2026, 10, 13).
+        Kotak's row expiry fields are unreliable (stale 2016 timestamps), so
+        the symbol is the trustworthy date source. Returns None if unparseable.
+        """
+        rest = sym[len(und):] if sym.startswith(und) else sym
+        # Monthly: UND26OCT<strike> (no day). Weekly: UND26O13<strike>.
+        # A 3-letter month must NOT swallow strike digits as a day.
+        m = re.match(r"(\d{2})([A-Z]{3})", rest)
+        if m:
+            month = cls._MONTHS.get(m.group(2).lower())
+            if not month:
+                return None
+            return (2000 + int(m.group(1)), month, None)
+        m = re.match(r"(\d{2})([A-Z])(\d{1,2})?", rest)
+        if not m:
+            return None
+        month = cls._MON1.get(m.group(2))
+        if not month:
+            return None
+        day = int(m.group(3)) if m.group(3) else None
+        return (2000 + int(m.group(1)), month, day)
+
+    @staticmethod
+    def _hint_matches(hint: date, sym_date) -> bool:
+        """A symbol with day must match exactly; month-only must match month."""
+        if sym_date is None:
+            return False
+        y, m, d = sym_date
+        if y != hint.year or m != hint.month:
+            return False
+        return d is None or d == hint.day
         raw = str(contract.get("pExpiryDate", "") or contract.get("expiry_date", "")
                   or contract.get("expiry", "")).strip()
         if not raw:
@@ -555,20 +611,23 @@ class ContractMaster:
             # ancient placeholder expiries, e.g. 2016 — live bug 2026-10-12).
             dated = [(c, d) for c, d in dated
                      if d is not None and d >= _date.today()]
-            if not dated:
-                raws = sorted({str(c.get("pExpiryDate", "") or c.get("expiry_date", "")
-                                   or c.get("expiry", ""))[:24] for c in cands})[:5]
-                log.warning("No dated rows for %s %s %s — refusing (hint %s, raw=%s)",
-                            und, want, opt, sig.get("expiry"), raws)
-                return None
-            dated.sort(key=lambda cd: (abs((cd[1] - hint).days), cd[1]))
-            best, best_date = dated[0]
-            if best_date != hint:
-                avail = sorted({d.isoformat() for _, d in dated})
-                log.warning("Hint %s unmatched (available %s) — refusing wrong-expiry fill",
-                            hint, avail)
-                return None
-            return _out(best)
+            for c, d in dated:
+                if d == hint:
+                    return _out(c)
+            # Row dates are unreliable — fall back to the date embedded in the
+            # broker symbol itself (NIFTY26O13… = 13-Oct). Only day-exact
+            # symbols qualify: a month-only row for a day-specific signal is
+            # precisely the wrong-expiry bug above, so it refuses instead.
+            for c in cands:
+                sd = self._symbol_expiry(self._sym_of(c), und)
+                if (sd is not None and sd[2] == hint.day
+                        and (sd[0], sd[1]) == (hint.year, hint.month)):
+                    return _out(c)
+            avail = sorted({d.isoformat() for _, d in dated} |
+                           {str(self._symbol_expiry(self._sym_of(c), und)) for c in cands})
+            log.warning("Hint %s unmatched (available %s) — refusing wrong-expiry fill",
+                        hint, avail)
+            return None
         expiry = self._nearest_expiry(cands)
         for c in cands:
             if not expiry or str(
