@@ -234,8 +234,21 @@ class MarketFeed:
                         if msg_type == "index":
                             iname = str(getattr(message, "name", "") or "").upper()
                             idx_key = None
+                            # Feed names don't mirror our symbols ("Nifty Bank"
+                            # vs BANKNIFTY), so match on alias substrings.
+                            iname_flat = iname.replace(" ", "")
+                            _ALIASES = {
+                                # Distinctive-only: bare "NIFTY"/"BANK" would
+                                # misroute sibling indices sharing the words.
+                                "SENSEX": ("SENSEX",),
+                                "NIFTY": ("NIFTY50",),
+                                "BANKNIFTY": ("NIFTYBANK", "BANKNIFTY"),
+                                "FINNIFTY": ("FINSERVICE", "FINNIFTY"),
+                            }
                             for key, info in self._index_subs.items():
-                                if info["symbol"].upper() in iname or iname in info["symbol"].upper():
+                                sym = str(info["symbol"]).upper().replace(" ", "")
+                                aliases = _ALIASES.get(sym, (sym,))
+                                if any(a in iname_flat or iname_flat in a for a in aliases):
                                     idx_key = key
                                     break
                             if idx_key is None and "SENSEX" in iname:

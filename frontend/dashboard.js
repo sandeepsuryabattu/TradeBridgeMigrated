@@ -76,6 +76,7 @@ const state = {
     selectedDate: null,
     wsConnected: false,
     sensex_ltp: 0,
+    index_ltp: {},
     stopTrading: false,
     kotakBalance: null,
 };
@@ -421,7 +422,7 @@ function handleWSMessage(msg) {
                 state.signals.unshift(msg.data);
                 renderSignals();
                 if (msg.data.status === 'valid') {
-                    toast(`Signal: SENSEX ${msg.data.strike} ${msg.data.option_type} @ ${msg.data.entry_low}-${msg.data.entry_high}`, 'info');
+                    toast(`Signal: ${msg.data.index || msg.data.underlying || 'SENSEX'} ${msg.data.strike} ${msg.data.option_type} @ ${msg.data.entry_low}-${msg.data.entry_high}`, 'info');
                 }
                 break;
 
@@ -540,10 +541,19 @@ function handleWSMessage(msg) {
 
             case 'index_ltp':
                 healthState.lastSensexTick = Date.now();
-                state.sensex_ltp = msg.data.ltp || 0;
-                document.querySelectorAll('.signal-sensex-ltp').forEach(el => {
-                    el.textContent = (state.sensex_ltp || 0).toFixed(2);
-                });
+                {
+                    const sym = String(msg.data.symbol || 'SENSEX').toUpperCase();
+                    state.index_ltp[sym] = msg.data.ltp || 0;
+                    if (sym === 'SENSEX') {
+                        state.sensex_ltp = msg.data.ltp || 0;
+                        document.querySelectorAll('.signal-sensex-ltp').forEach(el => {
+                            el.textContent = (state.sensex_ltp || 0).toFixed(2);
+                        });
+                    }
+                    document.querySelectorAll(`.signal-index-ltp[data-idx="${sym}"]`).forEach(el => {
+                        el.textContent = (state.index_ltp[sym] || 0).toFixed(2);
+                    });
+                }
                 break;
 
             case 'position_update': {
@@ -1287,7 +1297,9 @@ function renderSignals() {
             const timerStart = s.created_at || s.timestamp;
 
             const ltpVal = s.live_ltp ? `₹${s.live_ltp.toFixed(2)}` : '--';
-            const sensexVal = state.sensex_ltp ? state.sensex_ltp.toFixed(2) : '--';
+            const cardIdx = String(s.idx || s.index || 'SENSEX').toUpperCase();
+            const cardIdxVal = state.index_ltp[cardIdx] ?? state.sensex_ltp;
+            const indexVal = cardIdxVal ? cardIdxVal.toFixed(2) : '--';
 
             let targetsText = '--';
             if (s.targets && Array.isArray(s.targets) && s.targets.length > 0) {
@@ -1327,7 +1339,7 @@ function renderSignals() {
                         <div><span class="label">Type</span><br><span class="value">${esc(s.option_type || '')}</span></div>
                         <div><span class="label">Strike</span><br><span class="value">${esc(s.strike || '')}</span></div>
                         <div><span class="label">Entry</span><br><span class="value">₹${s.entry_low || 0} - ₹${s.entry_high || 0}</span></div>
-                        <div><span class="label">SENSEX</span><br><span class="value ltp-live signal-sensex-ltp">${sensexVal}</span></div>
+                        <div><span class="label">${esc(cardIdx)}</span><br><span class="value ltp-live signal-index-ltp" data-idx="${esc(cardIdx)}">${indexVal}</span></div>
                         <div><span class="label">LTP</span><br><span class="value ltp-live" id="signal-ltp-${s.id}">${ltpVal}</span></div>
                         ${s.min_ltp ? `<div><span class="label">Min LTP</span><br><span class="value">₹${s.min_ltp}</span></div>` : ''}
                         ${s.stoploss ? `<div><span class="label">SL</span><br><span class="value">₹${s.stoploss}</span></div>` : ''}

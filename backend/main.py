@@ -206,10 +206,10 @@ async def tick_consumer():
         try:
             token, ltp, data = await asyncio.wait_for(tick_queue.get(), timeout=1.0)
             symbol = data.get("symbol", "")
-            if token in SENSEX_INDEX_TOKENS or symbol == "SENSEX":
+            if token in SENSEX_INDEX_TOKENS or symbol in ("SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY"):
                 await ws_manager.broadcast({
                     "type": "index_ltp",
-                    "data": {"symbol": "SENSEX", "ltp": ltp},
+                    "data": {"symbol": symbol if symbol in ("SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY") else "SENSEX", "ltp": ltp},
                 })
             elif symbol:
                 await ws_manager.broadcast({
@@ -426,6 +426,10 @@ async def lifespan(app: FastAPI):
                 manager.market_feed.subscribe_index_name()
                 manager.market_feed.subscribe_index_name(
                     key="SENSEX-BSE", name="SENSEX", exchange_segment="bse_cm")
+                manager.market_feed.subscribe_index_name(
+                    key="NIFTY", name="Nifty 50", symbol="NIFTY")
+                manager.market_feed.subscribe_index_name(
+                    key="BANKNIFTY", name="Nifty Bank", symbol="BANKNIFTY")
                 await loop.run_in_executor(None, manager.download_contracts)
                 await manager.resubscribe_recent_signals(limit=100)
 
@@ -632,6 +636,10 @@ async def _restart_feed_with_resubscribe(reason: str):
     manager.market_feed.subscribe_index_name()
     manager.market_feed.subscribe_index_name(
         key="SENSEX-BSE", name="SENSEX", exchange_segment="bse_cm")
+    manager.market_feed.subscribe_index_name(
+        key="NIFTY", name="Nifty 50", symbol="NIFTY")
+    manager.market_feed.subscribe_index_name(
+        key="BANKNIFTY", name="Nifty Bank", symbol="BANKNIFTY")
     await manager.resubscribe_recent_signals(limit=100)
     log.info("feed restart (%s): complete", reason)
 
