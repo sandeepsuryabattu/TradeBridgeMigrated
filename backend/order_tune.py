@@ -48,10 +48,13 @@ def _num(v, default, cast=float, lo=None, hi=None):
 def build_tune(strategy: dict, lots: int, multiplier: int) -> dict:
     """Snapshot strategy -> per-order tune dict at placement time."""
     strategy = strategy or {}
+    _bp = strategy.get("bouncePoints")
     return {
         "lots": max(1, int(lots or 1)),
         "lot_multiplier": max(1, int(multiplier or 1)),
-        "bounce_points": float(strategy.get("bouncePoints") or 5),
+        # Explicit None check: bounce 0 is valid (fill on touch), only
+        # missing values fall back to 5.
+        "bounce_points": float(_bp if _bp is not None else 5),
         "activation_points": float(strategy.get("activationPoints") or 5.0),
         "activation_sl_offset": float(strategy.get("activationSLOffset") or 0.0),
         "trail_gap": float(strategy.get("trailGap") or 2.0),
@@ -140,7 +143,8 @@ def validate_patch(patch: dict) -> tuple[dict, list[str]]:
         clean[key] = v
 
     _take("lots", int, 1, 50, "Lots")
-    _take("bouncePoints", float, 1, 999, "Bounce-back")
+    # Bounce 0 = fill on first touch of the entry range (no bounce wait).
+    _take("bouncePoints", float, 0, 999, "Bounce-back")
     _take("entryLow", float, 0.05, 10000000, "Entry low")
     _take("entryHigh", float, 0.05, 10000000, "Entry high")
     _take("activationPoints", float, 0, 999, "Activation points")

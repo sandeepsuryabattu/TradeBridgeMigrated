@@ -418,7 +418,9 @@ class RealTrader:
         signal_trail_initial_sl_points = float(strategy.get("signalTrailInitialSLPoints") or 5.0)
 
         order_price   = float(entry_high or entry_low or 0)
-        bounce_points = float(strategy.get("bouncePoints") or DEFAULT_BOUNCE_POINTS)
+        # Bounce 0 = fill on first touch; only missing values default to 5.
+        _bp = strategy.get("bouncePoints")
+        bounce_points = float(_bp if _bp is not None else DEFAULT_BOUNCE_POINTS)
         trading_symbol = self._resolve_symbol(signal)
 
         entry_timer_mins = int(strategy.get("entryTimerMins") or ENTRY_TIMEOUT_MINS)

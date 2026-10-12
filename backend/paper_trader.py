@@ -240,7 +240,9 @@ class PaperTrader:
         snap_trail_gap      = float(strategy.get("snapTrailGap") or 3.0)
 
         order_price   = float(entry_high or entry_low or 0)
-        bounce_points = float(strategy.get("bouncePoints") or DEFAULT_BOUNCE_POINTS)
+        # Bounce 0 = fill on first touch; only missing values default to 5.
+        _bp = strategy.get("bouncePoints")
+        bounce_points = float(_bp if _bp is not None else DEFAULT_BOUNCE_POINTS)
         # Phase 3: prefer the resolved contract symbol/segment from trade_manager;
         # fall back to legacy SENSEX construction for old-style signals.
         trading_symbol = (

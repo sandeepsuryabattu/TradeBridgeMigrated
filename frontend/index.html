@@ -339,10 +339,10 @@
                             <div class="form-group">
                                 <label for="bounce-points-input">Bounce-back</label>
                                 <div class="input-group">
-                                    <input type="number" id="bounce-points-input" class="strategy-number-input" min="1" max="999" placeholder="5">
+                                    <input type="number" id="bounce-points-input" class="strategy-number-input" min="0" max="999" placeholder="5">
                                     <span class="input-addon">pts</span>
                                 </div>
-                                <span class="form-hint">Required rise from lowest dip</span>
+                                <span class="form-hint">Required rise from lowest dip (0 = fill on first touch)</span>
                             </div>
                             <div class="form-group">
                                 <label for="entry-slippage-input">Entry slippage</label>
@@ -632,7 +632,7 @@
                         </div>
                         <div class="form-group">
                             <label for="tune-bounce">Bounce-back</label>
-                            <div class="input-group"><input type="number" id="tune-bounce" class="strategy-number-input" min="1" max="999"><span class="input-addon">pts</span></div>
+                            <div class="input-group"><input type="number" id="tune-bounce" class="strategy-number-input" min="0" max="999"><span class="input-addon">pts</span></div>
                         </div>
                         <div class="form-group">
                             <label for="tune-entry-low">Entry low</label>

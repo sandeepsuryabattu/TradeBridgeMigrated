@@ -53,6 +53,14 @@ def test_validate_patch_errors():
     assert e4 == ["Nothing to update"]
 
 
+def test_bounce_zero_means_fill_on_touch():
+    from backend.order_tune import validate_patch, build_tune
+    clean, errors = validate_patch({"bouncePoints": 0})
+    assert errors == [] and clean == {"bouncePoints": 0}
+    assert build_tune({"bouncePoints": 0}, 1, 20)["bounce_points"] == 0
+    assert build_tune({}, 1, 20)["bounce_points"] == 5
+
+
 def test_apply_patch_recomputes_quantity():
     from backend.order_tune import build_tune, apply_patch
     order = {"trade_id": 1, "status": "pending", "quantity": 500,

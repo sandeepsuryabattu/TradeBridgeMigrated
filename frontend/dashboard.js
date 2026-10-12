@@ -2478,7 +2478,8 @@ function bindStrategyModal() {
 
     $('#btn-strategy-save')?.addEventListener('click', async () => {
         const lots = parseInt($('#strategy-lots-select')?.value) || 1;
-        const bouncePoints = parseInt($('#bounce-points-input')?.value) || 5;
+        const _bounceRaw = $('#bounce-points-input')?.value;
+        const bouncePoints = _bounceRaw === '' || _bounceRaw == null ? 5 : parseInt(_bounceRaw);
         const bufferEnabled = !!$('#buffer-enabled-toggle')?.checked;
         const bufferPoints = parseFloat($('#buffer-points-input')?.value) || 2;
         const entryTimerMins = parseInt($('#entry-timer-mins')?.value) || 10;
@@ -2527,8 +2528,8 @@ function bindStrategyModal() {
         if (entryTimerMins < 1 || exitTimerMins < 1) {
             return toast('Timer values must be at least 1 minute', 'warning');
         }
-        if (bouncePoints < 1) {
-            return toast('Bounce-back points must be at least 1', 'warning');
+        if (!Number.isFinite(bouncePoints) || bouncePoints < 0) {
+            return toast('Bounce-back points must be 0 or more (0 = fill on touch)', 'warning');
         }
         if (!Number.isFinite(entrySlippage) || entrySlippage < 0) {
             return toast('Entry slippage must be 0 or more', 'warning');
