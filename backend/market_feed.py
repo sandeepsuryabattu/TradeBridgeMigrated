@@ -59,6 +59,13 @@ class MarketFeed:
         self._reconnect_attempts:  int              = 0
         self._needs_relogin:       bool             = False
 
+        # Index subscriptions (kotakneoapi v3 serves indices ONLY via the
+        # subscribe_index channel, addressed by NAME — numeric scrip tokens
+        # return empty pictures. Live bug 2026-10-12: SENSEX header stuck at 0.)
+        # key -> {name, symbol, exchange_segment}
+        self._index_subs:        dict[str, dict]  = {}
+        self._pending_index_subs: list[dict]      = []
+
         self._nse_holidays_cache:  set[str]         = set()
         self._nse_holidays_fetched_date: dt_date | None = None
         
@@ -177,9 +184,21 @@ class MarketFeed:
                         tokens_to_sub.append(WsToken(s["exchange_segment"], str(s["instrument_token"]).strip()))
                     self._pending_subs.clear()
                     
-                    # Plus known active subs
+                    # Plus known active subs (index keys live in _subscriptions
+                    # too but go through the indices channel, not scrips)
                     for tk, info in self._subscriptions.items():
+                        if tk.startswith("IDX:"):
+                            continue
                         tokens_to_sub.append(WsToken(info.get("exchange_segment", "bse_fo"), str(tk).strip()))
+
+                    # Index subscriptions go through subscribe_index (by name)
+                    idx_to_sub = []
+                    for s in self._pending_index_subs:
+                        idx_to_sub.append(WsToken(s["exchange_segment"], s["name"]))
+                    self._pending_index_subs.clear()
+                    for key, info in self._index_subs.items():
+                        idx_to_sub.append(WsToken(info["exchange_segment"], info["name"]))
+                    idx_to_sub = list(set(idx_to_sub))
                         
                     # Deduplicate tokens
                     tokens_to_sub = list(set(tokens_to_sub))
@@ -187,11 +206,45 @@ class MarketFeed:
                     if tokens_to_sub:
                         await ws.subscribe_scrips(tokens_to_sub)
                         log.info(f"Subscribed to {len(tokens_to_sub)} tokens on SFeed connect")
-                    
+
+                    if idx_to_sub:
+                        await ws.subscribe_index(idx_to_sub)
+                        log.info(f"Subscribed to {len(idx_to_sub)} indices on SFeed connect")
+
                     async for message in ws:
                         if not self._running:
                             break
-                        
+
+                        # Index messages (type 'index') are keyed by NAME, not
+                        # by our numeric token — route them to the IDX bucket.
+                        msg_type = getattr(message, "type", "")
+                        if msg_type == "index":
+                            iname = str(getattr(message, "name", "") or "").upper()
+                            idx_key = None
+                            for key, info in self._index_subs.items():
+                                if info["symbol"].upper() in iname or iname in info["symbol"].upper():
+                                    idx_key = key
+                                    break
+                            if idx_key is None and "SENSEX" in iname:
+                                idx_key = "IDX:SENSEX"
+                                self._subscriptions.setdefault(idx_key, {
+                                    "symbol": "SENSEX", "ltp": 0,
+                                    "last_update": None, "exchange_segment": "bse_cm",
+                                })
+                            if idx_key is None:
+                                continue
+                            tick = {
+                                "tk": idx_key,
+                                "ltp": float(getattr(message, "last_traded_price", 0) or 0),
+                                "v": 0,
+                                "o": float(getattr(message, "open_price", 0) or 0),
+                                "h": float(getattr(message, "high_price", 0) or 0),
+                                "l": float(getattr(message, "low_price", 0) or 0),
+                                "c": float(getattr(message, "close_price", 0) or 0),
+                            }
+                            self._process_tick(tick)
+                            continue
+
                         # Duck typing to handle both SFeedScrip and SFeedIndex, or unexpected types
                         if hasattr(message, "instrument_token") and hasattr(message, "last_traded_price"):
                             tick = {
@@ -298,6 +351,35 @@ class MarketFeed:
 
     def subscribe_index(self, token: str, symbol: str):
         self.subscribe_instrument(token, symbol, exchange_segment="bse_cm")
+
+    def subscribe_index_name(self, key: str = "SENSEX", name: str = "SENSEX",
+                             symbol: str = "SENSEX", exchange_segment: str = "bse_cm"):
+        """Subscribe an index through the v3 indices channel (by NAME).
+
+        Numeric scrip tokens do NOT yield index data on kotakneoapi v3 —
+        they stream back empty SFeedScrip pictures (SENSEX header stuck at 0,
+        live bug 2026-10-12). Ticks land in _subscriptions["IDX:<key>"] with
+        the plain symbol so the WS broadcast path is unchanged.
+        """
+        idx_key = f"IDX:{key}"
+        self._subscriptions[idx_key] = {
+            "symbol":           symbol,
+            "ltp":              self._subscriptions.get(idx_key, {}).get("ltp", 0),
+            "last_update":      None,
+            "exchange_segment": exchange_segment,
+        }
+        self._index_subs[key] = {"name": name, "symbol": symbol,
+                                 "exchange_segment": exchange_segment}
+        sub_item = {"exchange_segment": exchange_segment, "name": name}
+        if self._running and self._sfeed_ws:
+            if self._loop and not self._loop.is_closed():
+                self._loop.create_task(
+                    self._sfeed_ws.subscribe_index([WsToken(exchange_segment, name)]))
+                log.info("Subscribed index %s (%s) on %s", symbol, name, exchange_segment)
+        else:
+            if sub_item not in self._pending_index_subs:
+                self._pending_index_subs.append(sub_item)
+            log.info("Queued index subscription for %s (%s)", symbol, name)
 
     def subscribe_batch(self, tokens: list[dict]):
         for item in tokens:

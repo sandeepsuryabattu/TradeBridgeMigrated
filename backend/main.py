@@ -421,11 +421,9 @@ async def lifespan(app: FastAPI):
                     log.info("Pre-loaded %d contracts from cached CSV", len(manager.contract_master.get_all()))
 
                 await asyncio.sleep(3)
-                manager.market_feed.subscribe_batch([
-                    {"instrument_token": "1",      "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                    {"instrument_token": "999901",  "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                    {"instrument_token": "50060",   "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-                ])
+                # v3 indices channel (by name) — numeric scrip tokens stream
+                # empty pictures for indices (SENSEX header stuck at 0).
+                manager.market_feed.subscribe_index_name()
                 await loop.run_in_executor(None, manager.download_contracts)
                 await manager.resubscribe_recent_signals(limit=20)
 
@@ -628,11 +626,8 @@ async def _restart_feed_with_resubscribe(reason: str):
         _tick_drain_task.clear()
         _tick_drain_task.append(new_task)
     await asyncio.sleep(3)
-    manager.market_feed.subscribe_batch([
-        {"instrument_token": "1", "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-        {"instrument_token": "999901", "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-        {"instrument_token": "50060", "exchange_segment": "bse_cm", "symbol": "SENSEX"},
-    ])
+    # v3 indices channel (by name) — see note at auto-login site above.
+    manager.market_feed.subscribe_index_name()
     await manager.resubscribe_recent_signals(limit=20)
     log.info("feed restart (%s): complete", reason)
 
