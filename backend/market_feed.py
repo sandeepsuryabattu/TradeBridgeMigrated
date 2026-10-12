@@ -220,6 +220,18 @@ class MarketFeed:
                         # by our numeric token — route them to the IDX bucket.
                         msg_type = getattr(message, "type", "")
                         if msg_type == "index":
+                            iname = str(getattr(message, "name", "") or "")
+                            seen_idx = getattr(self, "_idx_names_logged", None)
+                            if seen_idx is None:
+                                seen_idx = self._idx_names_logged = set()
+                            if iname not in seen_idx:
+                                seen_idx.add(iname)
+                                log.warning(
+                                    "Index message arrived: name=%r token=%s ltp=%s",
+                                    iname, getattr(message, "instrument_token", ""),
+                                    getattr(message, "last_traded_price", ""),
+                                )
+                        if msg_type == "index":
                             iname = str(getattr(message, "name", "") or "").upper()
                             idx_key = None
                             for key, info in self._index_subs.items():
