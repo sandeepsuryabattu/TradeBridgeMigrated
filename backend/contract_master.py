@@ -407,6 +407,21 @@ class ContractMaster:
             return None
         return min(parsed.keys(), key=lambda s: parsed[s])
 
+    @staticmethod
+    def _und_matches(sym: str, und: str) -> bool:
+        """Prefix match that never confuses NIFTY with FINNIFTY/BANKNIFTY.
+
+        Broker symbols concatenate underlying + YY expiry date
+        (NIFTY26O13..., FINNIFTY26NOV...), so the char after the underlying
+        is always a digit. A bare substring check matched FINNIFTY for NIFTY
+        signals and resolved the wrong instrument (live bug, 2026-10-12).
+        """
+        if not sym.startswith(und):
+            return False
+        if len(sym) == len(und):
+            return True
+        return sym[len(und)].isdigit() or sym[len(und)] in " -_"
+
     def resolve(self, sig: dict) -> Optional[dict]:
         """Resolve a parsed-instrument dict to a tradable contract.
 
@@ -444,7 +459,7 @@ class ContractMaster:
             return None
 
         und = str(sig.get("underlying") or "").upper()
-        cands = [c for c in contracts if und in self._sym_of(c)]
+        cands = [c for c in contracts if self._und_matches(self._sym_of(c), und)]
         if not cands:
             log.warning("No contracts for underlying %s (%s)", und, segment)
             return None

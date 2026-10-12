@@ -174,3 +174,23 @@ def test_update_signal_ltp_matches_broker_symbols():
     upd("RELIANCE-EQ", 2955.0)
     rows = dict((r[0], r[1]) for r in c.execute("SELECT id, last_ltp FROM signals"))
     assert rows == {1: 100.0, 2: 150.0, 3: 2955.0, 4: None}
+
+
+def test_resolve_never_confuses_nifty_with_finnifty():
+    """Live bug 2026-10-12: NIFTY 22600PE resolved to FINNIFTY26NOV22600PE."""
+    from backend.contract_master import ContractMaster
+    c = ContractMaster()
+    c._segments = {"nse_fo": [
+        {"pTrdSymbol": "FINNIFTY26NOV22600PE", "pSymbol": "F1",
+         "pStrikePrice": "2260000", "pOptionType": "PE", "pExpiryDate": "13-Oct-2026"},
+        {"pTrdSymbol": "NIFTY26O1322600PE", "pSymbol": "N1",
+         "pStrikePrice": "2260000", "pOptionType": "PE", "pExpiryDate": "13-Oct-2026"},
+        {"pTrdSymbol": "BANKNIFTY26OCT22600PE", "pSymbol": "B1",
+         "pStrikePrice": "2260000", "pOptionType": "PE", "pExpiryDate": "13-Oct-2026"},
+    ]}
+    r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22600",
+                   "option_type": "PE", "exchange_segment": "nse_fo"})
+    assert r and r["trading_symbol"] == "NIFTY26O1322600PE"
+    r = c.resolve({"kind": "OPT", "underlying": "BANKNIFTY", "strike": "22600",
+                   "option_type": "PE", "exchange_segment": "nse_fo"})
+    assert r and r["trading_symbol"] == "BANKNIFTY26OCT22600PE"
