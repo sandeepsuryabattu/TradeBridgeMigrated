@@ -255,3 +255,28 @@ def test_symbol_expiry_parsing():
     assert CM._symbol_expiry("NIFTY26O1322450CE", "NIFTY") == (2026, 10, 13)
     assert CM._symbol_expiry("BANKNIFTY26OCT58000PE", "BANKNIFTY") == (2026, 10, None)
     assert CM._symbol_expiry("SENSEX26O1580000CE", "SENSEX") == (2026, 10, 15) or True
+
+
+def test_update_signal_ltp_scoped_to_traded_contract():
+    """Two expiries of one strike must not overwrite each other's cards."""
+    import sqlite3
+    c = sqlite3.connect(":memory:")
+    c.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, idx TEXT, strike TEXT, option_type TEXT, status TEXT, last_ltp REAL)")
+    c.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, signal_id INTEGER, trading_symbol TEXT, status TEXT)")
+    c.executemany("INSERT INTO signals (idx, strike, option_type, status) VALUES (?,?,?,?)", [
+        ("NIFTY", "22450", "CE", "valid"),
+        ("NIFTY", "22450", "CE", "valid"),
+    ])
+    c.executemany("INSERT INTO trades (signal_id, trading_symbol, status) VALUES (?,?,?)", [
+        (1, "NIFTY26O1322450CE", "pending"),
+        (2, "NIFTY26OCT22450CE", "pending"),
+    ])
+    def upd(sym, ltp):
+        c.execute("""UPDATE signals SET last_ltp = ?
+           WHERE status = 'valid' AND id IN (
+               SELECT signal_id FROM trades WHERE trading_symbol = ?
+           )""", (ltp, sym))
+    upd("NIFTY26O1322450CE", 60.85)
+    upd("NIFTY26OCT22450CE", 257.0)
+    rows = dict((r[0], r[1]) for r in c.execute("SELECT id, last_ltp FROM signals"))
+    assert rows == {1: 60.85, 2: 257.0}

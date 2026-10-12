@@ -749,18 +749,18 @@ async def save_ticks_batch(ticks: list[dict]):
 
 
 async def update_signal_ltp(trading_symbol: str, ltp: float):
-    """Update last_ltp on signals matching this trading symbol.
+    """Update last_ltp on the signal(s) that actually traded this contract.
 
-    Broker symbols carry expiry affixes (SENSEX26O1571500PE) while signals
-    store short parts (SENSEX/71500/PE), so match on prefix+suffix instead
-    of exact equality — the old exact match never hit and last_ltp stayed
-    NULL forever. EQ signals (strike/opt empty) match on prefix alone.
+    Scoped by exact trading_symbol via the trades table — not by strike
+    suffix. Two expiries of one strike (NIFTY26O13… vs NIFTY26OCT…) used to
+    overwrite each other's cards (live bug: weekly showed the monthly LTP).
     """
     db = await _get_db()
     await db.execute(
         """UPDATE signals SET last_ltp = ?
-           WHERE status = 'valid'
-           AND ? LIKE (idx || '%' || strike || option_type)""",
+           WHERE status = 'valid' AND id IN (
+               SELECT signal_id FROM trades WHERE trading_symbol = ?
+           )""",
         (ltp, trading_symbol),
     )
     await db.commit()
