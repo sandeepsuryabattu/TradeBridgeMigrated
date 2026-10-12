@@ -203,6 +203,22 @@ class MarketFeed:
                                 "l": float(getattr(message, "low_price", 0) or 0),
                                 "c": float(getattr(message, "close_price", 0) or 0),
                             }
+                            # Diagnostic: index/subscribed tokens arriving with
+                            # zero price (first occurrence per token). Tells us
+                            # whether the token is wrong or the feed is empty.
+                            if tick["ltp"] <= 0 and tick["tk"] in self._subscriptions:
+                                seen = getattr(self, "_zero_logged", None)
+                                if seen is None:
+                                    seen = self._zero_logged = set()
+                                if tick["tk"] not in seen:
+                                    seen.add(tick["tk"])
+                                    log.warning(
+                                        "Zero-price tick for subscribed token %s "
+                                        "(type=%s name=%s) — token may be wrong "
+                                        "for this feed version",
+                                        tick["tk"], type(message).__name__,
+                                        getattr(message, "name", ""),
+                                    )
                             self._process_tick(tick)
                         else:
                             log.debug(f"SFeed unhandled message type: {type(message)} -> {message}")
