@@ -229,7 +229,7 @@ class MarketFeed:
                                 idx_key = "IDX:SENSEX"
                                 self._subscriptions.setdefault(idx_key, {
                                     "symbol": "SENSEX", "ltp": 0,
-                                    "last_update": None, "exchange_segment": "bse_cm",
+                                    "last_update": None, "exchange_segment": "nse_cm",
                                 })
                             if idx_key is None:
                                 continue
@@ -353,7 +353,7 @@ class MarketFeed:
         self.subscribe_instrument(token, symbol, exchange_segment="bse_cm")
 
     def subscribe_index_name(self, key: str = "SENSEX", name: str = "SENSEX",
-                             symbol: str = "SENSEX", exchange_segment: str = "bse_cm"):
+                             symbol: str = "SENSEX", exchange_segment: str = "nse_cm"):
         """Subscribe an index through the v3 indices channel (by NAME).
 
         Numeric scrip tokens do NOT yield index data on kotakneoapi v3 —
