@@ -489,15 +489,34 @@ class ContractMaster:
                 continue
         return None
 
+    # Canonical MCX commodity underlyings (symbols use DD-MON-YY order).
+    MCX_UNDERLYINGS = frozenset({
+        "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "ALUMINIUM",
+        "ZINC", "LEAD", "NICKEL", "MENTHAOIL", "COTTON",
+    })
+
     @classmethod
     def _symbol_expiry(cls, sym: str, und: str):
         """Extract (year, month, day|None) embedded in the broker symbol.
 
         NIFTY26OCT22450CE -> (2026, 10, None); NIFTY26O1322450CE -> (2026, 10, 13).
+        MCX symbols put the day first (GOLD30OCT26143500CE -> (2026, 10, 30),
+        optional M prefix for monthlies: CRUDEOILM15OCT264300PE).
         Kotak's row expiry fields are unreliable (stale 2016 timestamps), so
         the symbol is the trustworthy date source. Returns None if unparseable.
         """
         rest = sym[len(und):] if sym.startswith(und) else sym
+        if und in cls.MCX_UNDERLYINGS:
+            m = re.match(r"M?(\d{2})([A-Z]{3})(\d{2})", rest)
+            if m:
+                month = cls._MONTHS.get(m.group(2).lower())
+                if month:
+                    try:
+                        d = date(2000 + int(m.group(3)), month, int(m.group(1)))
+                        return (d.year, d.month, d.day)
+                    except ValueError:
+                        return None
+            return None
         # Monthly: UND26OCT<strike> (no day). Weekly: UND26O13<strike>.
         # A 3-letter month must NOT swallow strike digits as a day.
         m = re.match(r"(\d{2})([A-Z]{3})", rest)

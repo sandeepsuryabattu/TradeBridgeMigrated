@@ -55,6 +55,14 @@ class TestCommodityRouting:
         assert ContractMaster._und_matches("CRUDEOIL25NOV9000PE", "CRUDEOIL")
         assert not ContractMaster._und_matches("CRUDEOIL25NOV9000PE", "NIFTY")
 
+    def test_mcx_symbol_expiry_day_first(self):
+        from backend.contract_master import ContractMaster
+        assert ContractMaster._symbol_expiry("GOLD30OCT26143500CE", "GOLD") == (2026, 10, 30)
+        assert ContractMaster._symbol_expiry("CRUDEOILM15OCT264300PE", "CRUDEOIL") == (2026, 10, 15)
+        # Index parsing untouched
+        assert ContractMaster._symbol_expiry("NIFTY26OCT22450CE", "NIFTY") == (2026, 10, None)
+        assert ContractMaster._symbol_expiry("NIFTY26O1322450CE", "NIFTY") == (2026, 10, 13)
+
     def test_mcx_in_multi_segments(self):
         from backend.contract_master import ContractMaster
         assert "mcx_fo" in ContractMaster.MULTI_SEGMENTS
