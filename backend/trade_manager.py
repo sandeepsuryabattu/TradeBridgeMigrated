@@ -49,6 +49,46 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def same_contract(signal_symbol: str, kind: str, strike: str, option_type: str,
+                  underlying: str, pos: dict) -> bool:
+    """True only if pos is the SAME contract (underlying+expiry+strike+type).
+
+    trading_symbol embeds underlying+expiry+strike+type, so an exact match is
+    the authoritative check. Strike+type alone is NEVER enough — NIFTY 22500CE
+    and SENSEX 22500CE (or two expiries of one strike) are different contracts
+    and must not block each other.
+    """
+    disp = (signal_symbol or "").upper()
+    pos_sym = str(pos.get("trading_symbol", "")).upper()
+    if disp and pos_sym and pos_sym == disp:
+        return True
+    if kind == "OPT":
+        if not strike or not option_type:
+            return False
+        if (str(pos.get("strike")) != strike or
+                str(pos.get("option_type", "")).upper() != option_type):
+            return False
+        # Same strike+type: require same underlying prefix. Unknown underlying
+        # falls back to legacy behaviour (block) to stay safe.
+        und = (underlying or "").upper()
+        if not und or not pos_sym.startswith(und):
+            return not und
+        # Same underlying+strike+type but different symbols: only block if the
+        # expiries match (or are unparseable). Two expiries of one strike are
+        # different contracts and may trade concurrently.
+        try:
+            from .contract_master import ContractMaster
+            exp_sig = ContractMaster._symbol_expiry(disp, und)
+            exp_pos = ContractMaster._symbol_expiry(pos_sym, und)
+            if (None not in exp_sig and None not in exp_pos
+                    and exp_sig != exp_pos):
+                return False
+        except Exception:
+            pass
+        return True
+    return bool(disp) and pos_sym == disp
+
+
 class TradeManager:
     """Orchestrates the full signal → trade pipeline."""
 
@@ -254,35 +294,23 @@ class TradeManager:
         sig_strike    = str(signal.strike or "")
         sig_opt       = str(signal.option_type or "").upper()
         sig_suffix    = f"{sig_strike}{sig_opt}"
+        sig_underlying = str(
+            signal_dict.get("underlying") or signal_dict.get("index") or ""
+        ).upper()
 
         all_open = list(self.paper_trader._open_positions) + list(self.real_trader._open_positions)
-        if kind == "OPT":
-            for pos in all_open:
-                if (str(pos.get("strike")) == sig_strike and
-                        str(pos.get("option_type", "")).upper() == sig_opt):
-                    log.info(
-                        "Signal skipped — position already open for %s-%s",
-                        signal.strike, signal.option_type,
-                    )
-                    return {
-                        "message_id": msg_id,
-                        "signal":     signal_dict,
-                        "trade":      None,
-                        "skipped":    "position_open",
-                    }
-        elif disp_symbol:
-            for pos in all_open:
-                if str(pos.get("trading_symbol", "")).upper() == disp_symbol:
-                    log.info(
-                        "Signal skipped — position already open for %s",
-                        signal.display_symbol,
-                    )
-                    return {
-                        "message_id": msg_id,
-                        "signal":     signal_dict,
-                        "trade":      None,
-                        "skipped":    "position_open",
-                    }
+        for pos in all_open:
+            if same_contract(disp_symbol, kind, sig_strike, sig_opt, sig_underlying, pos):
+                log.info(
+                    "Signal skipped — position already open for %s",
+                    signal.display_symbol,
+                )
+                return {
+                    "message_id": msg_id,
+                    "signal":     signal_dict,
+                    "trade":      None,
+                    "skipped":    "position_open",
+                }
 
         # [1] Cancel any existing pending order for this strike before placing a new one
         # In-memory scan — avoids db.get_trades() round trip
@@ -295,12 +323,9 @@ class TradeManager:
 
         replaced_signal_id = None
         for order in active_pending:
-            order_sym = order.get("trading_symbol", "").upper()
-            if kind == "OPT":
-                matched = order_sym.endswith(sig_suffix)
-            else:
-                matched = bool(disp_symbol) and order_sym == disp_symbol
-            if matched:
+            # Same-contract match only — a SENSEX signal must never replace a
+            # NIFTY pending order sharing its strike.
+            if same_contract(disp_symbol, kind, sig_strike, sig_opt, sig_underlying, order):
                 trade_id = order.get("trade_id")
                 try:
                     await db.update_trade(trade_id, {"status": "replaced"})

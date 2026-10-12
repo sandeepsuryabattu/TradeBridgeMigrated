@@ -87,7 +87,9 @@ const $$ = (sel) => document.querySelectorAll(sel);
 const esc = (str) => String(str)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 // ── Timer tick (runs every second for countdown tags) ─────────────────────────
 let timerTickInterval = null;

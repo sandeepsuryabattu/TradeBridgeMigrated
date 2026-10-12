@@ -799,6 +799,25 @@ class PaperTrader:
 
             po = pending_by_trade.get(t["id"], {})
 
+            # Zombie guard: never resurrect an entry window that already lapsed.
+            # Rehydrate used to stamp created_at=now(), granting every stale
+            # order a fresh ENTRY_TIMEOUT on each restart — stale September
+            # signals could fill months later. Expire them instead.
+            entry_mins = float(t.get("entry_timer_mins") if t.get("entry_timer_mins") is not None else ENTRY_TIMEOUT_MINS)
+            created = _parse_dt(po.get("created_at") or t.get("created_at"))
+            if created and (datetime.now(timezone.utc) - created) > timedelta(minutes=entry_mins):
+                log.warning(
+                    "Rehydrate: entry window lapsed for trade %s (%s) — expiring, not restoring",
+                    t["id"], t.get("trading_symbol"),
+                )
+                try:
+                    await db.update_trade(t["id"], {"status": "expired"})
+                    if po.get("id"):
+                        await db.delete_pending_order(po["id"])
+                except Exception:
+                    log.exception("Rehydrate: failed to expire stale trade %s", t["id"])
+                continue
+
             order = {
                 "trade_id":          t["id"],
                 "signal_id":         t.get("signal_id"),
@@ -818,7 +837,9 @@ class PaperTrader:
                 "entry_high":        t.get("price", 0),
                 "strike":            "",
                 "option_type":       "",
-                "created_at":        datetime.now(timezone.utc),
+                # Preserve the original creation time so the remaining entry
+                # window is honoured instead of refreshed on every restart.
+                "created_at":        created or datetime.now(timezone.utc),
                 "min_ltp":           t.get("min_ltp"),
                 "sl_mode":           "signal_trail",
                 "signal_stoploss":   None,
@@ -835,7 +856,7 @@ class PaperTrader:
                 "entry_label":       t.get("entry_label"),
                 # Restore per-order timers persisted at creation; fall back to
                 # module defaults only for rows written before the columns existed.
-                "entry_timer_mins":  t.get("entry_timer_mins") if t.get("entry_timer_mins") is not None else ENTRY_TIMEOUT_MINS,
+                "entry_timer_mins":  entry_mins,
                 "exit_timer_mins":   t.get("exit_timer_mins") if t.get("exit_timer_mins") is not None else POSITION_TIMEOUT_MINS,
                 # [FIX #27] Rehydrate initial SL config defaults
                 "signal_trail_initial_sl":        "telegram",

@@ -901,6 +901,30 @@ class TestRehydrateCreatedAt:
     @pytest.mark.asyncio
     @patch("backend.real_trader.db")
     async def test_rehydrate_preserves_created_at(self, mock_db, mock_kotak, mock_market_feed):
+        fresh = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
+        mock_db.get_pending_orders = AsyncMock(return_value=[
+            {"id": 10, "trade_id": 1}
+        ])
+        mock_db.get_trades = AsyncMock(return_value=[
+            {"id": 1, "signal_id": 42, "status": "pending",
+             "trading_symbol": "SENSEX82000CE",
+             "notes": "Real BUY 82000 CE @ 145-155",
+             "quantity": 20, "price": 155.0,
+             "created_at": fresh}
+        ])
+        mock_db.get_positions = AsyncMock(return_value=[])
+
+        rt = make_trader(mock_kotak, mock_market_feed)
+        await rt.rehydrate_from_db()
+
+        assert len(rt._pending_orders) == 1
+        # Must use the DB timestamp, not datetime.now()
+        assert rt._pending_orders[0]["created_at"] == fresh
+
+    @pytest.mark.asyncio
+    @patch("backend.real_trader.db")
+    async def test_rehydrate_expires_lapsed_window(self, mock_db, mock_kotak, mock_market_feed):
+        """Zombie guard: entry windows dead before restart must expire, not restore."""
         mock_db.get_pending_orders = AsyncMock(return_value=[
             {"id": 10, "trade_id": 1}
         ])
@@ -912,13 +936,15 @@ class TestRehydrateCreatedAt:
              "created_at": "2026-03-25T05:00:00Z"}
         ])
         mock_db.get_positions = AsyncMock(return_value=[])
+        mock_db.update_trade = AsyncMock()
+        mock_db.delete_pending_order = AsyncMock()
 
         rt = make_trader(mock_kotak, mock_market_feed)
         await rt.rehydrate_from_db()
 
-        assert len(rt._pending_orders) == 1
-        # Must use the DB timestamp, not datetime.now()
-        assert rt._pending_orders[0]["created_at"] == "2026-03-25T05:00:00Z"
+        assert len(rt._pending_orders) == 0
+        mock_db.update_trade.assert_awaited_once_with(1, {"status": "expired"})
+        mock_db.delete_pending_order.assert_awaited_once_with(10)
 
 
 class TestSLCancelSkip:

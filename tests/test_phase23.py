@@ -254,7 +254,7 @@ def test_symbol_expiry_parsing():
     assert CM._symbol_expiry("NIFTY26OCT22450CE", "NIFTY") == (2026, 10, None)
     assert CM._symbol_expiry("NIFTY26O1322450CE", "NIFTY") == (2026, 10, 13)
     assert CM._symbol_expiry("BANKNIFTY26OCT58000PE", "BANKNIFTY") == (2026, 10, None)
-    assert CM._symbol_expiry("SENSEX26O1580000CE", "SENSEX") == (2026, 10, 15) or True
+    assert CM._symbol_expiry("SENSEX26O1580000CE", "SENSEX") == (2026, 10, 15)
 
 
 def test_update_signal_ltp_scoped_to_traded_contract():

@@ -2128,6 +2128,23 @@ class RealTrader:
 
             po = pending_by_trade.get(t["id"], {})
 
+            # Zombie guard (same as paper): never resurrect an entry window
+            # that already lapsed — expire it instead of restoring.
+            entry_mins = float(t.get("entry_timer_mins") if t.get("entry_timer_mins") is not None else ENTRY_TIMEOUT_MINS)
+            created = _parse_dt(po.get("created_at") or t.get("created_at"))
+            if created and (datetime.now(timezone.utc) - created) > timedelta(minutes=entry_mins):
+                log.warning(
+                    "Rehydrate: entry window lapsed for real trade %s (%s) — expiring, not restoring",
+                    t["id"], t.get("trading_symbol"),
+                )
+                try:
+                    await db.update_trade(t["id"], {"status": "expired"})
+                    if po.get("id"):
+                        await db.delete_pending_order(po["id"])
+                except Exception:
+                    log.exception("Rehydrate: failed to expire stale real trade %s", t["id"])
+                continue
+
             order = {
                 "trade_id":          t["id"],
                 "signal_id":         t.get("signal_id"),
