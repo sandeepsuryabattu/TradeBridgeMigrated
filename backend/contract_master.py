@@ -618,6 +618,16 @@ class ContractMaster:
             log.warning("No contracts for underlying %s (%s)", und, segment)
             return None
 
+        # Variant routing: MINI keyword pins the mini product; otherwise the
+        # standard product wins (mini only as fallback). variant travels in
+        # the parsed signal dict (instruments._detect_variant).
+        if str(sig.get("variant") or "standard").lower() == "mini":
+            minis = [c for c in cands if self._is_mini_symbol(self._sym_of(c), und)]
+            if not minis:
+                log.warning("No mini contract for %s (%s)", und, segment)
+                return None
+            cands = minis
+
         if kind == "FUT":
             # Futures carry no strike in our signals — nearest expiry match.
             # Only accept non-option rows; NEVER fall back to a CE/PE row

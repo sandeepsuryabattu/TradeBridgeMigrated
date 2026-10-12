@@ -79,6 +79,7 @@ class ParsedInstrument:
     kind: str = "OPT"                      # 'OPT' | 'FUT' | 'EQ'
     underlying: Optional[str] = None       # SENSEX/NIFTY/... or equity symbol
     exchange_segment: str = "bse_fo"       # bse_fo | nse_fo | nse_cm | mcx_fo
+    variant: str = "standard"              # 'standard' | 'mini' (MCX minis via MINI keyword)
     strike: Optional[str] = None           # OPT only
     option_type: Optional[str] = None      # OPT only: CE / PE
     entry_low: Optional[float] = None
@@ -100,10 +101,16 @@ class ParsedInstrument:
     def display_symbol(self) -> str:
         """Canonical symbol used for dedup, feed subscription, and trade rows."""
         if self.kind == "OPT":
-            return f"{self.underlying}{self.strike}{self.option_type}"
+            mini = "M" if self.variant == "mini" and self.exchange_segment == MCX_SEGMENT else ""
+            return f"{self.underlying}{mini}{self.strike}{self.option_type}"
         if self.kind == "FUT":
             return f"{self.underlying}FUT"
         return self.underlying or ""
+
+
+def _detect_variant(stripped: str) -> str:
+    """'mini' when the message asks for the MCX mini contract (MINI keyword)."""
+    return "mini" if re.search(r"\bMINI\b", stripped, re.IGNORECASE) else "standard"
 
 
 def _detect_signal_type(lower: str) -> str:
@@ -222,6 +229,7 @@ _NON_SYMBOLS = frozenset({
     # MCX commodities must never be claimed as cash-equity symbols.
     "CRUDEOIL", "CRUDE", "NATURALGAS", "NATGAS", "GOLD", "SILVER", "COPPER",
     "ALUMINIUM", "ALUMINUM", "ZINC", "LEAD", "NICKEL", "MENTHAOIL", "COTTON",
+    "MINI",
 })
 
 _FOLLOWUP_RE = re.compile(
@@ -302,13 +310,15 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
                 if bare:
                     px = float(bare.group(1))
                     return _finish_opt(stripped, lower, canonical, segment,
-                                      strike, option_type, px, px)
+                                      strike, option_type, px, px,
+                                      _detect_variant(stripped))
             return ParsedInstrument(status="ignored", reason='"price" not found after strike')
         after_price = remaining[price_kw.end():] if price_kw else remaining
         low, high = _parse_entry(after_price)
         if low is None:
             return ParsedInstrument(status="ignored", reason='Entry range not found after "price"')
-        return _finish_opt(stripped, lower, canonical, segment, strike, option_type, low, high)
+        return _finish_opt(stripped, lower, canonical, segment, strike, option_type, low, high,
+                           _detect_variant(stripped))
 
     # ── 2. Index/commodity futures: underlying + FUT + price ──
     if und and re.search(r"\bFUT\b", stripped, re.IGNORECASE):
@@ -332,6 +342,7 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
             targets=targets, diff=abs(high - low), stoploss=sl,
             expiry=_parse_expiry(stripped), average=average,
             signal_type=_detect_signal_type(lower),
+            variant=_detect_variant(stripped),
         )
 
     # ── 3. Cash equity: known symbol or BUY/SELL <SYMBOL> <price> (intraday) ──
@@ -398,7 +409,8 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
     return ParsedInstrument(status="ignored", reason="No supported instrument found")
 
 
-def _finish_opt(stripped, lower, canonical, segment, strike, option_type, low, high) -> ParsedInstrument:
+def _finish_opt(stripped, lower, canonical, segment, strike, option_type, low, high,
+                variant: str = "standard") -> ParsedInstrument:
     avg_match = re.search(r"(?:average|avg)\s*@?\s*(\d{1,5})", stripped, re.IGNORECASE)
     average = None
     if avg_match:
@@ -418,5 +430,5 @@ def _finish_opt(stripped, lower, canonical, segment, strike, option_type, low, h
         entry_low=float(low), entry_high=float(high),
         targets=targets, diff=float(abs(high - low)), stoploss=sl,
         expiry=_parse_expiry(stripped), average=average,
-        signal_type=_detect_signal_type(lower),
+        signal_type=_detect_signal_type(lower), variant=variant,
     )
