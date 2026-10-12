@@ -287,6 +287,14 @@ function bindEventListeners() {
         cancelPendingOrder(tradeId, signalId);
     });
 
+    // Tune pending order — event delegation for dynamically rendered buttons
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('.btn-tune-pending');
+        if (!btn) return;
+        e.stopPropagation();
+        openTuneModal(parseInt(btn.dataset.tradeId));
+    });
+
     // Panel Toggle Logic
     $$('.panel-header').forEach(header => {
         header.addEventListener('click', (e) => {
@@ -298,6 +306,7 @@ function bindEventListeners() {
     });
 
     bindStrategyModal();
+    bindTuneModal();
     bindClearModal();
     bindStopTrading();
     bindFallbackActions();  // [FIX #25]
@@ -520,7 +529,7 @@ function handleWSMessage(msg) {
                 const orderLabel = upd.trading_symbol || ('trade #' + (upd.id ?? '?'));
                 if (orderStatus === 'replaced') {
                     toast(`Order replaced: ${orderLabel}`, 'info');
-                } else if (orderStatus) {
+                } else if (orderStatus && !upd.tune) {
                     const orderToastType = ['filled', 'open'].includes(orderStatus)
                         ? 'success'
                         : (['rejected', 'cancelled', 'expired', 'failed'].includes(orderStatus) ? 'warning' : 'info');
@@ -1344,7 +1353,8 @@ function renderSignals() {
                     ? `<span class="timer-tag" data-timer-start="${timerStart}" data-timer-mins="${entryMins}" data-timer-label="Entry" data-trade-status="${tradeStatus}">⏳ Entry: --:--</span>`
                     : ''}
                         ${showCancel
-                    ? `<button class="btn-cancel-pending" data-trade-id="${cancelTradeId}" data-signal-id="${s.id}" title="Cancel pending entry">✕ Cancel</button>`
+                    ? `<button class="btn-tune-pending" data-trade-id="${cancelTradeId}" data-signal-id="${s.id}" title="Tune strategy for this trade">🎚 Tune</button>
+                       <button class="btn-cancel-pending" data-trade-id="${cancelTradeId}" data-signal-id="${s.id}" title="Cancel pending entry">✕ Cancel</button>`
                     : ''}
                         ${tradeStatus && tradeStatus !== 'valid' ? `<span class="signal-status ${tradeStatus}">${tradeStatus}</span>` : ''}
                     </div>
@@ -2580,4 +2590,119 @@ function persistStrategyScopeOnly() {
     try {
         localStorage.setItem('tradebridge_strategy_scope', currentScope());
     } catch { /* ignore */ }
+}
+
+// ── Per-trade Tune ────────────────────────────────────────────────────────────
+function tuneFromTrade(trade) {
+    // Prefill source: stored tune_json snapshot, else current scope strategy.
+    let snap = null;
+    try {
+        snap = typeof trade?.tune_json === 'string' ? JSON.parse(trade.tune_json) : trade?.tune_json;
+    } catch { snap = null; }
+    const s = scopeConfig(currentScope());
+    const lv = (snap?.snap_levels?.length === 3 ? snap.snap_levels : null) || [
+        { snapPts: 10, offset: 2 }, { snapPts: 10, offset: 2 }, { snapPts: 10, offset: 2 },
+    ];
+    return {
+        lots: snap?.lots ?? trade?.lots ?? s.lots ?? 1,
+        bouncePoints: snap?.bounce_points ?? s.bouncePoints ?? 5,
+        activationPoints: snap?.activation_points ?? s.activationPoints ?? 5,
+        activationSLOffset: snap?.activation_sl_offset ?? s.activationSLOffset ?? 0,
+        trailGap: snap?.trail_gap ?? s.trailGap ?? 2,
+        entryTimerMins: snap?.entry_timer_mins ?? s.entryTimerMins ?? 10,
+        exitTimerMins: snap?.exit_timer_mins ?? s.exitTimerMins ?? 10,
+        signalTrailInitialSL: snap?.signal_trail_initial_sl ?? s.signalTrailInitialSL ?? 'telegram',
+        signalTrailInitialSLPoints: snap?.signal_trail_initial_sl_points ?? s.signalTrailInitialSLPoints ?? 5,
+        slMode: snap?.sl_mode ?? s.slMode ?? 'signal_trail',
+        snapLevels: lv.map(l => ({ snapPts: l.snapPts ?? 10, offset: l.offset ?? 2 })),
+        snapTrailGap: snap?.snap_trail_gap ?? s.snapTrailGap ?? 3,
+    };
+}
+
+function openTuneModal(tradeId) {
+    const trade = state.trades.find(t => (t.trade_id || t.id) === tradeId && t.status === 'pending');
+    if (!trade) return toast('Order no longer pending — tune applies to pending entries only', 'warning');
+    const t = tuneFromTrade(trade);
+    $('#tune-trade-id').value = tradeId;
+    $('#tune-modal-title').textContent = `🎚 Tune — ${trade.trading_symbol || ('trade #' + tradeId)}`;
+    $('#tune-lots').value = t.lots;
+    $('#tune-bounce').value = t.bouncePoints;
+    $('#tune-act').value = t.activationPoints;
+    $('#tune-act-off').value = t.activationSLOffset;
+    $('#tune-gap').value = t.trailGap;
+    $('#tune-entry-timer').value = t.entryTimerMins;
+    $('#tune-exit-timer').value = t.exitTimerMins;
+    $$('input[name="tune-init-sl"]').forEach(r => { r.checked = r.value === t.signalTrailInitialSL; });
+    $('#tune-init-pts').value = t.signalTrailInitialSLPoints;
+    $('#tune-init-pts-row').style.display = t.signalTrailInitialSL === 'points_from_ltp' ? 'block' : 'none';
+    $$('input[name="tune-sl-mode"]').forEach(r => { r.checked = r.value === t.slMode; });
+    $('#tune-snap-panel').style.display = t.slMode === 'snap_levels' ? 'block' : 'none';
+    [1, 2, 3].forEach(n => {
+        $(`#tune-snap-l${n}-pts`).value = t.snapLevels[n - 1].snapPts;
+        $(`#tune-snap-l${n}-off`).value = t.snapLevels[n - 1].offset;
+    });
+    $('#tune-snap-gap').value = t.snapTrailGap;
+    $('#tune-modal').style.display = 'flex';
+}
+
+function bindTuneModal() {
+    $('#btn-close-tune')?.addEventListener('click', () => {
+        $('#tune-modal').style.display = 'none';
+    });
+    $('#btn-close-tune-2')?.addEventListener('click', () => {
+        $('#tune-modal').style.display = 'none';
+    });
+    $$('input[name="tune-init-sl"]').forEach(r => r.addEventListener('change', () => {
+        $('#tune-init-pts-row').style.display =
+            document.querySelector('input[name="tune-init-sl"]:checked')?.value === 'points_from_ltp' ? 'block' : 'none';
+    }));
+    $$('input[name="tune-sl-mode"]').forEach(r => r.addEventListener('change', () => {
+        $('#tune-snap-panel').style.display =
+            document.querySelector('input[name="tune-sl-mode"]:checked')?.value === 'snap_levels' ? 'block' : 'none';
+    }));
+    $('#btn-tune-save')?.addEventListener('click', async () => {
+        const tradeId = parseInt($('#tune-trade-id').value);
+        if (!tradeId) return;
+        const slMode = document.querySelector('input[name="tune-sl-mode"]:checked')?.value || 'signal_trail';
+        const initSL = document.querySelector('input[name="tune-init-sl"]:checked')?.value || 'telegram';
+        const body = {
+            trade_id: tradeId,
+            lots: parseInt($('#tune-lots').value),
+            bouncePoints: parseFloat($('#tune-bounce').value),
+            activationPoints: parseFloat($('#tune-act').value),
+            activationSLOffset: parseFloat($('#tune-act-off').value),
+            trailGap: parseFloat($('#tune-gap').value),
+            entryTimerMins: parseInt($('#tune-entry-timer').value),
+            exitTimerMins: parseInt($('#tune-exit-timer').value),
+            signalTrailInitialSL: initSL,
+            signalTrailInitialSLPoints: initSL === 'points_from_ltp' ? parseFloat($('#tune-init-pts').value) : null,
+            slMode,
+            snapTrailGap: slMode === 'snap_levels' ? parseFloat($('#tune-snap-gap').value) : null,
+        };
+        if (slMode === 'snap_levels') {
+            body.snapLevels = [1, 2, 3].map(n => ({
+                snapPts: parseFloat($(`#tune-snap-l${n}-pts`).value),
+                offset: parseFloat($(`#tune-snap-l${n}-off`).value),
+            }));
+        }
+        try {
+            const res = await fetch(`${API_BASE}/api/pending/tune`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (data.status === 'ok') {
+                const idx = state.trades.findIndex(t => (t.trade_id || t.id) === tradeId);
+                if (idx !== -1) {
+                    state.trades[idx] = { ...state.trades[idx], quantity: data.quantity, tune_json: JSON.stringify(data.tune) };
+                    renderTradesDebounced();
+                }
+                toast(`Tuned: ${data.summary}`, 'success');
+                $('#tune-modal').style.display = 'none';
+            } else {
+                toast(data.message || 'Tune failed', 'error');
+            }
+        } catch { toast('Tune request failed', 'error'); }
+    });
 }

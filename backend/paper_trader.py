@@ -36,6 +36,7 @@ from enum import Enum
 from typing import Optional, Callable
 
 from . import database as db
+from .order_tune import build_tune, tune_to_json, parse_tune_json, TUNE_FIELDS
 
 log = logging.getLogger(__name__)
 
@@ -291,6 +292,13 @@ class PaperTrader:
             "signal_trail_initial_sl":        signal_trail_initial_sl,
             "signal_trail_initial_sl_points": signal_trail_initial_sl_points,
         }
+
+        # Per-trade tune snapshot (order_tune): survives restart, editable via Tune API.
+        _lots_used = lot_size or int(Config.DEFAULT_LOT_SIZE)
+        _tune = build_tune(strategy, _lots_used, lot_multiplier)
+        order["lots"] = _tune["lots"]
+        order["lot_multiplier"] = _tune["lot_multiplier"]
+        order["tune_json"] = tune_to_json(_tune)
 
         trade_id = await db.save_trade(signal_id, order)
         order["trade_id"] = trade_id
@@ -862,6 +870,15 @@ class PaperTrader:
                 "signal_trail_initial_sl":        "telegram",
                 "signal_trail_initial_sl_points": 5.0,
             }
+
+            # Per-trade tune overlay: rows written with a tune_json snapshot
+            # (placement values or Tune-API edits) restore it; legacy rows
+            # keep the defaults above.
+            _saved_tune = parse_tune_json(t.get("tune_json")) or parse_tune_json(po.get("tune_json"))
+            if _saved_tune:
+                order.update({k: v for k, v in _saved_tune.items() if k in TUNE_FIELDS})
+                order["tune_json"] = tune_to_json(
+                    {k: order.get(k) for k in TUNE_FIELDS if k in order})
 
             notes_str   = t.get("notes", "")
             range_match = re.search(r'@ ([\d.]+)-([\d.]+)', notes_str)

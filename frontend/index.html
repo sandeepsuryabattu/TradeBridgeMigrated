@@ -611,6 +611,90 @@
         </div>
     </div>
 
+    <!-- ── Tune Modal (per-trade strategy override, pending orders only) ── -->
+    <div class="modal-overlay" id="tune-modal" style="display:none;">
+        <div class="modal modal-strategy">
+            <div class="modal-header">
+                <div class="modal-header-title">
+                    <h2 id="tune-modal-title">🎚 Tune Trade</h2>
+                    <p class="modal-header-subtitle">Override strategy for this pending entry only — global Default/NIFTY untouched</p>
+                </div>
+                <button class="modal-close" id="btn-close-tune">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="tune-trade-id" value="">
+                <div class="settings-section">
+                    <h3>Sizing &amp; Entry</h3>
+                    <div class="inputs-grid-2">
+                        <div class="form-group">
+                            <label for="tune-lots">Lots</label>
+                            <div class="input-group"><input type="number" id="tune-lots" class="strategy-number-input" min="1" max="50"></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="tune-bounce">Bounce-back</label>
+                            <div class="input-group"><input type="number" id="tune-bounce" class="strategy-number-input" min="1" max="999"><span class="input-addon">pts</span></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="tune-entry-timer">Entry timer</label>
+                            <div class="input-group"><input type="number" id="tune-entry-timer" class="strategy-number-input" min="1" max="120"><span class="input-addon">mins</span></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="tune-exit-timer">Exit timer</label>
+                            <div class="input-group"><input type="number" id="tune-exit-timer" class="strategy-number-input" min="1" max="120"><span class="input-addon">mins</span></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <h3>Trailing SL</h3>
+                    <div class="inputs-grid-2">
+                        <div class="form-group">
+                            <label for="tune-act">Activation points</label>
+                            <div class="input-group"><input type="number" id="tune-act" class="strategy-number-input" min="0" max="999"><span class="input-addon">pts</span></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="tune-act-off">SL offset on activation</label>
+                            <div class="input-group"><input type="number" id="tune-act-off" class="strategy-number-input" min="0" max="999" step="0.5"><span class="input-addon">pts</span></div>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-top:12px;">
+                        <label for="tune-gap">Trail gap</label>
+                        <div class="input-group" style="width:150px;"><input type="number" id="tune-gap" class="strategy-number-input" min="0.5" max="999"><span class="input-addon">pts</span></div>
+                    </div>
+                    <div class="form-group" style="margin-top:12px;">
+                        <span class="group-label">Initial SL source</span>
+                        <div class="sl-source-cards">
+                            <label class="sl-source-card"><input type="radio" name="tune-init-sl" value="telegram"><div class="source-card-content"><span>📩 Telegram</span></div></label>
+                            <label class="sl-source-card"><input type="radio" name="tune-init-sl" value="points_from_ltp"><div class="source-card-content"><span>📏 Points</span></div></label>
+                        </div>
+                        <div id="tune-init-pts-row" class="sub-panel" style="display:none;margin-top:8px;">
+                            <div class="input-group" style="width:150px;"><input type="number" id="tune-init-pts" class="strategy-number-input" min="1" max="999"><span class="input-addon">pts</span></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <h3>SL Mode</h3>
+                    <div class="sl-source-cards">
+                        <label class="sl-source-card"><input type="radio" name="tune-sl-mode" value="signal_trail"><div class="source-card-content"><span>📈 Trailing</span></div></label>
+                        <label class="sl-source-card"><input type="radio" name="tune-sl-mode" value="snap_levels"><div class="source-card-content"><span>🔒 Snap</span></div></label>
+                    </div>
+                    <div id="tune-snap-panel" style="display:none;margin-top:12px;">
+                        <div class="inputs-grid-2">
+                            <div class="form-group"><label>L1 snap / offset</label><div class="input-group"><input type="number" id="tune-snap-l1-pts" class="strategy-number-input"><input type="number" id="tune-snap-l1-off" class="strategy-number-input"></div></div>
+                            <div class="form-group"><label>L2 snap / offset</label><div class="input-group"><input type="number" id="tune-snap-l2-pts" class="strategy-number-input"><input type="number" id="tune-snap-l2-off" class="strategy-number-input"></div></div>
+                            <div class="form-group"><label>L3 snap / offset</label><div class="input-group"><input type="number" id="tune-snap-l3-pts" class="strategy-number-input"><input type="number" id="tune-snap-l3-off" class="strategy-number-input"></div></div>
+                            <div class="form-group"><label>Trail gap after L3</label><div class="input-group"><input type="number" id="tune-snap-gap" class="strategy-number-input" min="0.5" max="999" step="0.5"><span class="input-addon">pts</span></div></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" id="btn-close-tune-2">Close</button>
+                    <button class="btn btn-primary" id="btn-tune-save">Apply to This Trade</button>
+                </div>
+                <p class="tune-note">⚡ Pending entries only — filled positions keep their original mode. Survives restart.</p>
+            </div>
+        </div>
+    </div>
+
     <!-- ── Settings Modal ── -->
     <div class="modal-overlay" id="settings-modal" style="display:none;">
         <div class="modal">

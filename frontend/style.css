@@ -543,9 +543,33 @@ header {
     background: rgba(239, 68, 68, 0.15);
     border-color: #ef4444;
 }
-.btn-cancel-pending:disabled {
-    opacity: 0.5;
+.btn-cancel-pending:disabled {    opacity: 0.5;
     cursor: not-allowed;
+}
+
+.btn-tune-pending {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(96, 165, 250, 0.4);
+    background: transparent;
+    color: #60a5fa;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.btn-tune-pending:hover {
+    background: rgba(96, 165, 250, 0.15);
+    border-color: #60a5fa;
+}
+
+.tune-note {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 12px;
+    text-align: center;
+    line-height: 1.4;
 }
 
 .signal-details {

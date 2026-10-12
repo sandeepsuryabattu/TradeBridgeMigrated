@@ -50,6 +50,7 @@ from .config import Config
 from .trade_manager import TradeManager
 from .telegram_listener import TelegramListener
 from . import database as db
+from .order_tune import validate_patch, apply_patch, tune_to_json, summary as tune_summary
 
 if not Config.API_TOKEN:
     _log_no_token = logging.getLogger(__name__)
@@ -889,6 +890,75 @@ async def cancel_pending_order(trade_id: int):
     else:
         result = await manager.paper_trader.cancel_pending_order(trade_id)
     return result
+
+
+class TuneRequest(BaseModel):
+    trade_id: int
+    lots: Optional[int] = None
+    bouncePoints: Optional[float] = None
+    activationPoints: Optional[float] = None
+    activationSLOffset: Optional[float] = None
+    trailGap: Optional[float] = None
+    entryTimerMins: Optional[int] = None
+    exitTimerMins: Optional[int] = None
+    signalTrailInitialSL: Optional[str] = None
+    signalTrailInitialSLPoints: Optional[float] = None
+    slMode: Optional[str] = None
+    snapLevels: Optional[list] = None
+    snapTrailAfterL3: Optional[bool] = None
+    snapTrailGap: Optional[float] = None
+
+
+def _find_pending_order(trade_id: int):
+    """Find a live pending order in either engine (mode may have flipped)."""
+    for engine in (manager.paper_trader, manager.real_trader):
+        for order in list(engine._pending_orders):
+            if order.get("trade_id") == trade_id:
+                return engine, order
+    return None, None
+
+
+@app.post("/api/pending/tune", dependencies=[Depends(require_api_token)])
+async def tune_pending_order(req: TuneRequest):
+    """Retune ONE pending trade's strategy snapshot (lots, bounce, trail, timers).
+
+    Only pending orders — filled/open positions keep their original mode.
+    Validates the order is still pending at apply time (fill race safe).
+    """
+    clean, errors = validate_patch(req.dict(exclude={"trade_id"}))
+    if errors:
+        return {"status": "error", "message": "; ".join(errors)}
+    engine, order = _find_pending_order(req.trade_id)
+    if order is None:
+        return {"status": "error",
+                "message": "Order not pending (filled, expired or cancelled?) — tune applies to pending entries only"}
+    if str(order.get("status")) != "pending":
+        return {"status": "error", "message": f"Order is {order.get('status')} — tune applies to pending entries only"}
+    try:
+        tune = apply_patch(order, clean)
+    except Exception:
+        log.exception("tune_pending_order: apply failed")
+        return {"status": "error", "message": "Tune failed — see logs"}
+    order["tune_json"] = tune_to_json(tune)
+    try:
+        await db.update_trade(req.trade_id, {"quantity": order["quantity"], "tune_json": order["tune_json"]})
+        if order.get("pending_order_id"):
+            await db.update_pending_order(order["pending_order_id"],
+                                          {"quantity": order["quantity"], "tune_json": order["tune_json"]})
+    except Exception:
+        log.exception("tune_pending_order: db persist failed")
+        return {"status": "error", "message": "Tune applied in memory but DB persist failed"}
+    await ws_manager.broadcast({"type": "order_update", "data": {
+        "id": req.trade_id,
+        "signal_id": order.get("signal_id"),
+        "status": "pending",
+        "status_note": f"Tuned: {tune_summary(tune)}",
+        "quantity": order["quantity"],
+        "tune": tune,
+        "tune_json": order["tune_json"],
+    }})
+    return {"status": "ok", "trade_id": req.trade_id, "tune": tune,
+            "quantity": order["quantity"], "summary": tune_summary(tune)}
 
 
 @app.get("/api/balance")

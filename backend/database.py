@@ -23,7 +23,7 @@ _ALLOWED_TRADE_FIELDS = {
     "notes", "trigger_price", "price", "quantity", "min_ltp",
     "exit_price", "entry_label", "closed_at", "exit_reason",
     "kotak_order_id", "entry_timer_mins", "exit_timer_mins",
-    "entry_slippage", "exit_slippage",
+    "entry_slippage", "exit_slippage", "tune_json",
 }
 
 # [FIX #7, #2, #14] expanded to cover all SL state + price-side confirmation fields
@@ -45,7 +45,7 @@ _ALLOWED_POSITION_FIELDS = {
 
 _ALLOWED_PENDING_ORDER_FIELDS = {
     "status", "fill_price", "fill_time", "order_id", "notes",
-    "trigger_price", "price", "quantity",
+    "trigger_price", "price", "quantity", "tune_json",
     # [FIX #14] price-side confirmation state
     "price_side_candidate", "price_side_confirm_count",
 }
@@ -263,6 +263,9 @@ async def init_db():
         ("positions",       "snap_trail_after_l3",      "INTEGER DEFAULT 0"),
         # Phase 3: segment persists so post-restart exits use the right exchange
         ("positions",       "exchange_segment",         "TEXT DEFAULT 'bse_fo'"),
+        # Per-trade tune snapshot (order_tune.py) — survives restart via rehydrate
+        ("trades",          "tune_json",                "TEXT"),
+        ("pending_orders",  "tune_json",                "TEXT"),
     ]
 
     for table, col, typedef in migrations:
@@ -470,9 +473,10 @@ async def save_trade(signal_id: int, trade_data: dict) -> int:
            (signal_id, mode, exchange_segment, trading_symbol, transaction_type,
             order_type, quantity, price, trigger_price, status, order_id, min_ltp,
             "notes", "entry_label", "exit_reason",
-            "entry_timer_mins", "exit_timer_mins", "entry_slippage", "exit_slippage"
+            "entry_timer_mins", "exit_timer_mins", "entry_slippage", "exit_slippage",
+            "tune_json"
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             signal_id,
             trade_data.get("mode", "paper"),
@@ -493,6 +497,7 @@ async def save_trade(signal_id: int, trade_data: dict) -> int:
             trade_data.get("exit_timer_mins"),
             trade_data.get("entry_slippage"),
             trade_data.get("exit_slippage"),
+            trade_data.get("tune_json"),
         ),
     )
     await db.commit()
@@ -643,8 +648,8 @@ async def save_pending_order(signal_id: int, trade_id: int, order_data: dict) ->
         """INSERT INTO pending_orders
            (signal_id, trade_id, mode, trading_symbol, strike, option_type,
             quantity, price, trigger_price, status, order_id, notes,
-            price_side_candidate, price_side_confirm_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            price_side_candidate, price_side_confirm_count, tune_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             signal_id,
             trade_id,
@@ -660,6 +665,7 @@ async def save_pending_order(signal_id: int, trade_id: int, order_data: dict) ->
             order_data.get("notes"),
             order_data.get("price_side_candidate"),
             order_data.get("price_side_confirm_count", 0),
+            order_data.get("tune_json"),
         ),
     )
     await db.commit()
