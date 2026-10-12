@@ -535,6 +535,22 @@ class ContractMaster:
         return (2000 + int(m.group(1)), month, day)
 
     @staticmethod
+    def _is_mini_symbol(sym: str, und: str) -> bool:
+        """True for MCX mini contracts (M-prefix: GOLDM29OCT…, CRUDEOILM15OCT…).
+
+        Minis are a different product (different lot size/expiry) — the desk
+        trades standard, so resolution prefers standard and only falls back
+        to mini when no standard candidate exists.
+        """
+        rest = sym[len(und):] if sym.startswith(und) else sym
+        return len(rest) > 1 and rest[0] == "M" and rest[1].isdigit()
+
+    @classmethod
+    def _prefer_standard(cls, cands: list[dict], und: str) -> list[dict]:
+        std = [c for c in cands if not cls._is_mini_symbol(cls._sym_of(c), und)]
+        return std or cands
+
+    @staticmethod
     def _hint_matches(hint: date, sym_date) -> bool:
         """A symbol with day must match exactly; month-only must match month."""
         if sym_date is None:
@@ -606,6 +622,8 @@ class ContractMaster:
             # Futures carry no strike in our signals — nearest expiry match.
             # Only accept non-option rows; NEVER fall back to a CE/PE row
             # (that would buy the wrong instrument with real money).
+            # Standard product first (minis only as fallback).
+            cands = self._prefer_standard(cands, und)
             expiry = self._nearest_expiry(cands)
             pool = [c for c in cands if not expiry or str(
                 c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")).strip() == expiry]
@@ -616,6 +634,7 @@ class ContractMaster:
             return None
 
         # OPT: strike + type + expiry (signal hint wins, else nearest).
+        # Minis excluded first (standard desk product; mini only as fallback).
         try:
             want = int(float(str(sig.get("strike") or "")))
         except (ValueError, TypeError):
@@ -625,6 +644,7 @@ class ContractMaster:
         if not cands:
             log.warning("No contract for %s %s %s (%s)", und, want, opt, segment)
             return None
+        cands = self._prefer_standard(cands, und)
         hint = self._expiry_hint_to_date(str(sig.get("expiry") or ""))
         if hint is not None:
             from datetime import date as _date

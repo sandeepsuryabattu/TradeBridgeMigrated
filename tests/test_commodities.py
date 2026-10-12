@@ -63,6 +63,26 @@ class TestCommodityRouting:
         assert ContractMaster._symbol_expiry("NIFTY26OCT22450CE", "NIFTY") == (2026, 10, None)
         assert ContractMaster._symbol_expiry("NIFTY26O1322450CE", "NIFTY") == (2026, 10, 13)
 
+    def test_standard_preferred_over_mini(self):
+        from backend.contract_master import ContractMaster
+        cm = ContractMaster()
+        rows = [
+            {"pTrdSymbol": "GOLDM29OCT26143500CE", "pOptionType": "CE",
+             "dStrikePrice;": "14350000", "pExpiryDate": "1795823999", "lLotSize": "100"},
+            {"pTrdSymbol": "GOLD30OCT26143500CE", "pOptionType": "CE",
+             "dStrikePrice;": "14350000", "pExpiryDate": "1793404799", "lLotSize": "1"},
+        ]
+        cm._segments["mcx_fo"] = rows
+        out = cm.resolve({"kind": "OPT", "underlying": "GOLD", "strike": "143500",
+                          "option_type": "CE", "exchange_segment": "mcx_fo", "expiry": None})
+        assert out["trading_symbol"] == "GOLD30OCT26143500CE"
+        assert out["lot_size"] == "1"
+        # Mini-only universe still resolves (fallback, never None)
+        cm._segments["mcx_fo"] = [rows[0]]
+        out = cm.resolve({"kind": "OPT", "underlying": "GOLD", "strike": "143500",
+                          "option_type": "CE", "exchange_segment": "mcx_fo", "expiry": None})
+        assert out["trading_symbol"] == "GOLDM29OCT26143500CE"
+
     def test_mcx_in_multi_segments(self):
         from backend.contract_master import ContractMaster
         assert "mcx_fo" in ContractMaster.MULTI_SEGMENTS
