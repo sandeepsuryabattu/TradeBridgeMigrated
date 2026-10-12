@@ -557,7 +557,7 @@ class ContractMaster:
                      if d is not None and d >= _date.today()]
             if not dated:
                 raws = sorted({str(c.get("pExpiryDate", "") or c.get("expiry_date", "")
-                                   or c.get("expiry", ""))[:24] for c in cands}[:5])
+                                   or c.get("expiry", ""))[:24] for c in cands})[:5]
                 log.warning("No dated rows for %s %s %s — refusing (hint %s, raw=%s)",
                             und, want, opt, sig.get("expiry"), raws)
                 return None
