@@ -302,13 +302,26 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
         remaining = stripped[opt_match.end():]
         price_kw = re.search(r"price|buy|sell|entry|@|cmp", remaining, re.IGNORECASE)
         if not price_kw:
-            # Terse MCX desk format: "CRUDEOIL 9000 PE 186" — trailing bare
-            # number is the entry. Index signals still require a price
-            # keyword (avoids turning chatter into trades).
+            # Terse MCX desk format: "CRUDEOIL 9000 PE 186" or
+            # "CRUDEOIL 9000 PE 180-190" — first bare number(s) right after
+            # the strike are the entry (anchored: a trailing SL like
+            # "... 186 SL 150" must not become the entry). Index signals
+            # still require a price keyword (avoids turning chatter
+            # into trades).
             if segment == MCX_SEGMENT:
-                bare = re.search(r"(-?\d{1,6}(?:\.\d+)?)\s*$", remaining.strip())
-                if bare:
-                    px = float(bare.group(1))
+                rest = remaining.strip()
+                m2 = re.match(
+                    r"(-?\d{1,6}(?:\.\d+)?)\s*[-/ ]\s*(-?\d{1,6}(?:\.\d+)?)", rest)
+                if m2:
+                    lo, hi = float(m2.group(1)), float(m2.group(2))
+                    if hi < lo:
+                        lo, hi = hi, lo
+                    return _finish_opt(stripped, lower, canonical, segment,
+                                      strike, option_type, lo, hi,
+                                      _detect_variant(stripped))
+                m1 = re.match(r"(-?\d{1,6}(?:\.\d+)?)", rest)
+                if m1:
+                    px = float(m1.group(1))
                     return _finish_opt(stripped, lower, canonical, segment,
                                       strike, option_type, px, px,
                                       _detect_variant(stripped))

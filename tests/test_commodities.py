@@ -25,6 +25,26 @@ class TestCommodityParser:
         assert s.exchange_segment == "mcx_fo"
         assert s.entry_low == 186 and s.entry_high == 186
 
+    def test_crude_terse_range_formats(self):
+        from backend.instruments import parse_instrument_signal
+        for text in ("CRUDEOIL 9000 PE 180-190",
+                     "CRUDEOIL 9000 PE 180/190",
+                     "CRUDEOIL 9000 PE 180 190",
+                     "CRUDEOIL 9000 PE 190-180"):
+            s = parse_instrument_signal(text)
+            assert s.status == "valid", (text, s.reason)
+            assert (s.entry_low, s.entry_high) == (180, 190), text
+
+    def test_crude_terse_entry_plus_sl(self):
+        from backend.instruments import parse_instrument_signal
+        s = parse_instrument_signal("CRUDEOIL 9000 PE 186 SL 150")
+        assert s.status == "valid", s.reason
+        assert (s.entry_low, s.entry_high) == (186, 186)
+        assert s.stoploss == 150
+        r = parse_instrument_signal("CRUDEOIL 9000 PE 180-190 SL 150")
+        assert r.status == "valid" and (r.entry_low, r.entry_high) == (180, 190)
+        assert r.stoploss == 150
+
     def test_gold_and_naturalgas(self):
         from backend.instruments import parse_instrument_signal
         g = parse_instrument_signal("GOLD 98000 CE price 500-520 SL 400")
