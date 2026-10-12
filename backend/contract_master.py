@@ -549,8 +549,12 @@ class ContractMaster:
             return None
         hint = self._expiry_hint_to_date(str(sig.get("expiry") or ""))
         if hint is not None:
+            from datetime import date as _date
             dated = [(c, self._row_expiry_date(c)) for c in cands]
-            dated = [(c, d) for c, d in dated if d is not None]
+            # Drop undated rows AND stale past rows (Kotak masters contain
+            # ancient placeholder expiries, e.g. 2016 — live bug 2026-10-12).
+            dated = [(c, d) for c, d in dated
+                     if d is not None and d >= _date.today()]
             if not dated:
                 log.warning("No dated rows for %s %s %s — refusing (hint %s)",
                             und, want, opt, sig.get("expiry"))
@@ -558,8 +562,9 @@ class ContractMaster:
             dated.sort(key=lambda cd: (abs((cd[1] - hint).days), cd[1]))
             best, best_date = dated[0]
             if best_date != hint:
-                log.warning("Hint %s unmatched (closest %s) — refusing wrong-expiry fill",
-                            hint, best_date)
+                avail = sorted({d.isoformat() for _, d in dated})
+                log.warning("Hint %s unmatched (available %s) — refusing wrong-expiry fill",
+                            hint, avail)
                 return None
             return _out(best)
         expiry = self._nearest_expiry(cands)
