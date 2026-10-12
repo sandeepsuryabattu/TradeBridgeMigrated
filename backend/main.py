@@ -34,6 +34,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta, time as dt_time
 from typing import Optional
@@ -76,6 +77,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [pid=%(process)d] [%(name)s] %(levelname)s: %(message)s",
 )
+# Noisy third-party chatter (telethon sync diffs, etc.) goes to stderr,
+# which PM2 routes to error.log — keep it at WARNING so the error log
+# only holds real problems. Rotation is capped by pm2-logrotate anyway.
+for _noisy in ("telethon", "telethon.client.updates"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 # ── Strategy persistence ──────────────────────────────────────────────────────
@@ -177,9 +183,20 @@ _main_loop: Optional[asyncio.AbstractEventLoop] = None
 _tick_drain_task: list[asyncio.Task] = []
 
 
+# Throttled drop counter so a full tick queue logs one line per minute
+# instead of one line (with full tick payloads) per dropped tick.
+_tick_drop_count: int = 0
+_tick_drop_logged_at: float = 0.0
+
+
 def enqueue_tick(token, ltp, data):
-    """Thread-safe: push a tick onto the async queue from a Kotak SDK thread."""
-    global _main_loop
+    """Thread-safe: push a tick onto the async queue from a Kotak SDK thread.
+
+    Drops (latest-wins) when full — LTP consumers only need the newest tick.
+    Never logs payloads: at tick rates, per-drop logging is what filled the
+    disk with multi-GB error logs.
+    """
+    global _main_loop, _tick_drop_count, _tick_drop_logged_at
     if _main_loop is None:
         return
     try:
@@ -193,11 +210,16 @@ def enqueue_tick(token, ltp, data):
     except RuntimeError:
         pass  # Event loop closed during shutdown
     except asyncio.QueueFull:
-        log.warning(
-            "Tick queue full — tick dropped (token=%s ltp=%s). "
-            "Increase maxsize or reduce DB write frequency.",
-            token, ltp,
-        )
+        _tick_drop_count += 1
+        now = time.monotonic()
+        if now - _tick_drop_logged_at >= 60:
+            log.warning(
+                "Tick queue full — dropping ticks (%d dropped in last 60s). "
+                "Increase maxsize or reduce DB write frequency.",
+                _tick_drop_count,
+            )
+            _tick_drop_count = 0
+            _tick_drop_logged_at = now
 
 
 async def tick_consumer():

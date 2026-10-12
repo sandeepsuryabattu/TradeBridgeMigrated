@@ -23,6 +23,7 @@ except ImportError:
     pass
 
 from . import database as db
+from .config import Config
 
 log = logging.getLogger(__name__)
 
@@ -643,5 +644,7 @@ class MarketFeed:
             return
         ticks_to_save = list(self._tick_buffer)
         self._tick_buffer.clear()
+        if not Config.SAVE_TICKS:
+            return  # Tick persistence disabled — live trading uses in-memory LTP
         if self._loop and not self._loop.is_closed():
             self._loop.create_task(db.save_ticks_batch(ticks_to_save))

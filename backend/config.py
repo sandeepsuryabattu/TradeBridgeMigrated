@@ -10,6 +10,24 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 log = logging.getLogger(__name__)
 
 
+def _int_env(name: str, default: int) -> int:
+    """Read an int env var without crashing the import on bad values."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        log.warning("Invalid %s=%r — falling back to %d", name, os.getenv(name), default)
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    """Read a float env var without crashing the import on bad values."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        log.warning("Invalid %s=%r — falling back to %s", name, os.getenv(name), default)
+        return default
+
+
 class Config:
     # Kotak Neo
     KOTAK_CONSUMER_KEY = os.getenv("KOTAK_CONSUMER_KEY", "")
@@ -26,8 +44,13 @@ class Config:
 
     # Trading
     TRADING_MODE = os.getenv("TRADING_MODE", "paper")  # paper | real
-    DEFAULT_LOT_SIZE = int(os.getenv("DEFAULT_LOT_SIZE", "20"))
-    MAX_RISK_PER_TRADE = float(os.getenv("MAX_RISK_PER_TRADE", "5000"))
+    DEFAULT_LOT_SIZE = _int_env("DEFAULT_LOT_SIZE", 20)
+    MAX_RISK_PER_TRADE = _float_env("MAX_RISK_PER_TRADE", 5000.0)
+
+    # Tick persistence (ticks.db) — False by default. Live trading uses
+    # in-memory LTP only; ticks.db is write-only backtest data that nothing
+    # in the bot reads. Set SAVE_TICKS=1 only when backtesting.
+    SAVE_TICKS = os.getenv("SAVE_TICKS", "0") == "1"
 
     # Server
     API_HOST = os.getenv("API_HOST", "0.0.0.0")
