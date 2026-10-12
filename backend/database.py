@@ -230,6 +230,9 @@ async def init_db():
         # the exact product (mini vs standard) after a restart.
         ("signals",   "variant",                  "TEXT DEFAULT 'standard'"),
         ("signals",   "exchange_segment",         "TEXT DEFAULT 'bse_fo'"),
+        # Exact resolved contract per signal — lets LTP backfill skipped
+        # signals (no trade row) without cross-expiry bleed.
+        ("signals",   "trading_symbol",           "TEXT"),
         # positions table — SL config fields
         ("positions", "sl_mode",                  "TEXT DEFAULT 'fixed'"),
         ("positions", "sl_gap",                   "REAL DEFAULT 0"),
@@ -437,6 +440,27 @@ async def save_signal(message_id: int, parsed: dict) -> int:
     )
     await db.commit()
     return cursor.lastrowid
+
+
+_ALLOWED_SIGNAL_FIELDS = {
+    "status", "reason", "last_ltp", "trading_symbol", "variant",
+    "exchange_segment", "expiry",
+}
+
+
+async def update_signal(signal_id: int, updates: dict):
+    invalid = set(updates.keys()) - _ALLOWED_SIGNAL_FIELDS
+    if invalid:
+        raise ValueError(f"update_signal: disallowed fields: {invalid}")
+    if not updates:
+        return
+    db = await _get_db()
+    set_clauses = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [signal_id]
+    await db.execute(
+        f"UPDATE signals SET {set_clauses} WHERE id = ?", values
+    )
+    await db.commit()
 
 
 async def get_signals(limit: int = 100, date: str = None) -> list[dict]:
@@ -782,18 +806,22 @@ async def save_ticks_batch(ticks: list[dict]):
 
 
 async def update_signal_ltp(trading_symbol: str, ltp: float):
-    """Update last_ltp on the signal(s) that actually traded this contract.
+    """Update last_ltp on the signal card(s) for this exact contract.
 
-    Scoped by exact trading_symbol via the trades table — not by strike
-    suffix. Two expiries of one strike (NIFTY26O13… vs NIFTY26OCT…) used to
-    overwrite each other's cards (live bug: weekly showed the monthly LTP).
+    Scoped by exact trading_symbol — not by strike suffix. Two expiries
+    of one strike (NIFTY26O13… vs NIFTY26OCT…) used to overwrite each
+    other's cards (live bug: weekly showed the monthly LTP).
+
+    Covers skipped signals too (no trade row): their card still tracks
+    the contract while ticks flow.
     """
     db = await _get_db()
     await db.execute(
         """UPDATE signals SET last_ltp = ?
-           WHERE status = 'valid' AND id IN (
-               SELECT signal_id FROM trades WHERE trading_symbol = ?
+           WHERE status = 'valid' AND (
+               trading_symbol = ?
+               OR id IN (SELECT signal_id FROM trades WHERE trading_symbol = ?)
            )""",
-        (ltp, trading_symbol),
+        (ltp, trading_symbol, trading_symbol),
     )
     await db.commit()

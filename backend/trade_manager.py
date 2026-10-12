@@ -244,6 +244,15 @@ class TradeManager:
 
         signal_dict["created_at"] = _utc_now()
         signal_dict["live_ltp"]   = initial_ltp
+        # Persist the exact resolved contract so LTP backfill and resubscribe
+        # cover this signal even when it never becomes a trade (skipped).
+        try:
+            await db.update_signal(signal_id, {
+                "trading_symbol": signal_dict.get("trading_symbol"),
+                "exchange_segment": signal_dict.get("exchange_segment"),
+            })
+        except Exception:
+            log.exception("process_message: failed to persist signal contract")
         await self._broadcast("new_signal", signal_dict)
 
         if signal.status != "valid":
