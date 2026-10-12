@@ -12,6 +12,34 @@ import logging
 
 log = logging.getLogger(__name__)
 
+# Bad-tick guard: a single tick diving more than this fraction below the
+# last sane price is exchange/feed junk (e.g. post-close prints), never a
+# real move — real crashes print intermediate ticks. Dropping it protects
+# open positions from instant fake SL triggers. Upside spikes are never
+# dropped (trail ratchet on a spike is harmless; a cap could freeze the
+# reference forever on a genuine gap).
+MAX_SINGLE_TICK_DROP = 0.5
+
+
+def sane_position_tick(pos: dict, ltp: float) -> bool:
+    """True when ltp is safe to apply to an open position."""
+    try:
+        px = float(ltp)
+    except (ValueError, TypeError):
+        return False
+    if px <= 0:
+        return False
+    ref = pos.get("current_price") or pos.get("max_ltp") or pos.get("entry_price") or 0
+    try:
+        ref = float(ref)
+    except (ValueError, TypeError):
+        return True
+    if ref > 0 and px < ref * (1.0 - MAX_SINGLE_TICK_DROP):
+        log.warning("Bad tick dropped for %s: %s vs last sane %s",
+                    pos.get("trading_symbol"), px, ref)
+        return False
+    return True
+
 # Tunable per-trade fields (subset of the global strategy).
 TUNE_FIELDS = (
     "lots", "lot_multiplier",

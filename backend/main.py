@@ -280,7 +280,7 @@ async def tick_consumer():
                     "type": "instrument_ltp",
                     "data": {"symbol": symbol, "ltp": ltp},
                 })
-            if symbol:
+            if symbol and ltp > 0:
                 await db.update_signal_ltp(symbol, ltp)
             tick_queue.task_done()
         except asyncio.TimeoutError:

@@ -1,6 +1,8 @@
 """Tests for per-trade tuning (order_tune.py)."""
 import json
 
+import pytest
+
 
 def _strategy():
     return {
@@ -97,3 +99,37 @@ def test_tune_from_order_legacy_fallback():
     t = tune_from_order({"quantity": 300})  # pre-tune rows: no lots/multiplier
     assert t["lot_multiplier"] == 1 and t["lots"] == 300
     assert t["sl_mode"] == "signal_trail"
+
+
+def test_sane_position_tick():
+    from backend.order_tune import sane_position_tick
+    pos = {"trading_symbol": "X", "entry_price": 100.0, "current_price": 105.0}
+    assert sane_position_tick(pos, 104.0) is True
+    assert sane_position_tick(pos, 200.0) is True  # spikes never dropped
+    assert sane_position_tick(pos, 0.1) is False  # post-close junk
+    assert sane_position_tick(pos, 0) is False
+    assert sane_position_tick(pos, 52.5) is True  # exactly -50% passes
+    assert sane_position_tick(pos, 52.0) is False
+    assert sane_position_tick({"entry_price": 100.0}, 40.0) is False
+    assert sane_position_tick({}, 40.0) is True  # no reference: accept
+
+
+@pytest.mark.asyncio
+async def test_paper_position_ignores_junk_tick():
+    from unittest.mock import AsyncMock, patch
+    from backend.paper_trader import PaperTrader
+    pt = PaperTrader()
+    pos = {"id": 1, "trading_symbol": "CRUDEOIL15OCT264300PE", "status": "open",
+           "entry_price": 105.0, "current_price": 104.0, "quantity": 100,
+           "max_ltp": 106.0, "trailing_sl": 90.0, "pnl": 0,
+           "sl_mode": "signal_trail", "activation_points": 6.0,
+           "activation_sl_offset": 2.0, "trail_gap": 4.0,
+           "signal_trail_initial_sl": "points_from_ltp",
+           "signal_trail_initial_sl_points": 8.0}
+    with patch("backend.database.update_position", new=AsyncMock()), \
+         patch("backend.database.update_trade", new=AsyncMock()):
+        await pt._process_position_tick(pos, 0.1)
+        assert pos["current_price"] == 104.0
+        assert pos["status"] == "open"
+        await pt._process_position_tick(pos, 103.0)
+        assert pos["current_price"] == 103.0

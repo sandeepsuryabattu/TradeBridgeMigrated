@@ -39,7 +39,7 @@ from typing import Optional, Callable
 from zoneinfo import ZoneInfo
 
 from . import database as db
-from .order_tune import build_tune, tune_to_json, parse_tune_json, TUNE_FIELDS
+from .order_tune import build_tune, tune_to_json, parse_tune_json, TUNE_FIELDS, sane_position_tick
 
 log = logging.getLogger(__name__)
 
@@ -1254,6 +1254,9 @@ class RealTrader:
         Software SL: when ltp drops to/below trailing_sl we fire an IOC SELL.
         """
         if ltp <= 0:
+            return
+
+        if not sane_position_tick(pos, ltp):
             return
 
         pos["current_price"] = ltp

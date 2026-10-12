@@ -36,7 +36,7 @@ from enum import Enum
 from typing import Optional, Callable
 
 from . import database as db
-from .order_tune import build_tune, tune_to_json, parse_tune_json, TUNE_FIELDS
+from .order_tune import build_tune, tune_to_json, parse_tune_json, TUNE_FIELDS, sane_position_tick
 
 log = logging.getLogger(__name__)
 
@@ -460,6 +460,9 @@ class PaperTrader:
         (breakeven+ level), not at current LTP.
         """
         if ltp <= 0:
+            return
+
+        if not sane_position_tick(pos, ltp):
             return
 
         pos["current_price"] = ltp
