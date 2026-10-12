@@ -556,8 +556,10 @@ class ContractMaster:
             dated = [(c, d) for c, d in dated
                      if d is not None and d >= _date.today()]
             if not dated:
-                log.warning("No dated rows for %s %s %s — refusing (hint %s)",
-                            und, want, opt, sig.get("expiry"))
+                raws = sorted({str(c.get("pExpiryDate", "") or c.get("expiry_date", "")
+                                   or c.get("expiry", ""))[:24] for c in cands}[:5])
+                log.warning("No dated rows for %s %s %s — refusing (hint %s, raw=%s)",
+                            und, want, opt, sig.get("expiry"), raws)
                 return None
             dated.sort(key=lambda cd: (abs((cd[1] - hint).days), cd[1]))
             best, best_date = dated[0]
