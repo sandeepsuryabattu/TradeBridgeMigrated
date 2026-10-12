@@ -700,6 +700,24 @@ async def delete_pending_order(order_id: int):
     await db.commit()
 
 
+async def delete_orphan_pending_orders() -> int:
+    """Delete pending_orders rows whose trade already left 'pending'.
+
+    Crashes between fill/expiry and row-delete leave orphans that rehydrate
+    would otherwise reload as live orders on every boot. Only touches rows
+    whose trade is verifiably non-pending (or missing) — never live ones.
+    Returns the number of rows deleted.
+    """
+    db = await _get_db()
+    cursor = await db.execute(
+        """DELETE FROM pending_orders
+           WHERE status = 'pending'
+             AND trade_id NOT IN (SELECT id FROM trades WHERE status = 'pending')"""
+    )
+    await db.commit()
+    return cursor.rowcount if cursor.rowcount is not None else 0
+
+
 # ── Tick Storage (for backtesting) ──
 
 async def save_tick(tick_data: dict):

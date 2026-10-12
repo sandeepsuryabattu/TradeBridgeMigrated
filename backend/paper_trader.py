@@ -918,6 +918,15 @@ class PaperTrader:
             self._open_positions.append(pos)
             restored_positions += 1
 
+        # Sweep crash-orphaned pending rows (trade already terminal) so they
+        # are never reloaded as live orders by a future restart.
+        try:
+            orphans = await db.delete_orphan_pending_orders()
+            if orphans:
+                log.info("Rehydrate: swept %d orphaned pending rows", orphans)
+        except Exception:
+            log.exception("Rehydrate: orphan sweep failed")
+
         if restored_orders or restored_positions:
             log.info(
                 "Rehydrated from DB: %d pending orders, %d open positions",
