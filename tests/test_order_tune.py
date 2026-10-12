@@ -56,11 +56,32 @@ def test_validate_patch_errors():
 def test_apply_patch_recomputes_quantity():
     from backend.order_tune import build_tune, apply_patch
     order = {"trade_id": 1, "status": "pending", "quantity": 500,
+             "entry_low": 180.0, "entry_high": 190.0, "price": 190.0,
+             "notes": "Paper BUY X @ 180.0-190.0 [bounce-back]",
              **build_tune(_strategy(), 5, 100)}
     tune = apply_patch(order, {"lots": 2, "bouncePoints": 7})
     assert order["quantity"] == 200
     assert order["bounce_points"] == 7
     assert tune["lots"] == 2
+
+
+def test_apply_patch_entry_range():
+    from backend.order_tune import build_tune, apply_patch
+    order = {"trade_id": 1, "status": "pending", "quantity": 500,
+             "entry_low": 180.0, "entry_high": 190.0, "price": 190.0,
+             "notes": "Paper BUY X @ 180.0-190.0 [bounce-back]",
+             **build_tune(_strategy(), 5, 100)}
+    apply_patch(order, {"entryLow": 170.0, "entryHigh": 185.0})
+    assert order["entry_low"] == 170.0 and order["entry_high"] == 185.0
+    assert order["price"] == 185.0
+    assert "@ 170.0-185.0" in order["notes"]
+    # Zero-width widens like placement
+    apply_patch(order, {"entryLow": 150.0, "entryHigh": 150.0})
+    assert order["entry_low"] == 148.0 and order["entry_high"] == 152.0
+    # Incoherent range rejected
+    import pytest
+    with pytest.raises(ValueError):
+        apply_patch(order, {"entryLow": 200.0, "entryHigh": 100.0})
 
 
 def test_tune_from_order_legacy_fallback():

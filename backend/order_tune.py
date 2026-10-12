@@ -22,6 +22,10 @@ TUNE_FIELDS = (
     "sl_mode", "snap_levels", "snap_trail_after_l3", "snap_trail_gap",
 )
 
+# Entry range lives on the order itself (entry_low/entry_high/price), not in
+# TUNE_FIELDS — but it travels through the same patch/validate path.
+ZERO_WIDTH_WIDEN = 2.0  # mirrors FIX #29 auto-widen at placement
+
 _DEFAULT_SNAPS = [
     {"snapPts": 10, "offset": 2},
     {"snapPts": 10, "offset": 2},
@@ -137,6 +141,8 @@ def validate_patch(patch: dict) -> tuple[dict, list[str]]:
 
     _take("lots", int, 1, 50, "Lots")
     _take("bouncePoints", float, 1, 999, "Bounce-back")
+    _take("entryLow", float, 0.05, 10000000, "Entry low")
+    _take("entryHigh", float, 0.05, 10000000, "Entry high")
     _take("activationPoints", float, 0, 999, "Activation points")
     _take("activationSLOffset", float, 0, 999, "Activation offset")
     _take("trailGap", float, 0.5, 999, "Trail gap")
@@ -187,11 +193,16 @@ _PATCH_MAP = {
     "snapTrailAfterL3": "snap_trail_after_l3",
 }
 
+import re as _re
+
 
 def apply_patch(order: dict, clean: dict) -> dict:
     """Apply a validated patch to a live pending-order dict (in place).
 
     Returns the refreshed tune dict. Recomputes quantity when lots change.
+    Entry range (entryLow/entryHigh) retargets the fill anchors + order
+    price and refreshes the notes range (rehydrate reads it back).
+    Raises ValueError on an incoherent range.
     """
     tune = tune_from_order(order)
     for req_key, tune_key in _PATCH_MAP.items():
@@ -201,13 +212,31 @@ def apply_patch(order: dict, clean: dict) -> dict:
     order["lots"] = tune["lots"]
     order["lot_multiplier"] = tune["lot_multiplier"]
     order["quantity"] = tune["lots"] * tune["lot_multiplier"]
+
+    if "entryLow" in clean or "entryHigh" in clean:
+        low = float(clean.get("entryLow", order.get("entry_low") or 0))
+        high = float(clean.get("entryHigh", order.get("entry_high") or 0))
+        if high < low:
+            raise ValueError("Entry high below entry low")
+        if low == high and low > 0:
+            low -= ZERO_WIDTH_WIDEN
+            high += ZERO_WIDTH_WIDEN
+        order["entry_low"] = low
+        order["entry_high"] = high
+        order["price"] = high
+        if order.get("notes"):
+            order["notes"] = _re.sub(r"@ [\d.]+-[\d.]+", f"@ {low}-{high}",
+                                     str(order["notes"]))
     return tune
 
 
-def summary(tune: dict) -> str:
+def summary(tune: dict, order: dict = None) -> str:
     """One-line human summary for toasts/broadcasts."""
     t = tune or {}
     mode = "Snap" if t.get("sl_mode") == "snap_levels" else "Trail"
-    return (f"{t.get('lots', 1)} lot(s) | {mode} | Bounce {t.get('bounce_points', 5)} | "
+    base = (f"{t.get('lots', 1)} lot(s) | {mode} | Bounce {t.get('bounce_points', 5)} | "
             f"Act {t.get('activation_points', 5)}/{t.get('activation_sl_offset', 0)} "
             f"Gap {t.get('trail_gap', 2)}")
+    if order is not None:
+        base += f" | Entry {order.get('entry_low', '?')}-{order.get('entry_high', '?')}"
+    return base

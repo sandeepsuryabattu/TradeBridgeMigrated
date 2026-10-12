@@ -292,7 +292,7 @@ function bindEventListeners() {
         const btn = e.target.closest('.btn-tune-pending');
         if (!btn) return;
         e.stopPropagation();
-        openTuneModal(parseInt(btn.dataset.tradeId));
+        openTuneModal(parseInt(btn.dataset.tradeId), parseInt(btn.dataset.signalId));
     });
 
     // Panel Toggle Logic
@@ -2619,13 +2619,16 @@ function tuneFromTrade(trade) {
     };
 }
 
-function openTuneModal(tradeId) {
+function openTuneModal(tradeId, signalId) {
     const trade = state.trades.find(t => (t.trade_id || t.id) === tradeId && t.status === 'pending');
     if (!trade) return toast('Order no longer pending — tune applies to pending entries only', 'warning');
+    const sig = signalId != null ? state.signals.find(s => s.id === signalId) : null;
     const t = tuneFromTrade(trade);
     $('#tune-trade-id').value = tradeId;
     $('#tune-modal-title').textContent = `🎚 Tune — ${trade.trading_symbol || ('trade #' + tradeId)}`;
     $('#tune-lots').value = t.lots;
+    $('#tune-entry-low').value = sig?.entry_low ?? trade.price ?? '';
+    $('#tune-entry-high').value = sig?.entry_high ?? trade.price ?? '';
     $('#tune-bounce').value = t.bouncePoints;
     $('#tune-act').value = t.activationPoints;
     $('#tune-act-off').value = t.activationSLOffset;
@@ -2668,6 +2671,8 @@ function bindTuneModal() {
         const body = {
             trade_id: tradeId,
             lots: parseInt($('#tune-lots').value),
+            entryLow: parseFloat($('#tune-entry-low').value),
+            entryHigh: parseFloat($('#tune-entry-high').value),
             bouncePoints: parseFloat($('#tune-bounce').value),
             activationPoints: parseFloat($('#tune-act').value),
             activationSLOffset: parseFloat($('#tune-act-off').value),

@@ -896,6 +896,8 @@ class TuneRequest(BaseModel):
     trade_id: int
     lots: Optional[int] = None
     bouncePoints: Optional[float] = None
+    entryLow: Optional[float] = None
+    entryHigh: Optional[float] = None
     activationPoints: Optional[float] = None
     activationSLOffset: Optional[float] = None
     trailGap: Optional[float] = None
@@ -936,15 +938,23 @@ async def tune_pending_order(req: TuneRequest):
         return {"status": "error", "message": f"Order is {order.get('status')} — tune applies to pending entries only"}
     try:
         tune = apply_patch(order, clean)
+    except ValueError as e:
+        return {"status": "error", "message": str(e)}
     except Exception:
         log.exception("tune_pending_order: apply failed")
         return {"status": "error", "message": "Tune failed — see logs"}
     order["tune_json"] = tune_to_json(tune)
     try:
-        await db.update_trade(req.trade_id, {"quantity": order["quantity"], "tune_json": order["tune_json"]})
+        await db.update_trade(req.trade_id, {"quantity": order["quantity"],
+                                             "price": order.get("price"),
+                                             "notes": order.get("notes"),
+                                             "tune_json": order["tune_json"]})
         if order.get("pending_order_id"):
             await db.update_pending_order(order["pending_order_id"],
-                                          {"quantity": order["quantity"], "tune_json": order["tune_json"]})
+                                          {"quantity": order["quantity"],
+                                           "price": order.get("price"),
+                                           "notes": order.get("notes"),
+                                           "tune_json": order["tune_json"]})
     except Exception:
         log.exception("tune_pending_order: db persist failed")
         return {"status": "error", "message": "Tune applied in memory but DB persist failed"}
@@ -952,13 +962,14 @@ async def tune_pending_order(req: TuneRequest):
         "id": req.trade_id,
         "signal_id": order.get("signal_id"),
         "status": "pending",
-        "status_note": f"Tuned: {tune_summary(tune)}",
+        "status_note": f"Tuned: {tune_summary(tune, order)}",
         "quantity": order["quantity"],
+        "price": order.get("price"),
         "tune": tune,
         "tune_json": order["tune_json"],
     }})
     return {"status": "ok", "trade_id": req.trade_id, "tune": tune,
-            "quantity": order["quantity"], "summary": tune_summary(tune)}
+            "quantity": order["quantity"], "summary": tune_summary(tune, order)}
 
 
 @app.get("/api/balance")
