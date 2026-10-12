@@ -424,6 +424,8 @@ async def lifespan(app: FastAPI):
                 # v3 indices channel (by name) — numeric scrip tokens stream
                 # empty pictures for indices (SENSEX header stuck at 0).
                 manager.market_feed.subscribe_index_name()
+                manager.market_feed.subscribe_index_name(
+                    key="SENSEX-BSE", name="SENSEX", exchange_segment="bse_cm")
                 await loop.run_in_executor(None, manager.download_contracts)
                 await manager.resubscribe_recent_signals(limit=20)
 
@@ -628,6 +630,8 @@ async def _restart_feed_with_resubscribe(reason: str):
     await asyncio.sleep(3)
     # v3 indices channel (by name) — see note at auto-login site above.
     manager.market_feed.subscribe_index_name()
+    manager.market_feed.subscribe_index_name(
+        key="SENSEX-BSE", name="SENSEX", exchange_segment="bse_cm")
     await manager.resubscribe_recent_signals(limit=20)
     log.info("feed restart (%s): complete", reason)
 
