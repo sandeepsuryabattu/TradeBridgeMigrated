@@ -72,6 +72,8 @@ const state = {
     mode: 'paper',
     lotSize: 1,
     strategy: {},
+    strategies: null, // {default: {...}, NIFTY: {...}} — server is source of truth
+    strategyScope: 'default', // modal editing scope: 'default' | 'NIFTY'
     tradeFilter: 'all',
     selectedDate: null,
     wsConnected: false,
@@ -390,8 +392,11 @@ function handleWSMessage(msg) {
                     state.signals.forEach(s => { if (s.last_ltp) s.live_ltp = s.last_ltp; });
                 }
                 updateStatusFromData(msg.data.status);
-                if (msg.data.strategy) {
-                    state.strategy = { ...STRATEGY_DEFAULTS, ...msg.data.strategy };
+                if (msg.data.status?.strategies) {
+                    applyStrategiesToState(msg.data.status.strategies);
+                    persistStrategy();
+                } else if (msg.data.strategy) {
+                    applyStrategiesToState(msg.data.strategy);
                     persistStrategy();
                 }
                 if (msg.data.status?.stop_trading != null) {
@@ -583,10 +588,17 @@ function handleWSMessage(msg) {
                     if (lotInput) lotInput.value = msg.data.lot_size;
                     toast(`Lot size updated to ${msg.data.lot_size}`, 'info');
                 }
-                if (msg.data.strategy) {
-                    state.strategy = { ...STRATEGY_DEFAULTS, ...msg.data.strategy };
+                if (msg.data.strategies) {
+                    applyStrategiesToState(msg.data.strategies);
                     persistStrategy();
-                    const s = state.strategy;
+                    const scope = msg.data.scope === 'NIFTY' ? 'NIFTY' : currentScope();
+                    const s = scopeConfig(scope);
+                    const bufLabel = s.bufferEnabled ? ` | Buffer: +/-${s.bufferPoints || 2}` : '';
+                    toast(`${scope === 'NIFTY' ? 'NIFTY' : 'Default'} strategy updated: ${s.lots || 1} lot(s) | Bounce: ${s.bouncePoints || 5}pts${bufLabel}`, 'info');
+                } else if (msg.data.strategy) {
+                    applyStrategiesToState(msg.data.strategy);
+                    persistStrategy();
+                    const s = scopeConfig(currentScope());
                     const bufLabel = s.bufferEnabled ? ` | Buffer: +/-${s.bufferPoints || 2}` : '';
                     toast(`Strategy updated: ${s.lots || 1} lot(s) | Bounce: ${s.bouncePoints || 5}pts${bufLabel}`, 'info');
                 }
@@ -637,8 +649,11 @@ async function fetchInitialData() {
                 const lotInput = $('#lot-input');
                 if (lotInput) lotInput.value = status.lot_size;
             }
-            if (status.strategy) {
-                state.strategy = { ...STRATEGY_DEFAULTS, ...status.strategy };
+            if (status.strategies) {
+                applyStrategiesToState(status.strategies);
+                persistStrategy();
+            } else if (status.strategy) {
+                applyStrategiesToState(status.strategy);
                 persistStrategy();
             }
             if (status.stop_trading != null) {
@@ -2099,16 +2114,49 @@ const STRATEGY_DEFAULTS = {
     snapTrailGap: 3.0,
 };
 
+function currentScope() {
+    return state.strategyScope === 'NIFTY' ? 'NIFTY' : 'default';
+}
+
+function scopeConfig(scope) {
+    const key = scope === 'NIFTY' ? 'NIFTY' : 'default';
+    const all = state.strategies || {};
+    return { ...STRATEGY_DEFAULTS, ...(all[key] || state.strategy || {}) };
+}
+
+function applyStrategiesToState(obj) {
+    // Accepts {default, NIFTY} or legacy flat {...} — always ends with both scopes.
+    if (!obj) return;
+    if (obj.default || obj.NIFTY) {
+        const d = { ...STRATEGY_DEFAULTS, ...(obj.default || {}) };
+        const n = { ...STRATEGY_DEFAULTS, ...(obj.NIFTY || obj.default || {}) };
+        state.strategies = { default: d, NIFTY: n };
+    } else {
+        const d = { ...STRATEGY_DEFAULTS, ...obj };
+        state.strategies = { default: { ...d }, NIFTY: { ...d } };
+    }
+    state.strategy = { ...scopeConfig(currentScope()) };
+}
+
 async function loadStrategy() {
     try {
-        const saved = localStorage.getItem('tradebridge_strategy');
+        const saved = localStorage.getItem('tradebridge_strategies');
         if (saved) {
-            state.strategy = { ...STRATEGY_DEFAULTS, ...JSON.parse(saved) };
+            applyStrategiesToState(JSON.parse(saved));
         } else {
-            state.strategy = { ...STRATEGY_DEFAULTS };
+            const legacy = localStorage.getItem('tradebridge_strategy');
+            if (legacy) {
+                applyStrategiesToState(JSON.parse(legacy));
+            } else {
+                state.strategies = { default: { ...STRATEGY_DEFAULTS }, NIFTY: { ...STRATEGY_DEFAULTS } };
+                state.strategy = { ...STRATEGY_DEFAULTS };
+            }
         }
+        const savedScope = localStorage.getItem('tradebridge_strategy_scope');
+        if (savedScope === 'NIFTY') state.strategyScope = 'NIFTY';
         updateStrategyButtonBadge();
     } catch {
+        state.strategies = { default: { ...STRATEGY_DEFAULTS }, NIFTY: { ...STRATEGY_DEFAULTS } };
         state.strategy = { ...STRATEGY_DEFAULTS };
     }
 
@@ -2116,8 +2164,11 @@ async function loadStrategy() {
         const res = await fetch(`${API_BASE}/api/settings`);
         if (res.ok) {
             const data = await res.json();
-            if (data.strategy) {
-                state.strategy = { ...STRATEGY_DEFAULTS, ...data.strategy };
+            if (data.strategies) {
+                applyStrategiesToState(data.strategies);
+                persistStrategy();
+            } else if (data.strategy) {
+                applyStrategiesToState(data.strategy);
                 persistStrategy();
             }
             if (data.lot_size != null) {
@@ -2136,7 +2187,17 @@ async function loadStrategy() {
 
 function persistStrategy() {
     try {
-        localStorage.setItem('tradebridge_strategy', JSON.stringify(state.strategy));
+        if (!state.strategies) {
+            const d = { ...STRATEGY_DEFAULTS, ...state.strategy };
+            state.strategies = { default: { ...d }, NIFTY: { ...d } };
+        } else {
+            // Keep alias in sync with the selected scope
+            state.strategies[currentScope()] = { ...STRATEGY_DEFAULTS, ...state.strategy };
+        }
+        localStorage.setItem('tradebridge_strategies', JSON.stringify(state.strategies));
+        localStorage.setItem('tradebridge_strategy_scope', currentScope());
+        // Legacy key for backward compat
+        localStorage.setItem('tradebridge_strategy', JSON.stringify(state.strategies.default));
     } catch (e) {
         console.warn('Could not persist strategy to localStorage:', e);
     }
@@ -2152,8 +2213,13 @@ function formatInitialSLSummary(s) {
 
 function renderCurrentStrategySummary() {
     const box = $('#strategy-current-summary');
+    const title = $('#strategy-current-title');
+    const note = $('#strategy-scope-note');
+    const scope = currentScope();
+    if (title) title.textContent = `Current Running Strategy — ${scope === 'NIFTY' ? 'NIFTY' : 'Default (all)'}`;
     if (!box) return;
-    const s = { ...STRATEGY_DEFAULTS, ...state.strategy };
+    const s = scopeConfig(scope);
+    const other = scopeConfig(scope === 'NIFTY' ? 'default' : 'NIFTY');
     const slModeLabel = s.slMode === 'snap_levels' ? '🔒 Snap Levels' : '📈 Trailing SL';
     const rows = [
         ['Lots', `${s.lots || 1}`],
@@ -2180,26 +2246,34 @@ function renderCurrentStrategySummary() {
     box.innerHTML = rows.map(([k, v]) =>
         `<div class="strategy-summary-item"><span class="strategy-summary-key">${k}</span><span class="strategy-summary-val">${v}</span></div>`
     ).join('');
+    if (note) {
+        const otherLabel = scope === 'NIFTY' ? 'Default' : 'NIFTY';
+        note.textContent = `${otherLabel}: ${other.lots || 1} lot(s) | ${other.slMode === 'snap_levels' ? 'Snap' : 'Trail'} | Bounce ${other.bouncePoints || 5}pts — switch tabs above to edit.`;
+    }
 }
 
 function updateStrategyButtonBadge() {
     const btn = $('#btn-strategy');
     if (!btn) return;
-    const s = state.strategy;
+    const d = scopeConfig('default');
+    const n = scopeConfig('NIFTY');
     const isDefault = (
-        s.lots === 1 &&
-        (s.bouncePoints || 5) === 5 &&
-        !s.bufferEnabled
+        d.lots === 1 &&
+        (d.bouncePoints || 5) === 5 &&
+        !d.bufferEnabled
     );
-    btn.classList.toggle('strategy-active', !isDefault);
-    const bufLabel = s.bufferEnabled ? ` | Buffer: ±${s.bufferPoints || 2}` : '';
-    btn.title = isDefault
-        ? 'Strategy Setup'
-        : `Strategy: ${s.lots} lot(s) | Bounce: ${s.bouncePoints || 5}pts${bufLabel}`;
+    const niftyCustom = JSON.stringify(d) !== JSON.stringify(n);
+    btn.classList.toggle('strategy-active', !isDefault || niftyCustom);
+    const bufLabel = d.bufferEnabled ? ` | Buffer: ±${d.bufferPoints || 2}` : '';
+    const niftyLabel = niftyCustom ? ` | NIFTY: ${n.lots} lot(s)` : '';
+    btn.title = (!isDefault || niftyCustom)
+        ? `Strategy: ${d.lots} lot(s) | Bounce: ${d.bouncePoints || 5}pts${bufLabel}${niftyLabel}`
+        : 'Strategy Setup';
 }
 
 function syncStrategyModalToState() {
-    const s = state.strategy;
+    const s = scopeConfig(currentScope());
+    $$('.strategy-scope-btn').forEach(b => b.classList.toggle('active', b.dataset.scope === currentScope()));
 
     // Lots
     const sel = $('#strategy-lots-select');
@@ -2286,6 +2360,15 @@ function populateLotDropdown() {
 }
 
 function bindStrategyModal() {
+    // Scope switching: Default vs NIFTY (bind once)
+    $$('.strategy-scope-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            state.strategyScope = btn.dataset.scope === 'NIFTY' ? 'NIFTY' : 'default';
+            // stash current form? No — switch scope and reload form from that scope
+            persistStrategyScopeOnly();
+            syncStrategyModalToState();
+        });
+    });
     // Tab switching event listeners (bind once)
     $$('.strategy-tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -2369,13 +2452,18 @@ function bindStrategyModal() {
 
 
     $('#btn-strategy-reset')?.addEventListener('click', () => {
+        const scope = currentScope();
+        if (!state.strategies) state.strategies = { default: { ...STRATEGY_DEFAULTS }, NIFTY: { ...STRATEGY_DEFAULTS } };
+        state.strategies[scope] = { ...STRATEGY_DEFAULTS };
         state.strategy = { ...STRATEGY_DEFAULTS };
         populateLotDropdown();
         syncStrategyModalToState();
-        const lotInput = $('#lot-input');
-        if (lotInput) lotInput.value = 1;
+        if (scope === 'default') {
+            const lotInput = $('#lot-input');
+            if (lotInput) lotInput.value = 1;
+        }
         persistStrategy();
-        toast('Strategy reset to defaults', 'info');
+        toast(`${scope === 'NIFTY' ? 'NIFTY' : 'Default'} strategy reset to defaults`, 'info');
     });
 
     $('#btn-strategy-save')?.addEventListener('click', async () => {
@@ -2439,7 +2527,8 @@ function bindStrategyModal() {
         const finalActivationPoints   = slMode === 'snap_levels' ? snapActPts   : activationPoints;
         const finalActivationSLOffset = slMode === 'snap_levels' ? snapActOff   : activationSLOffset;
 
-        state.strategy = {
+        const scope = currentScope();
+        const cfg = {
             lots, bouncePoints, bufferEnabled, bufferPoints,
             activationPoints: finalActivationPoints,
             activationSLOffset: finalActivationSLOffset,
@@ -2452,30 +2541,43 @@ function bindStrategyModal() {
             snapTrailAfterL3,
             snapTrailGap,
         };
+        if (!state.strategies) state.strategies = { default: { ...STRATEGY_DEFAULTS }, NIFTY: { ...STRATEGY_DEFAULTS } };
+        state.strategies[scope] = cfg;
+        state.strategy = { ...cfg };
         persistStrategy();
 
-        const lotInput = $('#lot-input');
-        if (lotInput) lotInput.value = lots;
+        if (scope === 'default') {
+            const lotInput = $('#lot-input');
+            if (lotInput) lotInput.value = lots;
+        }
 
         try {
             await fetch(`${API_BASE}/api/settings/strategy`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(state.strategy),
+                body: JSON.stringify({ scope, ...cfg }),
             });
         } catch { console.warn('Could not sync strategy to backend'); }
 
-        try {
-            await fetch(`${API_BASE}/api/settings/lot-size`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ lots }),
-            });
-        } catch { console.warn('Could not sync lot size to backend'); }
+        if (scope === 'default') {
+            try {
+                await fetch(`${API_BASE}/api/settings/lot-size`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ lots }),
+                });
+            } catch { console.warn('Could not sync lot size to backend'); }
+        }
 
         const bufLabel = bufferEnabled ? ` | Buffer: +/-${bufferPoints}` : '';
         const modeLabel = slMode === 'snap_levels' ? '🔒 Snap Levels' : '📈 Trailing SL';
-        toast(`Strategy saved: ${lots} lot(s) | ${modeLabel} | Bounce: ${bouncePoints}pts${bufLabel} | Entry slip: ${entrySlippage}pt`, 'success');
+        toast(`${scope === 'NIFTY' ? 'NIFTY' : 'Default'} strategy saved: ${lots} lot(s) | ${modeLabel} | Bounce: ${bouncePoints}pts${bufLabel} | Entry slip: ${entrySlippage}pt`, 'success');
         $('#strategy-modal').style.display = 'none';
     });
+}
+
+function persistStrategyScopeOnly() {
+    try {
+        localStorage.setItem('tradebridge_strategy_scope', currentScope());
+    } catch { /* ignore */ }
 }

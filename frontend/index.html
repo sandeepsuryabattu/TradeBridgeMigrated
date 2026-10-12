@@ -258,14 +258,19 @@
             <div class="modal-header">
                 <div class="modal-header-title">
                     <h2>🎯 Strategy Setup</h2>
-                    <p class="modal-header-subtitle">Configure entry criteria, position sizing, and stop-loss levels</p>
+                    <p class="modal-header-subtitle">Default applies to all — NIFTY can override with its own values</p>
                 </div>
                 <button class="modal-close" id="btn-close-strategy">&times;</button>
             </div>
             <div class="modal-body">
+                <div class="strategy-scope-tabs">
+                    <button class="strategy-scope-btn active" data-scope="default">Default (all)</button>
+                    <button class="strategy-scope-btn" data-scope="NIFTY">NIFTY</button>
+                </div>
                 <div class="strategy-current-box">
-                    <div class="strategy-current-title">Current Running Strategy</div>
+                    <div class="strategy-current-title" id="strategy-current-title">Current Running Strategy — Default</div>
                     <div class="strategy-current-grid" id="strategy-current-summary"></div>
+                    <div class="strategy-scope-note" id="strategy-scope-note"></div>
                 </div>
 
                 <!-- Tabs Navigation -->

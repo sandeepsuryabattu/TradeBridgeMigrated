@@ -102,23 +102,63 @@ STRATEGY_DEFAULTS = {
 }
 
 
-def load_strategy() -> dict:
-    """Load strategy from disk, falling back to defaults."""
+STRATEGY_SCOPES = ("default", "NIFTY")
+
+
+def _normalize_strategy(saved: dict) -> dict:
+    """Merge a single scope dict over STRATEGY_DEFAULTS."""
+    if not isinstance(saved, dict):
+        return dict(STRATEGY_DEFAULTS)
+    return {**STRATEGY_DEFAULTS, **saved}
+
+
+def load_strategies() -> dict:
+    """Load per-underlying strategies, falling back to defaults.
+
+    On-disk format is {"default": {...}, "NIFTY": {...}}.
+    Legacy flat files ({"lots": ...}) are migrated: both scopes start
+    as a copy of the old default so behaviour is unchanged until the
+    user saves a NIFTY override.
+    """
     try:
         if os.path.exists(STRATEGY_FILE):
             with open(STRATEGY_FILE) as f:
                 saved = json.load(f)
-                return {**STRATEGY_DEFAULTS, **saved}
+                if isinstance(saved, dict):
+                    if "default" in saved or "NIFTY" in saved:
+                        default = _normalize_strategy(saved.get("default", {}))
+                        nifty = _normalize_strategy(
+                            saved.get("NIFTY", saved.get("default", {}))
+                        )
+                        return {"default": default, "NIFTY": nifty}
+                    # Legacy flat file → same config for both scopes
+                    default = _normalize_strategy(saved)
+                    return {"default": dict(default), "NIFTY": dict(default)}
     except Exception:
         log.exception("Could not load strategy from disk")  # [FIX #23]
-    return dict(STRATEGY_DEFAULTS)
+    return {"default": dict(STRATEGY_DEFAULTS), "NIFTY": dict(STRATEGY_DEFAULTS)}
+
+
+def load_strategy() -> dict:
+    """Backward-compat: return the default scope only."""
+    return load_strategies()["default"]
+
+
+def save_strategies(strategies: dict):
+    """Persist per-scope strategies to disk."""
+    try:
+        with open(STRATEGY_FILE, "w") as f:
+            json.dump(strategies, f, indent=2)
+    except Exception:
+        log.exception("Could not save strategy to disk")  # [FIX #23]
 
 
 def save_strategy(strategy: dict):
-    """Persist strategy to disk."""
+    """Backward-compat: save flat dict as the default scope."""
     try:
-        with open(STRATEGY_FILE, "w") as f:
-            json.dump(strategy, f, indent=2)
+        current = load_strategies()
+        current["default"] = _normalize_strategy(strategy)
+        save_strategies(current)
     except Exception:
         log.exception("Could not save strategy to disk")  # [FIX #23]
 
@@ -157,9 +197,10 @@ def save_mode(mode: str):
 manager  = TradeManager()
 telegram = TelegramListener()
 
-# [4][11] Load persisted strategy immediately on import
-manager.strategy = load_strategy()
-# Sync lot_size from persisted strategy so it survives restarts
+# [4][11] Load persisted strategies immediately on import
+manager.strategies = load_strategies()
+manager.strategy = manager.strategies["default"]
+# Sync lot_size from persisted default strategy so it survives restarts
 if manager.strategy.get("lots"):
     manager.lot_size = max(1, int(manager.strategy["lots"]))
 
@@ -706,6 +747,7 @@ class StopTradingRequest(BaseModel):
     enabled: bool
 
 class StrategyRequest(BaseModel):
+    scope:                    str             = "default"  # "default" | "NIFTY"
     lots:                      int             = 1
     activationPoints:          Optional[float] = 5.0
     activationSLOffset:        Optional[float] = 0.0
@@ -881,7 +923,11 @@ async def kill_switch():
 
 @app.get("/api/settings")
 async def get_settings():
-    return {"lot_size": manager.lot_size, "strategy": manager.strategy}
+    return {
+        "lot_size": manager.lot_size,
+        "strategy": manager.strategy,
+        "strategies": getattr(manager, "strategies", {"default": manager.strategy}),
+    }
 
 
 @app.post("/api/settings/lot-size", dependencies=[Depends(require_api_token)])
@@ -893,15 +939,28 @@ async def set_lot_size(req: LotSizeRequest):
 
 @app.post("/api/settings/strategy", dependencies=[Depends(require_api_token)])
 async def set_strategy(req: StrategyRequest):
-    manager.strategy = req.dict()
-    if req.lots and req.lots != manager.lot_size:
-        manager.set_lot_size(req.lots)
-    save_strategy(manager.strategy)
+    data = req.dict()
+    raw_scope = str(data.pop("scope", "default") or "default").upper()
+    scope = "NIFTY" if raw_scope == "NIFTY" else "default"
+    strategies = getattr(manager, "strategies", None) or {"default": manager.strategy}
+    strategies[scope] = {**STRATEGY_DEFAULTS, **data}
+    manager.strategies = strategies
+    if scope == "default":
+        manager.strategy = strategies["default"]
+        if req.lots and req.lots != manager.lot_size:
+            manager.set_lot_size(req.lots)
+    else:
+        # Keep default alias untouched; NIFTY lots live inside its own scope.
+        manager.strategy = strategies.get("default", manager.strategy)
+    save_strategies(manager.strategies)
     await ws_manager.broadcast({"type": "settings_update", "data": {
         "strategy": manager.strategy,
+        "strategies": manager.strategies,
         "lot_size": manager.lot_size,
+        "scope": scope,
     }})
-    return {"status": "ok", "strategy": manager.strategy}
+    return {"status": "ok", "strategy": strategies[scope], "scope": scope,
+            "strategies": strategies}
 
 
 # ── Kotak Auth ────────────────────────────────────────────────────────────────

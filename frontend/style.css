@@ -1690,6 +1690,39 @@ header {
     gap: 4px;
 }
 
+.strategy-scope-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.strategy-scope-btn {
+    flex: 1;
+    padding: 9px 12px;
+    border-radius: 10px;
+    border: 1.5px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.strategy-scope-btn.active {
+    color: var(--accent-light);
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.strategy-scope-note {
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
 .strategy-tab-btn {
     padding: 10px 16px;
     background: transparent;

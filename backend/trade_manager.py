@@ -113,7 +113,9 @@ class TradeManager:
         # but no trade is placed. Set by main.py before every process_message call.
         self.stop_trading: bool = False
 
-        # Strategy defaults — simplified to bounce-back entry + signal_trail SL
+        # Strategy defaults — simplified to bounce-back entry + signal_trail SL.
+        # Per-underlying overrides: {"default": {...}, "NIFTY": {...}}.
+        # self.strategy is always the default scope (backward-compat alias).
         self.strategy: Dict[str, Any] = {
             "lots":               1,
             "activationPoints":   5.0,
@@ -122,6 +124,10 @@ class TradeManager:
             "bouncePoints":       5,
             "bufferEnabled":      False,
             "bufferPoints":       2.0,
+        }
+        self.strategies: Dict[str, Dict[str, Any]] = {
+            "default": dict(self.strategy),
+            "NIFTY": dict(self.strategy),
         }
 
         self._ws_broadcast: Optional[Callable] = None
@@ -140,6 +146,24 @@ class TradeManager:
         self._ws_broadcast = broadcast_fn
         self.paper_trader.set_ws_broadcast(broadcast_fn)
         self.real_trader.set_ws_broadcast(broadcast_fn)
+
+    def get_strategy(self, underlying: str = "") -> Dict[str, Any]:
+        """Return the strategy scope for an underlying, falling back to default."""
+        und = str(underlying or "").upper()
+        scopes = getattr(self, "strategies", None) or {"default": self.strategy}
+        if und == "NIFTY" and isinstance(scopes.get("NIFTY"), dict):
+            return scopes["NIFTY"]
+        return scopes.get("default", self.strategy)
+
+    def set_strategy_for(self, scope: str, strategy: Dict[str, Any]) -> Dict[str, Any]:
+        """Save one scope; keep self.strategy synced to default."""
+        raw = str(scope or "default").upper()
+        key = "NIFTY" if raw == "NIFTY" else "default"
+        if not hasattr(self, "strategies") or not isinstance(self.strategies, dict):
+            self.strategies = {"default": dict(self.strategy), "NIFTY": dict(self.strategy)}
+        self.strategies[key] = dict(strategy or {})
+        self.strategy = self.strategies.get("default", self.strategy)
+        return self.strategies[key]
 
     async def _broadcast(self, event_type: str, data: dict):
         if self._ws_broadcast:
@@ -401,10 +425,19 @@ class TradeManager:
     async def _execute_paper(self, signal: dict, signal_id: int) -> dict:
         """Execute via paper trading engine — bounce-back entry + signal_trail SL."""
         try:
+            und = str(signal.get("underlying") or signal.get("index") or "").upper()
+            strategy = self.get_strategy(und)
+            if und == "NIFTY":
+                try:
+                    lots = max(1, int(strategy.get("lots") or self.lot_size))
+                except (ValueError, TypeError):
+                    lots = self.lot_size
+            else:
+                lots = self.lot_size
             result = await self.paper_trader.place_order(
                 signal, signal_id,
-                lot_size=self.lot_size,
-                strategy=self.strategy,
+                lot_size=lots,
+                strategy=strategy,
             )
             log.info("Paper trade placed: %s", result)
             return result
@@ -417,10 +450,19 @@ class TradeManager:
         if not self.kotak.is_authenticated:
             return {"status": "error", "message": "Kotak Neo not authenticated"}
         try:
+            und = str(signal.get("underlying") or signal.get("index") or "").upper()
+            strategy = self.get_strategy(und)
+            if und == "NIFTY":
+                try:
+                    lots = max(1, int(strategy.get("lots") or self.lot_size))
+                except (ValueError, TypeError):
+                    lots = self.lot_size
+            else:
+                lots = self.lot_size
             result = await self.real_trader.place_order(
                 signal, signal_id,
-                lot_size=self.lot_size,
-                strategy=self.strategy,
+                lot_size=lots,
+                strategy=strategy,
             )
             log.info("Real trade placed: %s", result)
             return result
@@ -583,6 +625,7 @@ class TradeManager:
             "real_trader":  self.real_trader.get_pnl_summary(),
             "lot_size":     self.lot_size,
             "strategy":     self.strategy,
+            "strategies":   getattr(self, "strategies", {"default": self.strategy}),
         }
 
     def clear_duplicates(self):
