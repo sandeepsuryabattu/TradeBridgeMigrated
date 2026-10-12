@@ -328,10 +328,10 @@ class ContractMaster:
 
     # ── Phase 2: multi-universe masters ──────────────────────────────────────
 
-    MULTI_SEGMENTS = ("bse_fo", "nse_fo", "nse_cm")
+    MULTI_SEGMENTS = ("bse_fo", "nse_fo", "nse_cm", "mcx_fo")
 
     def download_all(self, kotak_client, segments=None) -> dict[str, bool]:
-        """Download scrip masters for every segment (BSE+NSE FO, NSE CM).
+        """Download scrip masters for every segment (BSE+NSE FO, NSE CM, MCX FO).
 
         Failures fall back per-segment: in-memory contracts are kept, else the
         legacy SENSEX CSV fallback is attempted for bse_fo. Returns per-segment
@@ -408,7 +408,10 @@ class ContractMaster:
             return None
         return min(parsed.keys(), key=lambda s: parsed[s])
 
-    KNOWN_UNDERLYINGS = ("BANKNIFTY", "FINNIFTY", "SENSEX", "NIFTY")
+    KNOWN_UNDERLYINGS = ("BANKNIFTY", "FINNIFTY", "SENSEX", "NIFTY",
+                         "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER",
+                         "ALUMINIUM", "ZINC", "LEAD", "NICKEL", "MENTHAOIL",
+                         "COTTON")
 
     @classmethod
     def _und_matches(cls, sym: str, und: str) -> bool:

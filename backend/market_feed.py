@@ -35,7 +35,9 @@ MAX_RECONNECT_ATTEMPTS    = 5
 
 _IST           = ZoneInfo("Asia/Kolkata")
 _MARKET_OPEN   = dt_time(9,  0)
-_MARKET_CLOSE  = dt_time(15, 36)
+# Feed stays up through the MCX evening session (commodities trade till
+# 23:30 IST). Equity ticks simply stop after 15:30 — harmless.
+_MARKET_CLOSE  = dt_time(23, 30)
 
 
 class MarketFeed:

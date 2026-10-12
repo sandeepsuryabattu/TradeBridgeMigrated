@@ -43,6 +43,22 @@ IST = ZoneInfo("Asia/Kolkata")
 MARKET_OPEN  = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 
+# MCX commodity session (morning + evening, incl. DST variation 23:30/23:55).
+MCX_OPEN  = time(9, 0)
+MCX_CLOSE = time(23, 30)
+
+# Canonical MCX underlyings (mirrors instruments.MCX_CANONICALS — duplicated
+# to avoid importing the parser at module scope).
+MCX_UNDERLYINGS = frozenset({
+    "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "ALUMINIUM",
+    "ZINC", "LEAD", "NICKEL", "MENTHAOIL", "COTTON",
+})
+
+
+def is_commodity(underlying: str = "") -> bool:
+    """True for MCX commodity underlyings (evening session, mcx_fo)."""
+    return str(underlying or "").upper() in MCX_UNDERLYINGS
+
 
 def _utc_now() -> str:
     """[FIX #16] Return current UTC time as ISO-8601 string with Z suffix."""
@@ -379,8 +395,9 @@ class TradeManager:
 
         # 4b. (removed) — in-memory sig_hash dedup removed; DB checks above are sufficient
 
-        # 5. Market hours check (blocks real trades only, warns for paper)
-        if not self._is_market_open():
+        # 5. Market hours check (blocks real trades only, warns for paper).
+        # Commodities trade the MCX evening session (till 23:30 IST).
+        if not self._is_market_open(sig_underlying):
             if self.mode == "real":
                 log.warning("Market is closed — skipping real trade")
                 return {
@@ -509,7 +526,8 @@ class TradeManager:
                 opt = str(sig.get("option_type") or "")
                 sig_kind = "OPT" if (strike and opt) else "EQ"
                 seg_guess = (
-                    "bse_fo" if (sig_kind == "OPT" and und == "SENSEX")
+                    "mcx_fo" if is_commodity(und)
+                    else "bse_fo" if (sig_kind == "OPT" and und == "SENSEX")
                     else "nse_fo" if sig_kind == "OPT"
                     else "nse_cm"
                 )
@@ -602,9 +620,15 @@ class TradeManager:
 
     # ── Utilities ─────────────────────────────────────────────────────────────
 
-    def _is_market_open(self) -> bool:
-        """[5] Check market hours using explicit IST timezone."""
+    def _is_market_open(self, underlying: str = "") -> bool:
+        """[5] Check market hours using explicit IST timezone.
+
+        MCX commodities trade the evening session (09:00–23:30 IST);
+        equities/indices trade 09:15–15:30 IST.
+        """
         now_ist = datetime.now(IST).time()
+        if is_commodity(underlying):
+            return MCX_OPEN <= now_ist <= MCX_CLOSE
         return MARKET_OPEN <= now_ist <= MARKET_CLOSE
 
     def get_status(self) -> dict:

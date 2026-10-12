@@ -325,12 +325,13 @@ class KotakTrader:
 
     # ── Data Retrieval ──
 
-    def search_scrip(self, symbol: str, expiry: str = "", option_type: str = "", strike_price: str = "") -> dict:
+    def search_scrip(self, symbol: str, expiry: str = "", option_type: str = "", strike_price: str = "",
+                       exchange_segment: str = "bse_fo") -> dict:
         if not self.client:
             return {}
         try:
             result = self.client.search_scrip(
-                exchange_segment="bse_fo",
+                exchange_segment=exchange_segment,
                 symbol=symbol,
                 expiry=expiry,
                 option_type=option_type,

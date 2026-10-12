@@ -2,8 +2,9 @@
 Instrument model + multi-universe signal parser (Phase 1 of multi-instrument engine).
 
 Covers: index options (SENSEX/NIFTY/BANKNIFTY/FINNIFTY), index futures,
-and intraday cash equities (NSE CM). Delivery/holdings are out of scope —
-the engine is intraday-only (EOD square-off), same as the existing bot.
+intraday cash equities (NSE CM), and MCX commodity options/futures
+(CRUDEOIL/NATURALGAS/GOLD/SILVER/COPPER/...). Delivery/holdings are out of
+scope — the engine is intraday-only (EOD square-off), same as the existing bot.
 
 This module is ADDITIVE: the live path still uses `signal_parser.parse_signal`
 (SENSEX-only). Nothing here is wired into trade_manager yet (Phase 3).
@@ -27,6 +28,34 @@ INDEX_UNDERLYINGS: dict[str, tuple[str, str]] = {
 
 EQUITY_SEGMENT = "nse_cm"
 
+MCX_SEGMENT = "mcx_fo"
+
+# MCX commodity underlyings: keyword variants -> (canonical, segment).
+# Checked only when no index underlying matches (index is the primary book).
+MCX_UNDERLYINGS: dict[str, tuple[str, str]] = {
+    "crude oil":   ("CRUDEOIL", MCX_SEGMENT),
+    "crudeoil":    ("CRUDEOIL", MCX_SEGMENT),
+    "crude":       ("CRUDEOIL", MCX_SEGMENT),
+    "natural gas": ("NATURALGAS", MCX_SEGMENT),
+    "naturalgas":  ("NATURALGAS", MCX_SEGMENT),
+    "nat gas":     ("NATURALGAS", MCX_SEGMENT),
+    "natgas":      ("NATURALGAS", MCX_SEGMENT),
+    "mentha oil":  ("MENTHAOIL", MCX_SEGMENT),
+    "menthaoil":   ("MENTHAOIL", MCX_SEGMENT),
+    "aluminium":   ("ALUMINIUM", MCX_SEGMENT),
+    "aluminum":    ("ALUMINIUM", MCX_SEGMENT),
+    "copper":      ("COPPER", MCX_SEGMENT),
+    "nickel":      ("NICKEL", MCX_SEGMENT),
+    "silver":      ("SILVER", MCX_SEGMENT),
+    "cotton":      ("COTTON", MCX_SEGMENT),
+    "gold":        ("GOLD", MCX_SEGMENT),
+    "zinc":        ("ZINC", MCX_SEGMENT),
+    "lead":        ("LEAD", MCX_SEGMENT),
+}
+
+# Canonical MCX underlyings (for segment routing / market-hours checks).
+MCX_CANONICALS = frozenset(u for u, _ in MCX_UNDERLYINGS.values())
+
 # Nifty-50-ish cash universe (intraday). Anything outside this set is NOT
 # treated as an equity signal — prevents random ALL-CAPS words becoming trades.
 EQUITY_UNIVERSE = frozenset({
@@ -49,7 +78,7 @@ class ParsedInstrument:
     reason: Optional[str] = None
     kind: str = "OPT"                      # 'OPT' | 'FUT' | 'EQ'
     underlying: Optional[str] = None       # SENSEX/NIFTY/... or equity symbol
-    exchange_segment: str = "bse_fo"       # bse_fo | nse_fo | nse_cm
+    exchange_segment: str = "bse_fo"       # bse_fo | nse_fo | nse_cm | mcx_fo
     strike: Optional[str] = None           # OPT only
     option_type: Optional[str] = None      # OPT only: CE / PE
     entry_low: Optional[float] = None
@@ -90,13 +119,18 @@ def _detect_signal_type(lower: str) -> str:
 
 
 def _detect_underlying(lower: str) -> Optional[tuple[str, str]]:
-    """Return (canonical, segment) for the first index underlying found.
+    """Return (canonical, segment) for the first underlying found.
 
-    Longer names first so 'banknifty' wins over 'nifty'.
+    Index names first (primary book — also avoids 'gold' matching 'golden'
+    chatter when an index name is present). Then MCX commodities,
+    longest names first so 'crude oil' wins over 'crude'.
     """
     for key in ("bank nifty", "fin nifty", "banknifty", "finnifty", "sensex", "nifty"):
         if key in lower:
             return INDEX_UNDERLYINGS[key]
+    for key in sorted(MCX_UNDERLYINGS, key=len, reverse=True):
+        if key in lower:
+            return MCX_UNDERLYINGS[key]
     return None
 
 
@@ -185,6 +219,9 @@ _NON_SYMBOLS = frozenset({
     "RS", "TARGET", "TARGETS", "ENTRY", "PRICE", "CALL", "PUT", "FUT",
     "BUY", "SELL", "HOLD", "ADD", "WITH", "FROM", "NEAR", "AROUND", "ZONE",
     "NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "BANK", "NIFTY50",
+    # MCX commodities must never be claimed as cash-equity symbols.
+    "CRUDEOIL", "CRUDE", "NATURALGAS", "NATGAS", "GOLD", "SILVER", "COPPER",
+    "ALUMINIUM", "ALUMINUM", "ZINC", "LEAD", "NICKEL", "MENTHAOIL", "COTTON",
 })
 
 _FOLLOWUP_RE = re.compile(
@@ -238,13 +275,18 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
         return ParsedInstrument(status="ignored", reason="Follow-up/commentary, not an entry")
 
     # ── Must contain a price structure ──
+    # MCX desk messages are terse ("CRUDEOIL 9000 PE 186") — the trailing
+    # price counts as the structure for commodities.
     if not re.search(r"price|@|\bbuy\b|\bsell\b|\bcmp\b|\btgt\b|\btargets?\b|\bsl\b|stoploss",
                      stripped, re.IGNORECASE):
-        return ParsedInstrument(status="ignored", reason='No price structure found')
+        _gate_und = _detect_underlying(lower)
+        if not (_gate_und and _gate_und[1] == MCX_SEGMENT):
+            return ParsedInstrument(status="ignored", reason='No price structure found')
 
-    # ── 1. Index options: underlying + strike + CE/PE ──
+    # ── 1. Index/commodity options: underlying + strike + CE/PE ──
     und = _detect_underlying(lower)
-    opt_match = re.search(r"(\d{4,6})\s*(CE|PE)\b", stripped, re.IGNORECASE)
+    # MCX strikes can be 3 digits (e.g. NATURALGAS 220); index strikes are 4+.
+    opt_match = re.search(r"(\d{3,6})\s*(CE|PE)\b", stripped, re.IGNORECASE)
     if und and opt_match:
         canonical, segment = und
         strike = opt_match.group(1)
@@ -252,6 +294,15 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
         remaining = stripped[opt_match.end():]
         price_kw = re.search(r"price|buy|sell|entry|@|cmp", remaining, re.IGNORECASE)
         if not price_kw:
+            # Terse MCX desk format: "CRUDEOIL 9000 PE 186" — trailing bare
+            # number is the entry. Index signals still require a price
+            # keyword (avoids turning chatter into trades).
+            if segment == MCX_SEGMENT:
+                bare = re.search(r"(-?\d{1,6}(?:\.\d+)?)\s*$", remaining.strip())
+                if bare:
+                    px = float(bare.group(1))
+                    return _finish_opt(stripped, lower, canonical, segment,
+                                      strike, option_type, px, px)
             return ParsedInstrument(status="ignored", reason='"price" not found after strike')
         after_price = remaining[price_kw.end():] if price_kw else remaining
         low, high = _parse_entry(after_price)
@@ -259,7 +310,7 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
             return ParsedInstrument(status="ignored", reason='Entry range not found after "price"')
         return _finish_opt(stripped, lower, canonical, segment, strike, option_type, low, high)
 
-    # ── 2. Index futures: underlying + FUT + price ──
+    # ── 2. Index/commodity futures: underlying + FUT + price ──
     if und and re.search(r"\bFUT\b", stripped, re.IGNORECASE):
         canonical, segment = und
         price_kw = re.search(r"price", stripped, re.IGNORECASE)

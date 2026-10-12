@@ -116,6 +116,10 @@ def _round_to_tick(price: float, tick: float = BSE_TICK_SIZE) -> float:
 _IST = ZoneInfo("Asia/Kolkata")
 _MARKET_CLOSE = dt_time(15, 30)
 
+# MCX commodity session close (evening). MCX positions square off at
+# _MCX_CLOSE minus EOD_EXIT_MINUTES_BEFORE — never at the equity cutoff.
+_MCX_CLOSE = dt_time(23, 30)
+
 # Kotak order statuses considered "still active on exchange"
 # FIX #4: Inverted reconcile logic — we only act when status is TERMINAL,
 # not when it's absent from a "known active" whitelist. This prevents false
@@ -147,6 +151,8 @@ class RealTrader:
 
         # FIX #8: EOD guard — prevents repeated square_off_all within the window.
         self._eod_triggered: bool = False
+        # MCX EOD guard — separate flag for the 23:xx commodity window.
+        self._eod_mcx_triggered: bool = False
 
         # Locks
         self._expiry_lock = asyncio.Lock()
@@ -313,13 +319,14 @@ class RealTrader:
         except (ValueError, TypeError):
             fallback = f"{und}{strike}{opt_type}"
 
-        # Try 1: search_scrip via Kotak API
+        # Try 1: search_scrip via Kotak API (segment-aware for MCX)
         if self.kotak and self.kotak.is_authenticated:
             try:
                 scrip = self.kotak.search_scrip(
                     symbol=und,
                     option_type=opt_type,
                     strike_price=strike,
+                    exchange_segment=signal.get("exchange_segment") or "bse_fo",
                 )
                 log.info("search_scrip(%s): %s", cache_key, scrip)
                 if scrip and isinstance(scrip, dict):
@@ -1893,31 +1900,63 @@ class RealTrader:
     # ── EOD Auto-Close ────────────────────────────────────────────────────────
 
     async def check_eod(self):
-        """Auto-close all positions before market close.
+        """Auto-close positions before each market's close.
+
+        Equities/indices square off at 15:30 IST; MCX commodities at
+        23:30 IST. Each universe is closed only in its own window so the
+        equity cutoff never kills an evening commodity position.
 
         FIX #8: _eod_triggered flag ensures square_off_all is called exactly
         once per session, even if check_eod is called on a tight loop.
         Flag resets at midnight via reset_eod_flag() — call that from your
         daily scheduler or on service startup.
         """
-        if self._eod_triggered:
-            return
+        now_ist_dt = datetime.now(_IST)
 
-        now_ist_dt   = datetime.now(_IST)
-        market_close = now_ist_dt.replace(
-            hour=_MARKET_CLOSE.hour, minute=_MARKET_CLOSE.minute, second=0, microsecond=0
-        )
-        eod_dt = market_close - timedelta(minutes=EOD_EXIT_MINUTES_BEFORE)
-
-        if eod_dt.time() <= now_ist_dt.time() < _MARKET_CLOSE:
-            if self._open_positions:
-                log.warning("EOD: Auto-closing %d positions before market close", len(self._open_positions))
+        if not self._eod_triggered:
+            market_close = now_ist_dt.replace(
+                hour=_MARKET_CLOSE.hour, minute=_MARKET_CLOSE.minute, second=0, microsecond=0
+            )
+            eod_dt = market_close - timedelta(minutes=EOD_EXIT_MINUTES_BEFORE)
+            if eod_dt.time() <= now_ist_dt.time() < _MARKET_CLOSE:
+                eq_pos = [p for p in self._open_positions
+                          if p.get("status") == "open"
+                          and str(p.get("exchange_segment") or "") != "mcx_fo"]
+                if eq_pos:
+                    log.warning("EOD: Auto-closing %d equity/index positions before market close",
+                                len(eq_pos))
+                    for pos in list(eq_pos):
+                        try:
+                            await self.close_position(pos["id"], exit_price=pos.get(
+                                "current_price", pos.get("entry_price", 0)), exit_reason="eod")
+                        except Exception:
+                            log.exception("EOD: failed to close position %s", pos.get("id"))
                 self._eod_triggered = True
-                await self.square_off_all(exit_reason="eod")
+
+        if not self._eod_mcx_triggered:
+            mcx_close = now_ist_dt.replace(
+                hour=_MCX_CLOSE.hour, minute=_MCX_CLOSE.minute, second=0, microsecond=0
+            )
+            mcx_dt = mcx_close - timedelta(minutes=EOD_EXIT_MINUTES_BEFORE)
+            if mcx_dt.time() <= now_ist_dt.time() < _MCX_CLOSE:
+                mcx_pos = [p for p in self._open_positions
+                           if p.get("status") == "open"
+                           and str(p.get("exchange_segment") or "") == "mcx_fo"]
+                if mcx_pos:
+                    log.warning("EOD: Auto-closing %d MCX positions before commodity close",
+                                len(mcx_pos))
+                    for pos in list(mcx_pos):
+                        try:
+                            await self.close_position(pos["id"], exit_price=pos.get(
+                                "current_price", pos.get("entry_price", 0)), exit_reason="eod")
+                        except Exception:
+                            log.exception("EOD: failed to close MCX position %s", pos.get("id"))
+                self._eod_mcx_triggered = True
 
     def reset_eod_flag(self):
         """Reset the EOD trigger flag — call once per session (e.g. on startup or at midnight)."""
         self._eod_triggered = False
+        self._eod_mcx_triggered = False
         log.info("EOD flag reset")
 
     # ── Order Feed Handler ────────────────────────────────────────────────────
