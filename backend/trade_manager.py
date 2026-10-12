@@ -405,14 +405,37 @@ class TradeManager:
 
     # ── Market Feed ───────────────────────────────────────────────────────────
 
-    async def resubscribe_recent_signals(self, limit: int = 20):
-        """Re-subscribe to market feed for recently processed signals."""
+    async def resubscribe_recent_signals(self, limit: int = 100):
+        """Re-subscribe to market feed for recently processed signals.
+
+        Live orders first: instruments backing open positions or pending
+        orders jump the queue so a flood of newer rows (tests, chatter)
+        can never push active trades off the feed. Caps at 60 to bound
+        feed load.
+        """
         if not self.market_feed or not self.contract_master:
             return
 
+        live_syms: set[str] = set()
+        for o in list(self.paper_trader._pending_orders) + list(self.real_trader._pending_orders):
+            if o.get("trading_symbol"):
+                live_syms.add(str(o["trading_symbol"]).upper())
+        for p in list(self.paper_trader._open_positions) + list(self.real_trader._open_positions):
+            if p.get("trading_symbol"):
+                live_syms.add(str(p["trading_symbol"]).upper())
+
+        def _prio(sig: dict):
+            sfx = f"{sig.get('strike') or ''}{sig.get('option_type') or ''}".upper()
+            idx = str(sig.get("idx") or "").upper()
+            hot = any((sfx and sfx in sym) or (idx and sym.startswith(idx))
+                      for sym in live_syms)
+            return (0 if hot else 1, -(sig.get("id") or 0))
+
         recent_signals = await db.get_signals(limit=limit)
         subs_count = 0
-        for sig in recent_signals:
+        for sig in sorted(recent_signals, key=_prio):
+            if subs_count >= 60:
+                break
             if sig.get("status") == "valid" and (sig.get("strike") or sig.get("idx")):
                 und = str(sig.get("idx") or "SENSEX").upper()
                 strike = str(sig.get("strike") or "")
@@ -481,7 +504,7 @@ class TradeManager:
             self.market_feed.add_tick_callback(self.real_trader.on_tick)
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self.download_contracts)
-            await self.resubscribe_recent_signals(limit=20)
+            await self.resubscribe_recent_signals(limit=100)
             # Rehydrate real trader state from DB
             await self.real_trader.rehydrate_from_db()
             # Start background tasks for real trading

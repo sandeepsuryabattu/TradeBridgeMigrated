@@ -427,7 +427,7 @@ async def lifespan(app: FastAPI):
                 manager.market_feed.subscribe_index_name(
                     key="SENSEX-BSE", name="SENSEX", exchange_segment="bse_cm")
                 await loop.run_in_executor(None, manager.download_contracts)
-                await manager.resubscribe_recent_signals(limit=20)
+                await manager.resubscribe_recent_signals(limit=100)
 
                 # [FIX #29] Rehydrate real trader state + background tasks on auto-login
                 await manager.real_trader.rehydrate_from_db()
@@ -502,7 +502,7 @@ async def lifespan(app: FastAPI):
                     log.info("daily_contract_refresh: tick pipeline restarted")
 
                     await loop.run_in_executor(None, manager.download_contracts)
-                    await manager.resubscribe_recent_signals(limit=20)
+                    await manager.resubscribe_recent_signals(limit=100)
                     manager.real_trader.reset_eod_flag()
                     log.info("Daily contract master refresh complete")
                 else:
@@ -632,7 +632,7 @@ async def _restart_feed_with_resubscribe(reason: str):
     manager.market_feed.subscribe_index_name()
     manager.market_feed.subscribe_index_name(
         key="SENSEX-BSE", name="SENSEX", exchange_segment="bse_cm")
-    await manager.resubscribe_recent_signals(limit=20)
+    await manager.resubscribe_recent_signals(limit=100)
     log.info("feed restart (%s): complete", reason)
 
 
@@ -985,7 +985,7 @@ async def resubscribe_signals():
     Does NOT restart the feed; just re-sends the subscription list.
     """
     try:
-        await manager.resubscribe_recent_signals(limit=20)
+        await manager.resubscribe_recent_signals(limit=100)
         active_subs = len(manager.market_feed._subscriptions)
         log.info("resubscribe_signals: done (%d total subscriptions active)", active_subs)
         return {
