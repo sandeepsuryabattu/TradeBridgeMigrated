@@ -65,6 +65,7 @@ class MarketFeed:
         # key -> {name, symbol, exchange_segment}
         self._index_subs:        dict[str, dict]  = {}
         self._pending_index_subs: list[dict]      = []
+        self._last_index_tick_time: float         = 0.0
 
         self._nse_holidays_cache:  set[str]         = set()
         self._nse_holidays_fetched_date: dt_date | None = None
@@ -242,6 +243,8 @@ class MarketFeed:
                                 "l": float(getattr(message, "low_price", 0) or 0),
                                 "c": float(getattr(message, "close_price", 0) or 0),
                             }
+                            if tick["ltp"] > 0:
+                                self._last_index_tick_time = time.time()
                             self._process_tick(tick)
                             continue
 
@@ -523,6 +526,21 @@ class MarketFeed:
 
             if self._last_tick_time == 0:
                 continue
+
+            # Index re-subscribe: the startup subscribe often races socket
+            # auth and is silently dropped. While index ticks are stale,
+            # re-send the indices subscription every watchdog pass.
+            if self._index_subs and self._sfeed_ws:
+                idx_idle = time.time() - (self._last_index_tick_time or 0)
+                if self._last_index_tick_time == 0 or idx_idle > 120:
+                    try:
+                        await self._sfeed_ws.subscribe_index([
+                            WsToken(info["exchange_segment"], info["name"])
+                            for info in self._index_subs.values()
+                        ])
+                        log.info("Watchdog re-sent %d index subscription(s)", len(self._index_subs))
+                    except Exception:
+                        log.exception("Watchdog index re-subscribe failed")
 
             elapsed = time.time() - self._last_tick_time
             if elapsed > HEARTBEAT_STALE_THRESHOLD:
