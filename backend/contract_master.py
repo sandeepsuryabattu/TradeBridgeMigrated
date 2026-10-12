@@ -576,6 +576,32 @@ class ContractMaster:
                 continue
         return None
 
+    def find_by_symbol(self, trading_symbol: str, segment: str = None) -> Optional[dict]:
+        """Find a contract by exact broker symbol (pTrdSymbol).
+
+        Used to re-subscribe live positions/pending orders to their EXACT
+        token after a restart — strike-based resolve() may now pick a
+        different product (e.g. standard vs mini) than the open trade holds.
+        Scans the given segment first, then all loaded segments.
+        """
+        want = str(trading_symbol or "").upper()
+        if not want:
+            return None
+        segs = [segment] if segment else []
+        segs += [s for s in self._segments if s not in segs]
+        for seg in segs:
+            for c in self._segments.get(seg, []):
+                if self._sym_of(c) == want:
+                    return {
+                        "instrument_token": str(c.get("pSymbol", "") or c.get("pInstrumentToken", "") or c.get("instrument_token", "")),
+                        "trading_symbol": self._sym_of(c),
+                        "exchange_segment": seg,
+                        "lot_size": c.get("lLotSize", "") or c.get("pLotSize", "") or c.get("lot_size", ""),
+                        "tick_size": c.get("dTickSize", "") or c.get("pTickSize", "") or c.get("tick_size", ""),
+                        "raw": c,
+                    }
+        return None
+
     def resolve(self, sig: dict) -> Optional[dict]:
         """Resolve a parsed-instrument dict to a tradable contract.
 

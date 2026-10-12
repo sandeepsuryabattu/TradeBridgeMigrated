@@ -508,6 +508,27 @@ class TradeManager:
             if p.get("trading_symbol"):
                 live_syms.add(str(p["trading_symbol"]).upper())
 
+        # Live orders first, by EXACT symbol: strike-based resolve() may pick
+        # a different product than the open trade holds (standard vs mini),
+        # orphaning it from the feed with a frozen LTP.
+        subs_count = 0
+        try:
+            for sym in sorted(live_syms):
+                seg = None
+                for o in (list(self.paper_trader._pending_orders) + list(self.real_trader._pending_orders)
+                          + list(self.paper_trader._open_positions) + list(self.real_trader._open_positions)):
+                    if str(o.get("trading_symbol") or "").upper() == sym:
+                        seg = o.get("exchange_segment") or None
+                        break
+                found = self.contract_master.find_by_symbol(sym, segment=seg)
+                if found and str(found["instrument_token"]) not in self.market_feed._subscriptions:
+                    self.market_feed.subscribe_instrument(
+                        found["instrument_token"], found["trading_symbol"],
+                        found.get("exchange_segment") or seg or "bse_fo")
+                    subs_count += 1
+        except Exception:
+            log.exception("resubscribe: live-symbol pass failed")
+
         def _prio(sig: dict):
             sfx = f"{sig.get('strike') or ''}{sig.get('option_type') or ''}".upper()
             idx = str(sig.get("idx") or "").upper()
@@ -516,7 +537,6 @@ class TradeManager:
             return (0 if hot else 1, -(sig.get("id") or 0))
 
         recent_signals = await db.get_signals(limit=limit)
-        subs_count = 0
         for sig in sorted(recent_signals, key=_prio):
             if subs_count >= 60:
                 break
@@ -535,8 +555,9 @@ class TradeManager:
                     res = self.contract_master.resolve({
                         "kind": sig_kind, "underlying": und,
                         "strike": strike, "option_type": opt,
-                        "exchange_segment": seg_guess,
+                        "exchange_segment": sig.get("exchange_segment") or seg_guess,
                         "expiry": sig.get("expiry"),
+                        "variant": sig.get("variant") or "standard",
                     })
                 except Exception:
                     log.exception("resubscribe: resolve failed")

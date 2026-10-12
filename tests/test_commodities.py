@@ -92,6 +92,24 @@ class TestCommodityRouting:
                           "option_type": "CE", "exchange_segment": "mcx_fo", "expiry": None})
         assert out["trading_symbol"] == "GOLDM29OCT26143500CE"
 
+    def test_find_by_symbol_exact(self):
+        from backend.contract_master import ContractMaster
+        cm = ContractMaster()
+        cm._segments = {"mcx_fo": [
+            {"pTrdSymbol": "CRUDEOILM15OCT269000PE", "pSymbol": "TKN1",
+             "pStrikePrice": "900000", "pOptionType": "PE",
+             "pExpiryDate": "1793404799", "lLotSize": "10"},
+            {"pTrdSymbol": "CRUDEOIL15OCT269000PE", "pSymbol": "TKN2",
+             "pStrikePrice": "900000", "pOptionType": "PE",
+             "pExpiryDate": "1793404799", "lLotSize": "100"},
+        ]}
+        found = cm.find_by_symbol("CRUDEOILM15OCT269000PE", segment="mcx_fo")
+        assert found and found["instrument_token"] == "TKN1"
+        assert found["exchange_segment"] == "mcx_fo"
+        assert cm.find_by_symbol("CRUDEOIL15OCT269000PE")["instrument_token"] == "TKN2"
+        assert cm.find_by_symbol("NOPE123") is None
+        assert cm.find_by_symbol("") is None
+
     def test_variant_mini_pins_mini(self):
         from backend.contract_master import ContractMaster
         cm = ContractMaster()

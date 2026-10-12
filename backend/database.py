@@ -226,6 +226,10 @@ async def init_db():
         ("trades",    "exit_reason",              "TEXT"),
         ("signals",   "last_ltp",                 "REAL"),
         ("signals",   "expiry",                   "TEXT"),
+        # Phase 4 (MCX): variant + segment persist so resubscribe re-resolves
+        # the exact product (mini vs standard) after a restart.
+        ("signals",   "variant",                  "TEXT DEFAULT 'standard'"),
+        ("signals",   "exchange_segment",         "TEXT DEFAULT 'bse_fo'"),
         # positions table — SL config fields
         ("positions", "sl_mode",                  "TEXT DEFAULT 'fixed'"),
         ("positions", "sl_gap",                   "REAL DEFAULT 0"),
@@ -405,8 +409,9 @@ async def save_signal(message_id: int, parsed: dict) -> int:
     cursor = await db.execute(
         """INSERT INTO signals
            (message_id, status, reason, idx, strike, option_type,
-            entry_low, entry_high, diff, stoploss, targets, expiry)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            entry_low, entry_high, diff, stoploss, targets, expiry,
+            variant, exchange_segment)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             message_id,
             parsed.get("status"),
@@ -420,6 +425,8 @@ async def save_signal(message_id: int, parsed: dict) -> int:
             parsed.get("stoploss"),
             targets_json,
             parsed.get("expiry"),
+            parsed.get("variant") or "standard",
+            parsed.get("exchange_segment") or "bse_fo",
         ),
     )
     await db.execute(
