@@ -749,12 +749,18 @@ async def save_ticks_batch(ticks: list[dict]):
 
 
 async def update_signal_ltp(trading_symbol: str, ltp: float):
-    """Update last_ltp on signals matching this trading symbol."""
+    """Update last_ltp on signals matching this trading symbol.
+
+    Broker symbols carry expiry affixes (SENSEX26O1571500PE) while signals
+    store short parts (SENSEX/71500/PE), so match on prefix+suffix instead
+    of exact equality — the old exact match never hit and last_ltp stayed
+    NULL forever. EQ signals (strike/opt empty) match on prefix alone.
+    """
     db = await _get_db()
     await db.execute(
         """UPDATE signals SET last_ltp = ?
-           WHERE (idx || strike || option_type) = ?
-           AND status = 'valid'""",
+           WHERE status = 'valid'
+           AND ? LIKE (idx || '%' || strike || option_type)""",
         (ltp, trading_symbol),
     )
     await db.commit()

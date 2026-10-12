@@ -152,3 +152,25 @@ async def test_dedup_equity_by_symbol():
         dbp.stop()
     assert out["skipped"] == "position_open"
     tm.paper_trader.place_order.assert_not_called()
+
+
+def test_update_signal_ltp_matches_broker_symbols():
+    """LIKE prefix+suffix matcher hits expiry-affixed symbols, exact never did."""
+    import sqlite3
+    c = sqlite3.connect(":memory:")
+    c.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY, idx TEXT, strike TEXT, option_type TEXT, status TEXT, last_ltp REAL)")
+    c.executemany("INSERT INTO signals (idx, strike, option_type, status) VALUES (?,?,?,?)", [
+        ("SENSEX", "71500", "CE", "valid"),
+        ("NIFTY", "22500", "PE", "valid"),
+        ("RELIANCE", "", "", "valid"),
+        ("SENSEX", "71500", "CE", "ignored"),
+    ])
+    def upd(sym, ltp):
+        c.execute("""UPDATE signals SET last_ltp = ?
+           WHERE status = 'valid'
+           AND ? LIKE (idx || '%' || strike || option_type)""", (ltp, sym))
+    upd("SENSEX26O1571500CE", 100.0)
+    upd("NIFTY26O1322500PE", 150.0)
+    upd("RELIANCE-EQ", 2955.0)
+    rows = dict((r[0], r[1]) for r in c.execute("SELECT id, last_ltp FROM signals"))
+    assert rows == {1: 100.0, 2: 150.0, 3: 2955.0, 4: None}
