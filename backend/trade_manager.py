@@ -428,6 +428,7 @@ class TradeManager:
                         "kind": sig_kind, "underlying": und,
                         "strike": strike, "option_type": opt,
                         "exchange_segment": seg_guess,
+                        "expiry": sig.get("expiry"),
                     })
                 except Exception:
                     log.exception("resubscribe: resolve failed")

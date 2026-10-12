@@ -225,6 +225,7 @@ async def init_db():
         ("trades",    "closed_at",                "TEXT"),
         ("trades",    "exit_reason",              "TEXT"),
         ("signals",   "last_ltp",                 "REAL"),
+        ("signals",   "expiry",                   "TEXT"),
         # positions table — SL config fields
         ("positions", "sl_mode",                  "TEXT DEFAULT 'fixed'"),
         ("positions", "sl_gap",                   "REAL DEFAULT 0"),
@@ -404,8 +405,8 @@ async def save_signal(message_id: int, parsed: dict) -> int:
     cursor = await db.execute(
         """INSERT INTO signals
            (message_id, status, reason, idx, strike, option_type,
-            entry_low, entry_high, diff, stoploss, targets)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            entry_low, entry_high, diff, stoploss, targets, expiry)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             message_id,
             parsed.get("status"),
@@ -418,6 +419,7 @@ async def save_signal(message_id: int, parsed: dict) -> int:
             parsed.get("diff"),
             parsed.get("stoploss"),
             targets_json,
+            parsed.get("expiry"),
         ),
     )
     await db.execute(

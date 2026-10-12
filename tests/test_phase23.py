@@ -206,12 +206,12 @@ def test_resolve_honours_signal_expiry():
     c = ContractMaster()
     c._segments = {"nse_fo": [
         _dated_row("NIFTY26OCT22450CE", 2245000, "CE", "30-Oct-2026"),
-        _dated_row("NIFTYWK1322450CE", 2245000, "CE", "13-Oct-2026"),
+        _dated_row("NIFTY26O1322450CE", 2245000, "CE", "13-Oct-2026"),
     ]}
     r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
                    "option_type": "CE", "exchange_segment": "nse_fo",
                    "expiry": "13 october expiry"})
-    assert r and r["trading_symbol"] == "NIFTYWK1322450CE"
+    assert r and r["trading_symbol"] == "NIFTY26O1322450CE"
 
 def test_resolve_refuses_unmatched_expiry():
     from backend.contract_master import ContractMaster
@@ -226,11 +226,11 @@ def test_resolve_no_hint_falls_back_to_nearest():
     c = ContractMaster()
     c._segments = {"nse_fo": [
         _dated_row("NIFTY26OCT22450CE", 2245000, "CE", "30-Oct-2026"),
-        _dated_row("NIFTYWK1322450CE", 2245000, "CE", "13-Oct-2026"),
+        _dated_row("NIFTY26O1322450CE", 2245000, "CE", "13-Oct-2026"),
     ]}
     r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
                    "option_type": "CE", "exchange_segment": "nse_fo"})
-    assert r and r["trading_symbol"] == "NIFTYWK1322450CE"
+    assert r and r["trading_symbol"] == "NIFTY26O1322450CE"
 
 
 def test_symbol_embedded_expiry_beats_stale_row_dates():
@@ -280,3 +280,18 @@ def test_update_signal_ltp_scoped_to_traded_contract():
     upd("NIFTY26OCT22450CE", 257.0)
     rows = dict((r[0], r[1]) for r in c.execute("SELECT id, last_ltp FROM signals"))
     assert rows == {1: 60.85, 2: 257.0}
+
+
+def test_no_hint_prefers_symbol_nearest_expiry():
+    """No-hint fallback reads dates from symbols, not stale row fields."""
+    from backend.contract_master import ContractMaster
+    c = ContractMaster()
+    c._segments = {"nse_fo": [
+        {"pTrdSymbol": "NIFTY26NOV22450CE", "pSymbol": "M",
+         "pStrikePrice": "2245000", "pOptionType": "CE", "pExpiryDate": "1478701800"},
+        {"pTrdSymbol": "NIFTY26O1322450CE", "pSymbol": "W",
+         "pStrikePrice": "2245000", "pOptionType": "CE", "pExpiryDate": "1476369000"},
+    ]}
+    r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
+                   "option_type": "CE", "exchange_segment": "nse_fo"})
+    assert r and r["trading_symbol"] == "NIFTY26O1322450CE"

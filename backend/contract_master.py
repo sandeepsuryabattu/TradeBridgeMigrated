@@ -628,6 +628,28 @@ class ContractMaster:
             log.warning("Hint %s unmatched (available %s) — refusing wrong-expiry fill",
                         hint, avail)
             return None
+        # No usable hint: prefer the nearest-future expiry read from the
+        # SYMBOLS (row dates are unreliable), then row dates, then legacy.
+        sym_dated = []
+        for c in cands:
+            sd = self._symbol_expiry(self._sym_of(c), und)
+            if sd is None:
+                continue
+            try:
+                if sd[2] is None:
+                    # Month-only symbol: judge by month-end (Oct-monthly
+                    # expires late-Oct, still future mid-month).
+                    import calendar as _cal
+                    d = date(sd[0], sd[1], _cal.monthrange(sd[0], sd[1])[1])
+                else:
+                    d = date(sd[0], sd[1], sd[2])
+            except ValueError:
+                continue
+            sym_dated.append((c, d))
+        sym_dated = [(c, d) for c, d in sym_dated if d >= date.today()]
+        if sym_dated:
+            sym_dated.sort(key=lambda cd: cd[1])
+            return _out(sym_dated[0][0])
         expiry = self._nearest_expiry(cands)
         for c in cands:
             if not expiry or str(
