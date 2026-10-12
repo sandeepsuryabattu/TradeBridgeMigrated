@@ -6,6 +6,7 @@ Used to resolve human-readable signals (e.g. SENSEX 80000 PE) to real instrument
 import csv
 import io
 import os
+import re
 import logging
 import httpx
 from datetime import datetime, date
@@ -407,20 +408,79 @@ class ContractMaster:
             return None
         return min(parsed.keys(), key=lambda s: parsed[s])
 
-    @staticmethod
-    def _und_matches(sym: str, und: str) -> bool:
-        """Prefix match that never confuses NIFTY with FINNIFTY/BANKNIFTY.
+    KNOWN_UNDERLYINGS = ("BANKNIFTY", "FINNIFTY", "SENSEX", "NIFTY")
 
-        Broker symbols concatenate underlying + YY expiry date
-        (NIFTY26O13..., FINNIFTY26NOV...), so the char after the underlying
-        is always a digit. A bare substring check matched FINNIFTY for NIFTY
-        signals and resolved the wrong instrument (live bug, 2026-10-12).
+    @classmethod
+    def _und_matches(cls, sym: str, und: str) -> bool:
+        """True when sym belongs to underlying und — never confusing NIFTY
+        with FINNIFTY/BANKNIFTY (live bug, 2026-10-12).
+
+        Longest-known-underlying wins, so weekly infixes (NIFTYWK13…) still
+        match while FINNIFTY… resolves to FINNIFTY, not NIFTY.
         """
+        best = ""
+        for u in cls.KNOWN_UNDERLYINGS:
+            if sym == u or sym.startswith(u):
+                if len(u) > len(best):
+                    best = u
+        if best:
+            return best == und
+        # Unknown underlying: prefix + digit/separator heuristic.
         if not sym.startswith(und):
             return False
         if len(sym) == len(und):
             return True
         return sym[len(und)].isdigit() or sym[len(und)] in " -_"
+
+    _MONTHS = {m: i + 1 for i, m in enumerate(
+        ["january", "february", "march", "april", "may", "june", "july",
+         "august", "september", "october", "november", "december"])}
+    _MONTHS.update({m[:3]: i + 1 for i, m in enumerate(
+        ["january", "february", "march", "april", "may", "june", "july",
+         "august", "september", "october", "november", "december"])})
+
+    @classmethod
+    def _expiry_hint_to_date(cls, hint: str) -> Optional[date]:
+        """Parse signal expiry text ("13 october expiry", "23rd APRIL EXPIRY")
+        into a date. Rolls the year forward when the date already passed."""
+        if not hint:
+            return None
+        m = re.search(r"(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)", hint)
+        if not m:
+            return None
+        month = cls._MONTHS.get(m.group(2).lower())
+        if not month:
+            return None
+        today = date.today()
+        try:
+            d = date(today.year, month, int(m.group(1)))
+        except ValueError:
+            return None
+        if d < today:
+            try:
+                d = date(today.year + 1, month, int(m.group(1)))
+            except ValueError:
+                return None
+        return d
+
+    @staticmethod
+    def _row_expiry_date(contract: dict) -> Optional[date]:
+        raw = str(contract.get("pExpiryDate", "") or contract.get("expiry_date", "")
+                  or contract.get("expiry", "")).strip()
+        if not raw:
+            return None
+        try:
+            ts = float(raw)
+            if ts > 1_000_000_000:
+                return datetime.fromtimestamp(ts).date()
+        except (ValueError, TypeError, OSError):
+            pass
+        for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d%b%Y"):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except ValueError:
+                continue
+        return None
 
     def resolve(self, sig: dict) -> Optional[dict]:
         """Resolve a parsed-instrument dict to a tradable contract.
@@ -477,7 +537,7 @@ class ContractMaster:
             log.warning("No future contract for %s (%s) — refusing option fallback", und, segment)
             return None
 
-        # OPT: strike + type + nearest expiry.
+        # OPT: strike + type + expiry (signal hint wins, else nearest).
         try:
             want = int(float(str(sig.get("strike") or "")))
         except (ValueError, TypeError):
@@ -487,6 +547,21 @@ class ContractMaster:
         if not cands:
             log.warning("No contract for %s %s %s (%s)", und, want, opt, segment)
             return None
+        hint = self._expiry_hint_to_date(str(sig.get("expiry") or ""))
+        if hint is not None:
+            dated = [(c, self._row_expiry_date(c)) for c in cands]
+            dated = [(c, d) for c, d in dated if d is not None]
+            if not dated:
+                log.warning("No dated rows for %s %s %s — refusing (hint %s)",
+                            und, want, opt, sig.get("expiry"))
+                return None
+            dated.sort(key=lambda cd: (abs((cd[1] - hint).days), cd[1]))
+            best, best_date = dated[0]
+            if best_date != hint:
+                log.warning("Hint %s unmatched (closest %s) — refusing wrong-expiry fill",
+                            hint, best_date)
+                return None
+            return _out(best)
         expiry = self._nearest_expiry(cands)
         for c in cands:
             if not expiry or str(

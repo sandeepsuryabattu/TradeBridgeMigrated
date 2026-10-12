@@ -194,3 +194,40 @@ def test_resolve_never_confuses_nifty_with_finnifty():
     r = c.resolve({"kind": "OPT", "underlying": "BANKNIFTY", "strike": "22600",
                    "option_type": "PE", "exchange_segment": "nse_fo"})
     assert r and r["trading_symbol"] == "BANKNIFTY26OCT22600PE"
+
+
+def _dated_row(symbol, strike100, opt, exp):
+    return {"pTrdSymbol": symbol, "pSymbol": "T", "pStrikePrice": str(strike100),
+            "pOptionType": opt, "pExpiryDate": exp}
+
+def test_resolve_honours_signal_expiry():
+    """Live case 2026-10-12: 13-Oct NIFTY signal must not take the Oct-monthly row."""
+    from backend.contract_master import ContractMaster
+    c = ContractMaster()
+    c._segments = {"nse_fo": [
+        _dated_row("NIFTY26OCT22450CE", 2245000, "CE", "30-Oct-2026"),
+        _dated_row("NIFTYWK1322450CE", 2245000, "CE", "13-Oct-2026"),
+    ]}
+    r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
+                   "option_type": "CE", "exchange_segment": "nse_fo",
+                   "expiry": "13 october expiry"})
+    assert r and r["trading_symbol"] == "NIFTYWK1322450CE"
+
+def test_resolve_refuses_unmatched_expiry():
+    from backend.contract_master import ContractMaster
+    c = ContractMaster()
+    c._segments = {"nse_fo": [_dated_row("NIFTY26OCT22450CE", 2245000, "CE", "30-Oct-2026")]}
+    assert c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
+                      "option_type": "CE", "exchange_segment": "nse_fo",
+                      "expiry": "13 october expiry"}) is None
+
+def test_resolve_no_hint_falls_back_to_nearest():
+    from backend.contract_master import ContractMaster
+    c = ContractMaster()
+    c._segments = {"nse_fo": [
+        _dated_row("NIFTY26OCT22450CE", 2245000, "CE", "30-Oct-2026"),
+        _dated_row("NIFTYWK1322450CE", 2245000, "CE", "13-Oct-2026"),
+    ]}
+    r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
+                   "option_type": "CE", "exchange_segment": "nse_fo"})
+    assert r and r["trading_symbol"] == "NIFTYWK1322450CE"
