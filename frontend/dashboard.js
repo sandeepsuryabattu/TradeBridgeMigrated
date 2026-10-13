@@ -1395,15 +1395,15 @@ function renderSignals() {
                 } catch { /* leave as '--' */ }
             }
 
-            // Timer + buttons ONLY while a live pending order exists. A valid
-            // signal with no order yet (or a skipped one) must not show a
-            // countdown to nothing.
-            const showTimer = isValid && timerStart && tradeStatus === 'pending' && cancelTradeId;
-
             // Find the trade_id for this signal (needed for cancel button)
             const signalTrade = state.trades.find(t => t.signal_id === s.id && t.status === 'pending');
             const cancelTradeId = signalTrade ? (signalTrade.trade_id || signalTrade.id) : null;
             const showCancel = tradeStatus === 'pending' && cancelTradeId;
+
+            // Timer + buttons ONLY while a live pending order exists. A valid
+            // signal with no order yet (or a skipped one) must not show a
+            // countdown to nothing.
+            const showTimer = isValid && timerStart && tradeStatus === 'pending' && cancelTradeId;
 
             // Tuned entry: a pending order may carry an edited range in its
             // notes ("@ low-high"). Show the live order range, flagged.
