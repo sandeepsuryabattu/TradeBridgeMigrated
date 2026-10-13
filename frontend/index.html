@@ -170,6 +170,19 @@
 
     <!-- ── Main Dashboard Grid ── -->
     <main id="dashboard">
+        <!-- Performance overview (read-only analytics) -->
+        <section class="panel panel-performance" id="panel-performance">
+            <div class="panel-header" id="header-performance">
+                <h2>📈 Performance</h2>
+                <div class="header-actions">
+                    <span class="panel-count" id="perf-mode">paper · 30d</span>
+                    <button class="panel-toggle" aria-label="Toggle Panel">▼</button>
+                </div>
+            </div>
+            <div class="panel-body" id="performance-body">
+                <div class="empty-state">No closed trades yet</div>
+            </div>
+        </section>
         <!-- Left: Telegram Messages -->
         <section class="panel panel-messages" id="panel-messages">
             <div class="panel-header" id="header-messages">
@@ -857,6 +870,7 @@
     <div id="toast-container"></div>
 
     <script src="dashboard.js?v=32"></script>
+    <script src="performance.js?v=1"></script>
 </body>
 
 </html>

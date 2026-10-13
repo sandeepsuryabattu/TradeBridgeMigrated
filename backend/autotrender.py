@@ -158,6 +158,16 @@ async def _ingest(call: AutotrenderCallIn, auto_forward: bool = True) -> Dict[st
             )
             record["status"] = "sent_to_paper"
             record["paper_message_id"] = result.get("message_id")
+            # Tag the signal row for per-model attribution (paper path only).
+            try:
+                sig = (result.get("signal") or {})
+                if sig.get("id") and record.get("model"):
+                    await db.update_signal(sig["id"], {
+                        "model_version": record["model"].get("version"),
+                        "model_score": record["model"].get("score"),
+                    })
+            except Exception:
+                log.exception("autotrender model tagging failed")
             log.info("Autotrender call id=%s auto-forwarded to paper (message %s)",
                      record["id"], result.get("message_id"))
         except Exception:
@@ -237,6 +247,15 @@ async def paper_trade_call(call_id: int) -> Dict[str, Any]:
         log.exception("autotrender paper-trade failed")
         raise HTTPException(status_code=500, detail="Paper-trade failed — see bot logs")
     rec["status"] = "sent_to_paper"
+    try:
+        sig = (result.get("signal") or {})
+        if sig.get("id") and rec.get("model"):
+            await db.update_signal(sig["id"], {
+                "model_version": rec["model"].get("version"),
+                "model_score": rec["model"].get("score"),
+            })
+    except Exception:
+        log.exception("autotrender model tagging failed")
     return {"status": "ok", "call": rec, "result": {"message_id": result.get("message_id")}}
 
 

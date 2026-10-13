@@ -864,6 +864,12 @@ async def get_pnl():
     return manager.paper_trader.get_pnl_summary()
 
 
+@app.get("/api/performance")
+async def get_performance(mode: Optional[str] = "paper", days: int = Query(30, ge=1, le=365)):
+    """Read-only performance analytics over closed trades (IST days)."""
+    return await db.get_performance(mode=mode or "paper", days=days)
+
+
 @app.post("/api/mode", dependencies=[Depends(require_api_token)])
 async def set_mode(req: ModeRequest):
     # TOTP gate: require valid code when switching to real trading

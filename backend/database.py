@@ -272,6 +272,10 @@ async def init_db():
         # Per-trade tune snapshot (order_tune.py) — survives restart via rehydrate
         ("trades",          "tune_json",                "TEXT"),
         ("pending_orders",  "tune_json",                "TEXT"),
+        # Autotrender model attribution — which model version/score produced
+        # the signal (set by backend/autotrender.py on the paper path only).
+        ("signals",         "model_version",            "TEXT"),
+        ("signals",         "model_score",              "REAL"),
     ]
 
     for table, col, typedef in migrations:
@@ -448,7 +452,7 @@ async def save_signal(message_id: int, parsed: dict) -> int:
 
 _ALLOWED_SIGNAL_FIELDS = {
     "status", "reason", "last_ltp", "trading_symbol", "variant",
-    "exchange_segment", "expiry",
+    "exchange_segment", "expiry", "model_version", "model_score",
 }
 
 
@@ -563,6 +567,84 @@ async def get_trades(mode: str = None, limit: int = 200, date: str = None) -> li
     )
     rows = await cursor.fetchall()
     return [dict(r) for r in rows]
+
+
+def compute_perf(rows: list[dict]) -> dict:
+    """Pure stats over closed-trade rows {pnl, ist_date, sender, model_version}.
+
+    Returns overall + by_day + by_source + by_model with win-rate, profit
+    factor, expectancy and a day-ordered equity curve for drawdown.
+    """
+    def blank():
+        return {"trades": 0, "wins": 0, "win_rate": 0.0, "pnl": 0.0,
+                "gross_win": 0.0, "gross_loss": 0.0, "profit_factor": 0.0,
+                "expectancy": 0.0, "best": 0.0, "worst": 0.0}
+
+    def fill(b, ps):
+        b["trades"] = len(ps)
+        if not ps:
+            return b
+        b["wins"] = sum(1 for p in ps if p > 0)
+        b["win_rate"] = round(100.0 * b["wins"] / len(ps), 1)
+        b["pnl"] = round(sum(ps), 2)
+        b["gross_win"] = round(sum(p for p in ps if p > 0), 2)
+        b["gross_loss"] = round(sum(-p for p in ps if p < 0), 2)
+        b["profit_factor"] = round(b["gross_win"] / b["gross_loss"], 2) if b["gross_loss"] else (
+            float("inf") if b["gross_win"] else 0.0)
+        b["expectancy"] = round(sum(ps) / len(ps), 2)
+        b["best"] = round(max(ps), 2)
+        b["worst"] = round(min(ps), 2)
+        return b
+
+    overall = fill(blank(), [float(r.get("pnl") or 0) for r in rows])
+    by_day, by_source, by_model = {}, {}, {}
+    for r in rows:
+        p = float(r.get("pnl") or 0)
+        by_day.setdefault(str(r.get("ist_date") or "?"), []).append(p)
+        by_source.setdefault(str(r.get("sender") or "Unknown"), []).append(p)
+        mv = r.get("model_version")
+        if mv:
+            by_model.setdefault(str(mv), []).append(p)
+    eq, peak, maxdd = 0.0, 0.0, 0.0
+    for day in sorted(by_day):
+        eq += sum(by_day[day])
+        peak = max(peak, eq)
+        maxdd = min(maxdd, eq - peak)
+    return {
+        "overall": overall,
+        "by_day": {d: fill(blank(), ps) for d, ps in sorted(by_day.items())},
+        "by_source": {s: fill(blank(), ps) for s, ps in sorted(by_source.items())},
+        "by_model": {m: fill(blank(), ps) for m, ps in sorted(by_model.items())},
+        "max_drawdown": round(maxdd, 2),
+        "equity_curve": [{"day": d, "equity": round(sum(sum(by_day[x]) for x in sorted(by_day) if x <= d), 2)}
+                         for d in sorted(by_day)],
+    }
+
+
+async def get_performance(mode: str = "paper", days: int = 30) -> dict:
+    """Closed-trade performance, IST trading days, newest last `days` days.
+
+    Source = message sender (Telegram group vs Autotrender); model from
+    signals.model_version set on the autotrender paper path.
+    """
+    db = await _get_db()
+    cursor = await db.execute(
+        """SELECT t.pnl AS pnl,
+                  date(datetime(t.closed_at, '+5 hours', '+30 minutes')) AS ist_date,
+                  COALESCE(m.sender, 'Unknown') AS sender,
+                  s.model_version AS model_version
+           FROM trades t
+           LEFT JOIN signals s ON s.id = t.signal_id
+           LEFT JOIN messages m ON m.id = s.message_id
+           WHERE t.mode = ? AND t.status = 'closed'
+             AND date(datetime(t.closed_at, '+5 hours', '+30 minutes'))
+                 >= date(datetime('now', '+5 hours', '+30 minutes'), ?)""",
+        (mode, f"-{max(1, days) - 1} days"),
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+    out = compute_perf(rows)
+    out.update({"mode": mode, "days": days, "closed_trades": len(rows)})
+    return out
 
 
 # ── Position CRUD ──
