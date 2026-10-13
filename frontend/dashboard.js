@@ -2721,11 +2721,20 @@ function bindTuneModal() {
             });
             const data = await res.json();
             if (data.status === 'ok') {
+                // Optimistic immediate repaint — never wait on the socket echo.
                 const idx = state.trades.findIndex(t => (t.trade_id || t.id) === tradeId);
                 if (idx !== -1) {
-                    state.trades[idx] = { ...state.trades[idx], quantity: data.quantity, tune_json: JSON.stringify(data.tune) };
-                    renderTradesDebounced();
+                    state.trades[idx] = { ...state.trades[idx], quantity: data.quantity,
+                        price: data.price ?? state.trades[idx].price,
+                        notes: data.notes ?? state.trades[idx].notes,
+                        tune_json: JSON.stringify(data.tune) };
+                    const sIdx = state.signals.findIndex(s => s.id === state.trades[idx].signal_id);
+                    if (sIdx !== -1) {
+                        state.signals[sIdx].status_note = `Tuned: ${data.summary}`;
+                    }
                 }
+                renderSignals();
+                renderTradesDebounced();
                 toast(`Tuned: ${data.summary}`, 'success');
                 $('#tune-modal').style.display = 'none';
             } else {

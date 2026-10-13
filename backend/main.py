@@ -974,7 +974,8 @@ async def tune_pending_order(req: TuneRequest):
         "tune_json": order["tune_json"],
     }})
     return {"status": "ok", "trade_id": req.trade_id, "tune": tune,
-            "quantity": order["quantity"], "summary": tune_summary(tune, order)}
+            "quantity": order["quantity"], "price": order.get("price"),
+            "notes": order.get("notes"), "summary": tune_summary(tune, order)}
 
 
 @app.get("/api/balance")
