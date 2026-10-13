@@ -10,6 +10,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -622,7 +623,8 @@ def compute_perf(rows: list[dict]) -> dict:
 
 
 async def get_performance(mode: str = "paper", days: int = 30,
-                          ledger_limit: int = 200) -> dict:
+                          ledger_limit: int = 200,
+                          source: Optional[str] = None) -> dict:
     """Closed-position performance, IST trading days.
 
     NOTE: final P&L lives on positions (status='closed'), not trades —
@@ -632,6 +634,8 @@ async def get_performance(mode: str = "paper", days: int = 30,
     newest first.
     """
     db = await _get_db()
+    src_cond = "AND COALESCE(m.sender, 'Unknown') = ? " if source else ""
+    src_arg = [source] if source else []
     cursor = await db.execute(
         """SELECT p.pnl AS pnl,
                   date(datetime(p.closed_at, '+5 hours', '+30 minutes')) AS ist_date,
@@ -643,12 +647,13 @@ async def get_performance(mode: str = "paper", days: int = 30,
            LEFT JOIN messages m ON m.id = s.message_id
            WHERE p.mode = ? AND p.status = 'closed'
              AND date(datetime(p.closed_at, '+5 hours', '+30 minutes'))
-                 >= date(datetime('now', '+5 hours', '+30 minutes'), ?)""",
-        (mode, f"-{max(1, days) - 1} days"),
+                 >= date(datetime('now', '+5 hours', '+30 minutes'), ?)""" + " " + src_cond,
+        (mode, f"-{max(1, days) - 1} days", *src_arg),
     )
     rows = [dict(r) for r in await cursor.fetchall()]
     out = compute_perf(rows)
-    out.update({"mode": mode, "days": days, "closed_trades": len(rows)})
+    out.update({"mode": mode, "days": days, "closed_trades": len(rows),
+                "source": source or "all"})
     cursor = await db.execute(
         """SELECT date(datetime(p.closed_at, '+5 hours', '+30 minutes')) AS day,
                   p.trading_symbol AS symbol, p.quantity AS qty,
@@ -661,9 +666,9 @@ async def get_performance(mode: str = "paper", days: int = 30,
            LEFT JOIN messages m ON m.id = s.message_id
            WHERE p.mode = ? AND p.status = 'closed'
              AND date(datetime(p.closed_at, '+5 hours', '+30 minutes'))
-                 >= date(datetime('now', '+5 hours', '+30 minutes'), ?)
+                 >= date(datetime('now', '+5 hours', '+30 minutes'), ?)""" + " " + src_cond + """
            ORDER BY p.id DESC LIMIT ?""",
-        (mode, f"-{max(1, days) - 1} days", max(0, min(ledger_limit, 2000))),
+        (mode, f"-{max(1, days) - 1} days", *src_arg, max(0, min(ledger_limit, 2000))),
     )
     out["ledger"] = [dict(r) for r in await cursor.fetchall()]
     return out

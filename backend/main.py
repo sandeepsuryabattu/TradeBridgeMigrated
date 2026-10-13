@@ -866,9 +866,11 @@ async def get_pnl():
 
 @app.get("/api/performance")
 async def get_performance(mode: Optional[str] = "paper", days: int = Query(30, ge=1, le=365),
-                          ledger: int = Query(200, ge=0, le=2000)):
+                          ledger: int = Query(200, ge=0, le=2000),
+                          source: Optional[str] = Query(None)):
     """Read-only performance analytics over closed trades (IST days)."""
-    return await db.get_performance(mode=mode or "paper", days=days, ledger_limit=ledger)
+    return await db.get_performance(mode=mode or "paper", days=days,
+                                    ledger_limit=ledger, source=source or None)
 
 
 @app.post("/api/mode", dependencies=[Depends(require_api_token)])

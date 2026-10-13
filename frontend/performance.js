@@ -42,9 +42,11 @@
   function params() {
     var modeEl = document.getElementById("perf-mode-sel");
     var daysEl = document.getElementById("perf-days");
+    var srcEl = document.getElementById("perf-source");
     var mode = modeEl && (modeEl.value === "real" ? "real" : "paper");
     var days = daysEl ? Math.min(365, Math.max(1, parseInt(daysEl.value, 10) || 30)) : 30;
-    return { mode: mode || "paper", days: days };
+    var source = srcEl ? srcEl.value : "";
+    return { mode: mode || "paper", days: days, source: source };
   }
 
   function section(title, thead, body) {
@@ -57,7 +59,9 @@
     var el = document.getElementById("performance-body");
     var mode = document.getElementById("perf-mode");
     if (!el) return;
+    syncSources(p);
     if (mode) mode.textContent = (p.mode || "paper") + " · " + (p.days || 30) + "d · " +
+      (p.source && p.source !== "all" ? p.source + " · " : "") +
       (p.closed_trades || 0) + " closed";
     if (!p.closed_trades) {
       el.innerHTML = '<div class="empty-state">No closed trades in range</div>';
@@ -98,9 +102,28 @@
     el.innerHTML = html;
   }
 
+  // Keep the source dropdown in sync with what the backend knows.
+  // Autotrender appears here automatically once its first trade closes.
+  var knownSources = [];
+  function syncSources(p) {
+    var sel = document.getElementById("perf-source");
+    if (!sel || !p.by_source) return;
+    if (params().source) return; // filtered view: keep options as-is
+    var names = Object.keys(p.by_source).sort();
+    if (names.join("|") === knownSources.join("|")) return;
+    knownSources = names;
+    var cur = sel.value;
+    sel.innerHTML = '<option value="">all</option>' + names.map(function (n) {
+      return '<option value="' + esc(n) + '"' + (n === cur ? " selected" : "") + ">" +
+        esc(n) + "</option>";
+    }).join("");
+  }
+
   function poll() {
     var q = params();
-    fetch("/api/performance?mode=" + encodeURIComponent(q.mode) + "&days=" + q.days)
+    var url = "/api/performance?mode=" + encodeURIComponent(q.mode) + "&days=" + q.days;
+    if (q.source) url += "&source=" + encodeURIComponent(q.source);
+    fetch(url)
       .then(function (r) { return r.json(); })
       .then(render)
       .catch(function () { /* keep old view */ });
