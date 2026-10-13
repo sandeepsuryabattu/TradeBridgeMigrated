@@ -850,19 +850,28 @@ async function cancelPendingOrder(tradeId, signalId) {
                 }
             }
         } else {
-            toast(data.message || 'Cancel failed', 'error');
-            // Even on error, update UI to unstick the card — the order is
-            // clearly not pending anymore if the backend can't find it
-            if (signalId) {
-                const sigIdx = state.signals.findIndex(s => s.id === signalId);
-                if (sigIdx !== -1) {
-                    state.signals[sigIdx].trade_status = 'cancelled';
-                    state.signals[sigIdx].status_note = data.message || 'Cancel failed';
-                    renderSignals();
-                }
-            }
+            // Real failure (not a confirmed state): NEVER paint a final status.
+            // The order may still be live — say so, restore the button for
+            // retry, and verify from the server.
+            toast(data.message || 'Cancel failed — order may still be live, verifying', 'error');
+            document.querySelectorAll(`.btn-cancel-pending[data-trade-id="${tradeId}"]`).forEach(b => {
+                b.disabled = false;
+                b.textContent = '✕ Cancel';
+            });
+            scheduleVerifyOnDeadSocket();
+            try { await fetchInitialData(); } catch { /* WS will heal */ }
         }
-    } catch { toast('Cancel request failed', 'error'); }
+    } catch {
+        // Network failure: state unknown — never claim cancelled. Restore for
+        // retry and verify; the next server contact paints the truth.
+        toast('Cancel request failed — order may still be live, verifying', 'error');
+        document.querySelectorAll(`.btn-cancel-pending[data-trade-id="${tradeId}"]`).forEach(b => {
+            b.disabled = false;
+            b.textContent = '✕ Cancel';
+        });
+        scheduleVerifyOnDeadSocket();
+        try { await fetchInitialData(); } catch { /* WS will heal */ }
+    }
 }
 
 async function setLotSize() {
