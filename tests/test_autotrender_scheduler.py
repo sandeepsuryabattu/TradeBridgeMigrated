@@ -152,5 +152,5 @@ def test_neutral_bias_skips(wired):
         b._closed.setdefault("NIFTY", []).append(
             {"t": t0 + i * 60, "o": 25800, "h": 25802, "l": 25798, "c": 25800, "v": 1000})
     res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=b))
-    assert res["reason"].startswith("bias ")
+    assert res["action"] == "skip" and res["reason"].startswith("no trigger")
     assert wired.process_calls == []

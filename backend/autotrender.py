@@ -302,11 +302,18 @@ async def scheduler_tick(now: Optional[datetime] = None,
     except Exception:
         log.exception("scheduler detect failed")
         return {"action": "skip", "reason": "detect error"}
-    if found["bias"] not in ("BULLISH", "BEARISH"):
-        return {"action": "skip", "reason": f"bias {found['bias']}"}
+    # Free local models first (no Kotak calls): trend + trigger + volatility.
+    from . import at_models as models
+    trend = models.trend_score(bars, models.session_vwap(bars))
+    trig = models.trigger_ok(found, bars)
+    vol = models.volatility_gate(bars)
+    if not trig["fire"]:
+        return {"action": "skip", "reason": f"no trigger ({trig['reason']})"}
+    if not vol["ok"]:
+        return {"action": "skip", "reason": f"volatility veto ({vol['reason']})"}
 
     ts = moment.timestamp()
-    if found["bias"] == _sched_last_bias and ts - _sched_last_ts < SCHED_COOLDOWN_SECS:
+    if trig["direction"] == _sched_last_bias and ts - _sched_last_ts < SCHED_COOLDOWN_SECS:
         return {"action": "skip", "reason": "cooldown"}
 
     kotak = getattr(_manager, "kotak", None)
@@ -322,11 +329,19 @@ async def scheduler_tick(now: Optional[datetime] = None,
         return {"action": "skip", "reason": "chain snapshot failed"}
     _sched_last_chain_keys = snap.get("quote_keys", [])
 
+    # Positioning needs live chain rows; fuse everything for the final vote.
+    pos = models.positioning(snap["rows"], spot, trig["direction"])
+    fused = models.fuse(trend, trig, pos, vol)
+    if not fused["fire"]:
+        return {"action": "skip",
+                "reason": f"fusion blocked (score={fused['score']})"}
+    direction = fused["direction"]
+
     a = engine.atr(bars, 14)
-    lv = engine.entry_exit(bars[-1], a, found["bias"])
+    lv = engine.entry_exit(bars[-1], a, direction)
     if lv["entry"] is None:
         return {"action": "skip", "reason": "no levels"}
-    details = engine.option_call_details(snap["rows"], spot, found["bias"],
+    details = engine.option_call_details(snap["rows"], spot, direction,
                                          lv["entry"], lv["sl"], lv["tgt"])
     if details["side"] == "NO TRADE":
         return {"action": "skip", "reason": "no strike"}
@@ -342,7 +357,11 @@ async def scheduler_tick(now: Optional[datetime] = None,
         return {"action": "skip", "reason": "validation failed"}
 
     record = await _ingest(model, auto_forward=True)
-    _sched_last_ts, _sched_last_bias = ts, found["bias"]
+    record["model"] = {"version": fused["version"], "score": fused["score"],
+                       "direction": direction, "trend": trend,
+                       "trigger": trig["reason"], "positioning": pos,
+                       "volatility": vol}
+    _sched_last_ts, _sched_last_bias = ts, direction
     _sched_count += 1
     return {"action": "generated", "call": record}
 
