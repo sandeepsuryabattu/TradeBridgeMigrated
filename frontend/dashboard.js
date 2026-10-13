@@ -2544,18 +2544,15 @@ function bindStrategyModal() {
 
 
     $('#btn-strategy-reset')?.addEventListener('click', () => {
+        // Stage defaults in memory (no paint, no persist), sync the form,
+        // then run the confirmed save flow — the server must accept first.
         const scope = currentScope();
         if (!state.strategies) state.strategies = { default: { ...STRATEGY_DEFAULTS }, NIFTY: { ...STRATEGY_DEFAULTS } };
         state.strategies[scope] = { ...STRATEGY_DEFAULTS };
         state.strategy = { ...STRATEGY_DEFAULTS };
         populateLotDropdown();
         syncStrategyModalToState();
-        if (scope === 'default') {
-            const lotInput = $('#lot-input');
-            if (lotInput) lotInput.value = 1;
-        }
-        persistStrategy();
-        toast(`${scope === 'NIFTY' ? 'NIFTY' : 'Default'} strategy reset to defaults`, 'info');
+        $('#btn-strategy-save')?.click();
     });
 
     $('#btn-strategy-save')?.addEventListener('click', async () => {
