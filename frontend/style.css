@@ -392,11 +392,7 @@ header {
     max-height: 220px;
 }
 
-/* Performance panel spans full width at top (additive) */
-.panel-performance {
-    grid-column: 1 / -1;
-    max-height: 320px;
-}
+/* Performance modal content (additive; panel removed in favour of 📈 icon) */
 .perf-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));

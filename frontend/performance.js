@@ -1,5 +1,6 @@
-/* Performance panel — ISOLATED ADD-ON, read-only. Polls /api/performance,
- * renders stat cards + per-day / per-source / per-model tables. No trading. */
+/* Performance modal — ISOLATED ADD-ON, read-only. Opens from the 📈 header
+ * icon, fetches /api/performance on open + every 30s while open. No trading.
+ */
 (function () {
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -64,6 +65,8 @@
     el.innerHTML = html;
   }
 
+  var timer = null;
+
   function poll() {
     fetch("/api/performance?mode=paper&days=30")
       .then(function (r) { return r.json(); })
@@ -71,9 +74,30 @@
       .catch(function () { /* keep old view */ });
   }
 
-  document.addEventListener("DOMContentLoaded", function () {
-    if (!document.getElementById("performance-body")) return;
+  function open() {
+    var m = document.getElementById("perf-modal");
+    if (!m) return;
+    m.style.display = "flex";
     poll();
-    setInterval(poll, 30000);
+    if (!timer) timer = setInterval(poll, 30000);
+  }
+
+  function close() {
+    var m = document.getElementById("perf-modal");
+    if (m) m.style.display = "none";
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    var btn = document.getElementById("btn-perf");
+    if (btn) btn.addEventListener("click", open);
+    var x = document.getElementById("btn-close-perf");
+    if (x) x.addEventListener("click", close);
+    var m = document.getElementById("perf-modal");
+    if (m) m.addEventListener("click", function (e) { if (e.target === m) close(); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
   });
 })();
