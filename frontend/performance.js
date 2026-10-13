@@ -19,12 +19,17 @@
       '<div class="perf-value ' + (tone || "") + '">' + esc(value) + "</div></div>";
   }
 
+  function pf(v) {
+    if (v === null || v === undefined) return "∞";
+    return esc(v);
+  }
+
   function rows(obj) {
     return Object.keys(obj).map(function (k) {
       var b = obj[k];
       return "<tr><td>" + esc(k) + "</td><td>" + b.trades + "</td>" +
         "<td>" + b.win_rate + "%</td><td>" + fmt(b.pnl) + "</td>" +
-        "<td>" + b.profit_factor + "</td></tr>";
+        "<td>" + pf(b.profit_factor) + "</td></tr>";
     }).join("");
   }
 
@@ -50,7 +55,7 @@
     var html = '<div class="perf-grid">' +
       card("Total P&L", fmt(o.pnl), o.pnl >= 0 ? "value-up" : "value-down") +
       card("Win rate", o.win_rate + "% (" + o.wins + "/" + o.trades + ")") +
-      card("Profit factor", o.profit_factor) +
+      card("Profit factor", pf(o.profit_factor)) +
       card("Expectancy", fmt(o.expectancy)) +
       card("Max drawdown", fmt(p.max_drawdown), "value-down") +
       card("Best / Worst", fmt(o.best) + " / " + fmt(o.worst)) +
@@ -62,7 +67,7 @@
       days.map(function (d) {
         var b = p.by_day[d];
         return "<tr><td>" + esc(d) + "</td><td>" + b.trades + "</td><td>" + b.win_rate +
-          "%</td><td>" + fmt(b.pnl) + "</td><td>" + b.profit_factor + "</td></tr>";
+          "%</td><td>" + fmt(b.pnl) + "</td><td>" + pf(b.profit_factor) + "</td></tr>";
       }).join("") + "</tbody></table></div></div>";
     html += '<div class="perf-section"><h4 class="perf-sub">By source</h4>' +
       '<div class="table-wrapper"><table class="data-table">' +

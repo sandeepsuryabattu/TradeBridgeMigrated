@@ -590,7 +590,7 @@ def compute_perf(rows: list[dict]) -> dict:
         b["gross_win"] = round(sum(p for p in ps if p > 0), 2)
         b["gross_loss"] = round(sum(-p for p in ps if p < 0), 2)
         b["profit_factor"] = round(b["gross_win"] / b["gross_loss"], 2) if b["gross_loss"] else (
-            float("inf") if b["gross_win"] else 0.0)
+            None if b["gross_win"] else 0.0)  # None (JSON null), never inf
         b["expectancy"] = round(sum(ps) / len(ps), 2)
         b["best"] = round(max(ps), 2)
         b["worst"] = round(min(ps), 2)

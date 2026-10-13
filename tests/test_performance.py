@@ -34,3 +34,11 @@ def test_grouping_and_empty():
 
 def test_model_fields_allowed():
     assert {"model_version", "model_score"} <= db._ALLOWED_SIGNAL_FIELDS
+
+
+def test_all_wins_serializable():
+    import json
+    out = db.compute_perf([{"pnl": 100, "ist_date": "2026-10-14",
+                            "sender": "A", "model_version": None}])
+    assert out["overall"]["profit_factor"] is None  # no inf — JSON-safe
+    json.dumps(out)
