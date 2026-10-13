@@ -884,9 +884,18 @@ async function setLotSize() {
             body: JSON.stringify({ lots }),
         });
         const data = await res.json();
-        if (data.status === 'ok') toast(`Lot size set to ${data.lot_size}`, 'success');
-        else toast('Failed to set lot size', 'error');
-    } catch { toast('Failed to set lot size', 'error'); }
+        if (data.status === 'ok') {
+            state.lotSize = data.lot_size;
+            toast(`Lot size set to ${data.lot_size}`, 'success');
+        } else {
+            // Revert the input — screen never shows an unconfirmed size.
+            $('#lot-input').value = state.lotSize;
+            toast(data.message || 'Failed to set lot size', 'error');
+        }
+    } catch {
+        $('#lot-input').value = state.lotSize;
+        toast('Failed to set lot size — reverted', 'error');
+    }
 }
 
 // ── Fallback Actions [FIX #25] ────────────────────────────────────────────────
@@ -2073,6 +2082,14 @@ function bindClearModal() {
                 body: JSON.stringify({ date }),
             });
             console.log('[CLEAR] API response status:', response.status, response.statusText);
+            const cData = await response.json().catch(() => ({}));
+            if (!response.ok || (cData.status && cData.status !== 'ok')) {
+                // Server refused — touch nothing locally, verify instead.
+                toast(`Clear failed: ${cData.message || response.status}`, 'error');
+                scheduleVerifyOnDeadSocket();
+                try { await fetchInitialData(); } catch { /* WS will heal */ }
+                return;
+            }
 
             if (date === null) {
                 // Full wipe — reset all state
@@ -2149,6 +2166,10 @@ async function toggleStopTrading() {
             state.stopTrading = data.enabled;
             updateStopTradingUI();
             toast(data.enabled ? '⏸ Trading STOPPED — signals will be ignored' : '▶ Trading RESUMED', data.enabled ? 'warning' : 'success');
+        } else {
+            // Server refused — paint nothing, verify instead.
+            toast(data.message || 'Stop-trading toggle rejected', 'error');
+            scheduleVerifyOnDeadSocket();
         }
     } catch {
         toast('Failed to toggle stop trading', 'error');
@@ -2614,32 +2635,44 @@ function bindStrategyModal() {
             snapTrailGap,
         };
         if (!state.strategies) state.strategies = { default: { ...STRATEGY_DEFAULTS }, NIFTY: { ...STRATEGY_DEFAULTS } };
-        state.strategies[scope] = cfg;
-        state.strategy = { ...cfg };
-        persistStrategy();
 
-        if (scope === 'default') {
-            const lotInput = $('#lot-input');
-            if (lotInput) lotInput.value = lots;
-        }
-
+        // Confirmed-write: the server must accept first — never paint local
+        // state on a failed save.
+        const saveBtn = $('#btn-strategy-save');
+        if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '⏳ Saving…'; }
         try {
-            await fetch(`${API_BASE}/api/settings/strategy`, {
+            const sRes = await fetch(`${API_BASE}/api/settings/strategy`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ scope, ...cfg }),
             });
-        } catch { console.warn('Could not sync strategy to backend'); }
-
-        if (scope === 'default') {
-            try {
-                await fetch(`${API_BASE}/api/settings/lot-size`, {
+            const sData = await sRes.json().catch(() => ({}));
+            if (!sRes.ok || (sData.status && sData.status !== 'ok')) {
+                throw new Error(sData.message || `Server rejected strategy (${sRes.status})`);
+            }
+            if (scope === 'default') {
+                const lRes = await fetch(`${API_BASE}/api/settings/lot-size`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ lots }),
                 });
-            } catch { console.warn('Could not sync lot size to backend'); }
+                if (!lRes.ok) throw new Error('Server rejected lot size');
+                const lotInput = $('#lot-input');
+                if (lotInput) lotInput.value = lots;
+            }
+        } catch (err) {
+            // Revert the form to server truth — screen never claims an unsaved strategy.
+            toast(`Strategy NOT saved: ${err.message || 'request failed'}`, 'error');
+            try { await loadStrategy(); } catch { /* keep last known */ }
+            syncStrategyModalToState();
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Strategy'; }
+            return;
         }
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Strategy'; }
+
+        state.strategies[scope] = cfg;
+        state.strategy = { ...cfg };
+        persistStrategy();
 
         const bufLabel = bufferEnabled ? ` | Buffer: +/-${bufferPoints}` : '';
         const modeLabel = slMode === 'snap_levels' ? '🔒 Snap Levels' : '📈 Trailing SL';
@@ -2733,6 +2766,8 @@ function bindTuneModal() {
     $('#btn-tune-save')?.addEventListener('click', async () => {
         const tradeId = parseInt($('#tune-trade-id').value);
         if (!tradeId) return;
+        const tuneBtn = $('#btn-tune-save');
+        if (tuneBtn) { tuneBtn.disabled = true; tuneBtn.textContent = '⏳ Applying…'; }
         const slMode = document.querySelector('input[name="tune-sl-mode"]:checked')?.value || 'signal_trail';
         const initSL = document.querySelector('input[name="tune-init-sl"]:checked')?.value || 'telegram';
         const body = {
@@ -2781,10 +2816,16 @@ function bindTuneModal() {
                 renderTradesDebounced();
                 toast(`Tuned: ${data.summary}`, 'success');
                 scheduleVerifyOnDeadSocket();
+                if (tuneBtn) { tuneBtn.disabled = false; tuneBtn.textContent = 'Apply to This Trade'; }
                 $('#tune-modal').style.display = 'none';
             } else {
-                toast(data.message || 'Tune failed', 'error');
+                toast(data.message || 'Tune failed — nothing changed', 'error');
+                if (tuneBtn) { tuneBtn.disabled = false; tuneBtn.textContent = 'Apply to This Trade'; }
             }
-        } catch { toast('Tune request failed', 'error'); }
+        } catch {
+            toast('Tune request failed — nothing changed', 'error');
+            const tuneBtn2 = $('#btn-tune-save');
+            if (tuneBtn2) { tuneBtn2.disabled = false; tuneBtn2.textContent = 'Apply to This Trade'; }
+        }
     });
 }
