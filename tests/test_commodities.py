@@ -173,6 +173,25 @@ class TestCommodityRouting:
                           "exchange_segment": "mcx_fo", "expiry": None})
         assert out["trading_symbol"] == "GOLDM05NOV26FUT", out["trading_symbol"]
 
+    def test_fut_expiry_judged_over_futs_only(self):
+        """Option expiries must not poison FUT resolution: Oct-30 standard
+        options exist but the nearest standard FUT is Dec — resolve the FUT,
+        never None (which degrades to the 'GOLDFUT' display placeholder)."""
+        from backend.contract_master import ContractMaster
+        cm = ContractMaster()
+        cm._segments["mcx_fo"] = [
+            {"pTrdSymbol": "GOLD30OCT26143500CE", "pSymbol": "T Opt",
+             "pOptionType": "CE", "dStrikePrice;": "14350000",
+             "pExpiryDate": "1793404799", "lLotSize": "1"},
+            {"pTrdSymbol": "GOLDGUINEA30OCT26FUT", "pSymbol": "T Guinea",
+             "pOptionType": "", "pExpiryDate": "1793404799", "lLotSize": "8"},
+            {"pTrdSymbol": "GOLD04DEC26FUT", "pSymbol": "T Std",
+             "pOptionType": "", "pExpiryDate": "1796428799", "lLotSize": "1000"},
+        ]
+        out = cm.resolve({"kind": "FUT", "underlying": "GOLD",
+                          "exchange_segment": "mcx_fo", "expiry": None})
+        assert out is not None and out["trading_symbol"] == "GOLD04DEC26FUT", out
+
     def test_market_hours(self):
         from backend.trade_manager import TradeManager
         from unittest.mock import patch

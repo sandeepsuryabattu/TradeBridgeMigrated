@@ -677,13 +677,21 @@ class ContractMaster:
             # Futures carry no strike in our signals — nearest expiry match.
             # Only accept non-option rows; NEVER fall back to a CE/PE row
             # (that would buy the wrong instrument with real money).
+            # Expiry is judged over FUT rows only: option expiries (e.g. an
+            # Oct-30 weekly) must not drag the pool onto a month with no
+            # future (live bug 2026-10-13: standard pool's nearest expiry
+            # came from options, pool had no FUT row, resolve returned None
+            # and the signal degraded to the "GOLDFUT" display placeholder).
             # Standard product first (minis only as fallback).
-            cands = self._prefer_standard(cands, und)
-            expiry = self._nearest_expiry(cands)
-            pool = [c for c in cands if not expiry or str(
-                c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")).strip() == expiry]
-            for c in pool:
-                if self._opt_of(c) in ("", "F", "FUT", "XX"):
+            futs = [c for c in cands if self._opt_of(c) in ("", "F", "FUT", "XX")]
+            if not futs:
+                log.warning("No future rows for %s (%s)", und, segment)
+                return None
+            futs = self._prefer_standard(futs, und)
+            expiry = self._nearest_expiry(futs)
+            for c in futs:
+                if not expiry or str(
+                        c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")).strip() == expiry:
                     return _out(c)
             log.warning("No future contract for %s (%s) — refusing option fallback", und, segment)
             return None
