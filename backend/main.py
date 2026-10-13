@@ -1303,4 +1303,9 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 # ── Mount frontend static assets ─────────────────────────────────────────────
+# Autotrender dashboard bundle (built from autotrender-personal with
+# --base=/autotrender/). Must mount BEFORE "/" or the root mount swallows it.
+AT_DIR = os.path.join(FRONTEND_DIR, "autotrender")
+if os.path.isdir(AT_DIR):
+    app.mount("/autotrender", StaticFiles(directory=AT_DIR, html=True), name="autotrender")
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

@@ -163,13 +163,7 @@
                 <button class="icon-btn" id="btn-refresh" title="Hard Refresh" onclick="location.reload(true)">🔄</button>
                 <button class="icon-btn" id="btn-strategy" title="Strategy Setup">🎯</button>
                 <button class="icon-btn" id="btn-settings" title="Settings">⚙️</button>
-                <a class="icon-btn" id="btn-autotrender" title="Open Autotrender" target="_blank" style="text-decoration:none;">📊</a>
-                <script>
-                    try {
-                        var u = localStorage.getItem("autotrender_url") || "http://localhost:5174";
-                        document.getElementById("btn-autotrender").href = u;
-                    } catch (e) { document.getElementById("btn-autotrender").href = "http://localhost:5174"; }
-                </script>
+                <a class="icon-btn" id="btn-autotrender" title="Open Autotrender" href="/autotrender/" target="_blank" style="text-decoration:none;">📊</a>
             </div>
         </div>
     </header>
