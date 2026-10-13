@@ -357,7 +357,8 @@ function connectWebSocket() {
         state.wsConnected = true;
         updateBadge('badge-ws', true);
         updateHealthBadge();
-        toast('Connected to server', 'success');
+        // First ping immediately — don't wait out the 5s interval for Heartbeat green.
+        try { ws.send(JSON.stringify({ type: 'ping' })); } catch { /* will retry */ }
         if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
     };
 
@@ -543,6 +544,7 @@ function handleWSMessage(msg) {
 
             case 'instrument_ltp':
                 healthState.lastInstrumentTick = Date.now();
+                updateHealthBadge();
                 if (msg.data.symbol) {
                     const incomingSymbol = msg.data.symbol.toUpperCase();
                     state.signals.forEach(s => {
@@ -559,6 +561,7 @@ function handleWSMessage(msg) {
 
             case 'index_ltp':
                 healthState.lastSensexTick = Date.now();
+                updateHealthBadge();
                 {
                     const sym = String(msg.data.symbol || 'SENSEX').toUpperCase();
                     state.index_ltp[sym] = msg.data.ltp || 0;
@@ -631,6 +634,9 @@ function handleWSMessage(msg) {
 
             case 'pong':
                 healthState.lastPong = Date.now();
+                // Repaint now — don't wait for the 10s badge timer.
+                updateHealthBadge();
+                if (document.getElementById('health-panel')?.style.display === 'block') renderHealthChecks();
                 break;
 
             default:
