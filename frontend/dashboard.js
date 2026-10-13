@@ -792,7 +792,6 @@ function scheduleVerifyOnDeadSocket() {
 }
 
 async function exitPosition(positionId) {
-    if (!confirm('Exit this position at current price?')) return;
     try {
         const res = await fetch(`${API_BASE}/api/positions/${positionId}/exit`, { method: 'POST' });
         const data = await res.json();
