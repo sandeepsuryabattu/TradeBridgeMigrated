@@ -821,6 +821,26 @@ async def get_trades(
     return await db.get_trades(mode=mode, limit=limit, date=date)
 
 
+@app.get("/api/debug/master-symbols")
+async def debug_master_symbols(underlying: str = "GOLD", segment: str = "mcx_fo"):
+    """Read-only: list master rows matching an underlying, with row expiry,
+    option flag, token presence and lot — for diagnosing bad resolutions."""
+    cm = manager.contract_master
+    und = underlying.upper()
+    rows = []
+    for c in cm._segments.get(segment, []):
+        sym = cm._sym_of(c)
+        if cm._und_matches(sym, und):
+            rows.append({
+                "symbol":    sym,
+                "expiry":    str(c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")),
+                "opt":       cm._opt_of(c),
+                "has_token": bool(str(c.get("pSymbol", "") or c.get("pInstrumentToken", "") or "")),
+                "lot":       str(c.get("lLotSize", "") or c.get("pLotSize", "")),
+            })
+    return {"segment": segment, "underlying": und, "count": len(rows), "rows": rows}
+
+
 @app.get("/api/positions")
 async def get_positions(mode: Optional[str] = None, status: Optional[str] = "open", date: Optional[str] = Query(None)):
     # Empty string from query param ?status= means "all" (open + today's closed)
