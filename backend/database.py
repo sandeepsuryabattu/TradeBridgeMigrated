@@ -622,22 +622,25 @@ def compute_perf(rows: list[dict]) -> dict:
 
 
 async def get_performance(mode: str = "paper", days: int = 30) -> dict:
-    """Closed-trade performance, IST trading days, newest last `days` days.
+    """Closed-position performance, IST trading days.
 
-    Source = message sender (Telegram group vs Autotrender); model from
-    signals.model_version set on the autotrender paper path.
+    NOTE: final P&L lives on positions (status='closed'), not trades —
+    trades stay 'filled' after fill. Source = message sender (Telegram
+    group vs Autotrender); model from signals.model_version set on the
+    autotrender paper path.
     """
     db = await _get_db()
     cursor = await db.execute(
-        """SELECT t.pnl AS pnl,
-                  date(datetime(t.closed_at, '+5 hours', '+30 minutes')) AS ist_date,
+        """SELECT p.pnl AS pnl,
+                  date(datetime(p.closed_at, '+5 hours', '+30 minutes')) AS ist_date,
                   COALESCE(m.sender, 'Unknown') AS sender,
                   s.model_version AS model_version
-           FROM trades t
+           FROM positions p
+           LEFT JOIN trades t ON t.id = p.trade_id
            LEFT JOIN signals s ON s.id = t.signal_id
            LEFT JOIN messages m ON m.id = s.message_id
-           WHERE t.mode = ? AND t.status = 'closed'
-             AND date(datetime(t.closed_at, '+5 hours', '+30 minutes'))
+           WHERE p.mode = ? AND p.status = 'closed'
+             AND date(datetime(p.closed_at, '+5 hours', '+30 minutes'))
                  >= date(datetime('now', '+5 hours', '+30 minutes'), ?)""",
         (mode, f"-{max(1, days) - 1} days"),
     )
