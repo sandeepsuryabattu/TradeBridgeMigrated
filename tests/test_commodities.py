@@ -149,6 +149,30 @@ class TestCommodityRouting:
         from backend.contract_master import ContractMaster
         assert "mcx_fo" in ContractMaster.MULTI_SEGMENTS
 
+    def test_guinea_never_wins_standard_fut(self):
+        """Live bug 2026-10-13: GOLDM FUT resolved to GOLDGUINEA30OCT26FUT.
+        Micro products (Guinea/Petal) must lose to standard even with a
+        nearer expiry; minis beat micros as fallback."""
+        from backend.contract_master import ContractMaster
+        cm = ContractMaster()
+        rows = [
+            {"pTrdSymbol": "GOLDGUINEA30OCT26FUT", "pSymbol": "T Guinea",
+             "pOptionType": "", "pExpiryDate": "1793404799", "lLotSize": "8"},
+            {"pTrdSymbol": "GOLDM05NOV26FUT", "pSymbol": "T Mini",
+             "pOptionType": "", "pExpiryDate": "1793404799", "lLotSize": "100"},
+            {"pTrdSymbol": "GOLD05DEC26FUT", "pSymbol": "T Std",
+             "pOptionType": "", "pExpiryDate": "1796428799", "lLotSize": "1000"},
+        ]
+        cm._segments["mcx_fo"] = rows
+        out = cm.resolve({"kind": "FUT", "underlying": "GOLD",
+                          "exchange_segment": "mcx_fo", "expiry": None})
+        assert out["trading_symbol"] == "GOLD05DEC26FUT", out["trading_symbol"]
+        # No standard product: mini wins over Guinea
+        cm._segments["mcx_fo"] = rows[:2]
+        out = cm.resolve({"kind": "FUT", "underlying": "GOLD",
+                          "exchange_segment": "mcx_fo", "expiry": None})
+        assert out["trading_symbol"] == "GOLDM05NOV26FUT", out["trading_symbol"]
+
     def test_market_hours(self):
         from backend.trade_manager import TradeManager
         from unittest.mock import patch

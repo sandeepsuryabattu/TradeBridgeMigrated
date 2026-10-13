@@ -545,10 +545,29 @@ class ContractMaster:
         rest = sym[len(und):] if sym.startswith(und) else sym
         return len(rest) > 1 and rest[0] == "M" and rest[1].isdigit()
 
+    @staticmethod
+    def _is_standard_symbol(sym: str, und: str) -> bool:
+        """True for the desk's standard product: underlying code followed
+        immediately by the date (GOLD05DEC…, SENSEX26O15…, CRUDEOIL15OCT…).
+
+        Micro variants (GOLDGUINEA…, GOLDPETAL…, SILVERMIC…) and minis
+        (GOLDM29…, CRUDEOILM15…) carry a letter infix — never standard.
+        Live bug 2026-10-13: GOLDM FUT resolved to GOLDGUINEA30OCT26FUT
+        because Guinea slipped through the mini-only filter and won on
+        nearer expiry.
+        """
+        rest = sym[len(und):] if sym.startswith(und) else sym
+        return len(rest) == 0 or rest[0].isdigit()
+
     @classmethod
     def _prefer_standard(cls, cands: list[dict], und: str) -> list[dict]:
-        std = [c for c in cands if not cls._is_mini_symbol(cls._sym_of(c), und)]
-        return std or cands
+        std = [c for c in cands if cls._is_standard_symbol(cls._sym_of(c), und)]
+        if std:
+            return std
+        # No standard product: minis before micro contracts (Guinea/Petal),
+        # which the desk never trades unless asked for explicitly.
+        minis = [c for c in cands if cls._is_mini_symbol(cls._sym_of(c), und)]
+        return minis or cands
 
     @staticmethod
     def _hint_matches(hint: date, sym_date) -> bool:
