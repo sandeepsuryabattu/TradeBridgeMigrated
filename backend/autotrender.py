@@ -199,6 +199,15 @@ async def engine_status() -> Dict[str, Any]:
                           "last_chain_keys": _sched_last_chain_keys}}
 
 
+@router.get("/live")
+async def live_snapshot() -> Dict[str, Any]:
+    """Live engine picture for the dashboard. {} with ready:false until the
+    scheduler completes its first chain snapshot (needs feed + market hours)."""
+    if not _last_live.get("ready"):
+        return {"ready": False, "scheduler_running": _sched_task is not None}
+    return dict(_last_live)
+
+
 @router.post("/calls/{call_id}/paper-trade")
 async def paper_trade_call(call_id: int) -> Dict[str, Any]:
     """Explicit user action: route ONE stored call through the existing pipeline.
@@ -250,6 +259,8 @@ _sched_last_bias: Optional[str] = None
 _sched_day: Optional[str] = None
 _sched_count: int = 0
 _sched_last_chain_keys: List[str] = []
+# Last successful live snapshot for the dashboard (GET /api/autotrender/live).
+_last_live: Dict[str, Any] = {}
 
 
 def _reset_scheduler_state() -> None:
@@ -328,6 +339,20 @@ async def scheduler_tick(now: Optional[datetime] = None,
         log.exception("scheduler chain snapshot failed")
         return {"action": "skip", "reason": "chain snapshot failed"}
     _sched_last_chain_keys = snap.get("quote_keys", [])
+
+    # Cache the live picture for the dashboard (same data that drives calls).
+    summ = engine.summarize(snap["rows"])
+    sr = engine.get_support_resistance(snap["rows"])
+    _last_live.update({
+        "ready": True, "at": _ist_now(moment).isoformat(timespec="seconds"),
+        "spot": {"symbol": "NIFTY 50", "price": spot},
+        "expiry": snap.get("expiry"), "atm": snap.get("atm"),
+        "rows": snap["rows"], "pcr": summ["pcr"], "pcrChg": summ["pcrChg"],
+        "support": sr["support"], "resistance": sr["resistance"],
+        "maxPain": engine.max_pain(snap["rows"]),
+        "straddle": engine.straddle(snap["rows"]),
+        "quote_keys": snap.get("quote_keys", []),
+    })
 
     # Positioning needs live chain rows; fuse everything for the final vote.
     pos = models.positioning(snap["rows"], spot, trig["direction"])
