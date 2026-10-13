@@ -710,10 +710,14 @@ async def _restart_feed_with_resubscribe(reason: str):
 
 @app.middleware("http")
 async def add_cache_control(request, call_next):
-    """Force browsers to revalidate JS/CSS on every load — no stale cache."""
+    """Force browsers to revalidate shell + assets on every load — no stale cache.
+
+    index.html carries the ?v= bundle pins; if the shell itself caches,
+    phones keep loading retired JS forever (live bug: stuck Tune modal).
+    """
     response = await call_next(request)
     path = request.url.path
-    if path.endswith((".js", ".css")):
+    if path == "/" or path.endswith((".js", ".css", ".html")):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 

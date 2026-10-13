@@ -2642,11 +2642,16 @@ function openTuneModal(tradeId, signalId) {
     if (!trade) return toast('Order no longer pending — tune applies to pending entries only', 'warning');
     const sig = signalId != null ? state.signals.find(s => s.id === signalId) : null;
     const t = tuneFromTrade(trade);
+    // Prefill entry from the live order range first (notes "@ lo-hi" —
+    // widened terse ranges live here), then the signal, then price.
+    let preLow = sig?.entry_low, preHigh = sig?.entry_high;
+    const nm = trade.notes ? /@ ([\d.]+)-([\d.]+)/.exec(trade.notes) : null;
+    if (nm) { preLow = parseFloat(nm[1]); preHigh = parseFloat(nm[2]); }
     $('#tune-trade-id').value = tradeId;
     $('#tune-modal-title').textContent = `🎚 Tune — ${trade.trading_symbol || ('trade #' + tradeId)}`;
     $('#tune-lots').value = t.lots;
-    $('#tune-entry-low').value = sig?.entry_low ?? trade.price ?? '';
-    $('#tune-entry-high').value = sig?.entry_high ?? trade.price ?? '';
+    $('#tune-entry-low').value = preLow ?? trade.price ?? '';
+    $('#tune-entry-high').value = preHigh ?? trade.price ?? '';
     $('#tune-bounce').value = t.bouncePoints;
     $('#tune-act').value = t.activationPoints;
     $('#tune-act-off').value = t.activationSLOffset;
