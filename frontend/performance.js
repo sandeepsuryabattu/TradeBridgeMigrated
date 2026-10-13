@@ -103,17 +103,23 @@
   }
 
   // Keep the source dropdown in sync with what the backend knows.
-  // Autotrender appears here automatically once its first trade closes.
-  var knownSources = [];
+  // Autotrender is pinned statically so it stays selectable even with
+  // zero closed trades; other senders are added as they appear.
+  // Never rebuilds while filtered (would wipe the active selection).
+  var knownSources = ["Autotrender"];
   function syncSources(p) {
     var sel = document.getElementById("perf-source");
     if (!sel || !p.by_source) return;
     if (params().source) return; // filtered view: keep options as-is
     var names = Object.keys(p.by_source).sort();
-    if (names.join("|") === knownSources.join("|")) return;
-    knownSources = names;
+    var merged = [];
+    ["Autotrender"].concat(names).forEach(function (n) {
+      if (merged.indexOf(n) < 0) merged.push(n);
+    });
+    if (merged.join("|") === knownSources.join("|")) return;
+    knownSources = merged;
     var cur = sel.value;
-    sel.innerHTML = '<option value="">all</option>' + names.map(function (n) {
+    sel.innerHTML = '<option value="">all</option>' + merged.map(function (n) {
       return '<option value="' + esc(n) + '"' + (n === cur ? " selected" : "") + ">" +
         esc(n) + "</option>";
     }).join("");
