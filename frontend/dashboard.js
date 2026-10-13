@@ -1345,6 +1345,19 @@ function renderSignals() {
             const cancelTradeId = signalTrade ? (signalTrade.trade_id || signalTrade.id) : null;
             const showCancel = tradeStatus === 'pending' && cancelTradeId;
 
+            // Tuned entry: a pending order may carry an edited range in its
+            // notes ("@ low-high"). Show the live order range, flagged.
+            let entryLow = s.entry_low, entryHigh = s.entry_high, tunedMark = '';
+            if (signalTrade && signalTrade.notes) {
+                const m = /@ ([\d.]+)-([\d.]+)/.exec(signalTrade.notes);
+                if (m) {
+                    const lo = parseFloat(m[1]), hi = parseFloat(m[2]);
+                    if (lo !== s.entry_low || hi !== s.entry_high) {
+                        entryLow = lo; entryHigh = hi; tunedMark = ' 🎚';
+                    }
+                }
+            }
+
             const cardHtml = `
                 <div style="display:flex;justify-content:space-between;align-items:start;">
                     <span class="signal-status ${status}">${status}</span>
@@ -1365,7 +1378,7 @@ function renderSignals() {
                         <div><span class="label">Index</span><br><span class="value">${esc(s.idx || s.index || '')}</span></div>
                         <div><span class="label">Type</span><br><span class="value">${esc(s.option_type || '')}</span></div>
                         <div><span class="label">Strike</span><br><span class="value">${esc(s.strike || '')}</span></div>
-                        <div><span class="label">Entry</span><br><span class="value">₹${s.entry_low || 0} - ₹${s.entry_high || 0}</span></div>
+                        <div><span class="label">Entry</span><br><span class="value">₹${entryLow || 0} - ₹${entryHigh || 0}${tunedMark}</span></div>
                         <div><span class="label">${esc(cardIdx)}</span><br><span class="value ltp-live signal-index-ltp" data-idx="${esc(cardIdx)}">${indexVal}</span></div>
                         <div><span class="label">LTP</span><br><span class="value ltp-live" id="signal-ltp-${s.id}">${ltpVal}</span></div>
                         ${s.min_ltp ? `<div><span class="label">Min LTP</span><br><span class="value">₹${s.min_ltp}</span></div>` : ''}
