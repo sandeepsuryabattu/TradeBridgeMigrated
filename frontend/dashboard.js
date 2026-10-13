@@ -1395,8 +1395,10 @@ function renderSignals() {
                 } catch { /* leave as '--' */ }
             }
 
-            // Keep timer visible while trade is still pending. Hide once executed/terminal.
-            const showTimer = isValid && timerStart && (!tradeStatus || tradeStatus === 'pending');
+            // Timer + buttons ONLY while a live pending order exists. A valid
+            // signal with no order yet (or a skipped one) must not show a
+            // countdown to nothing.
+            const showTimer = isValid && timerStart && tradeStatus === 'pending' && cancelTradeId;
 
             // Find the trade_id for this signal (needed for cancel button)
             const signalTrade = state.trades.find(t => t.signal_id === s.id && t.status === 'pending');
@@ -1431,6 +1433,7 @@ function renderSignals() {
                     </div>
                 </div>
                 ${isValid && s.reason ? `<div class="signal-reason">${esc(s.reason)}</div>` : ''}
+                ${s.status_note ? `<div class="signal-reason">📝 ${esc(s.status_note)}</div>` : ''}
                 ${isValid ? `
                     <div class="signal-details">
                         <div><span class="label">Index</span><br><span class="value">${esc(s.idx || s.index || '')}</span></div>

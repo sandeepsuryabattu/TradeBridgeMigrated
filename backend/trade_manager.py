@@ -354,6 +354,13 @@ class TradeManager:
                     "Signal skipped — position already open for %s",
                     signal.display_symbol,
                 )
+                # Tell the card: skipped (not pending) — otherwise it shows a
+                # countdown to an order that will never exist.
+                await self._broadcast("order_update", {
+                    "signal_id":   signal_id,
+                    "status":      "skipped",
+                    "status_note": "Skipped — position already open",
+                })
                 return {
                     "message_id": msg_id,
                     "signal":     signal_dict,
@@ -409,6 +416,11 @@ class TradeManager:
         if not self._is_market_open(sig_underlying):
             if self.mode == "real":
                 log.warning("Market is closed — skipping real trade")
+                await self._broadcast("order_update", {
+                    "signal_id":   signal_id,
+                    "status":      "skipped",
+                    "status_note": "Skipped — market closed",
+                })
                 return {
                     "message_id": msg_id,
                     "signal":     signal_dict,
