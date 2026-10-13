@@ -227,6 +227,8 @@ function bindEventListeners() {
             const res = await fetch(`${API_BASE}/api/kill`, { method: 'POST' });
             const data = await res.json();
             toast(`Killed: ${data.positions_closed} positions closed, ${data.orders_cancelled} orders cancelled`, 'warning');
+            // Optimistic full repaint straight from the server — never wait on the socket echo.
+            try { await fetchInitialData(); } catch { /* WS init will heal */ }
         } catch {
             toast('Kill switch failed', 'error');
         }
@@ -765,6 +767,8 @@ async function sendTestSignal() {
         const result = await res.json();
         if (result.signal?.status === 'valid') {
             toast('Test signal sent and validated!', 'success');
+            // Optimistic repaint so the card appears without waiting on the socket echo.
+            try { await fetchInitialData(); } catch { /* WS will heal */ }
         } else if (result.signal?.status === 'ignored') {
             toast(`Signal ignored: ${result.signal.reason}`, 'warning');
         } else {
@@ -779,7 +783,18 @@ async function exitPosition(positionId) {
     try {
         const res = await fetch(`${API_BASE}/api/positions/${positionId}/exit`, { method: 'POST' });
         const data = await res.json();
-        if (data.status === 'closed' || data.status === 'ok') {
+        if (data.status === 'closed') {
+            // Optimistic repaint from the response — never wait on the socket echo.
+            const pIdx = state.positions.findIndex(p => (p.id || p.position_id) === positionId);
+            if (pIdx !== -1) {
+                state.positions[pIdx] = { ...state.positions[pIdx], status: 'closed',
+                    pnl: data.pnl ?? state.positions[pIdx].pnl,
+                    exit_price: data.exit_price ?? state.positions[pIdx].current_price,
+                    exit_reason: data.exit_reason || 'manual' };
+                renderPositions();
+            }
+            toast(`Position closed${data.pnl != null ? ` | PnL: Rs${Number(data.pnl).toFixed(2)}` : ''}`, 'info');
+        } else if (data.status === 'ok') {
             toast('Exit submitted — awaiting confirmation', 'info');
         } else {
             toast(data.message || 'Failed to exit position', 'error');
@@ -793,7 +808,7 @@ async function cancelPendingOrder(tradeId, signalId) {
         const data = await res.json();
         if (data.status === 'ok') {
             toast(`Cancelled: ${data.trading_symbol || 'pending order'}`, 'info');
-            // Update local signal state immediately (WS broadcast will also arrive)
+            // Update local signal + trade state immediately (WS broadcast will also arrive)
             if (signalId) {
                 const sigIdx = state.signals.findIndex(s => s.id === signalId);
                 if (sigIdx !== -1) {
@@ -801,6 +816,11 @@ async function cancelPendingOrder(tradeId, signalId) {
                     state.signals[sigIdx].status_note = 'Cancelled by user';
                     renderSignals();
                 }
+            }
+            const trdIdx = state.trades.findIndex(t => (t.trade_id || t.id) === tradeId);
+            if (trdIdx !== -1) {
+                state.trades[trdIdx] = { ...state.trades[trdIdx], status: 'cancelled' };
+                renderTradesDebounced();
             }
         } else if (data.status === 'already_done') {
             // Order already filled/expired/cancelled — update UI to actual status
