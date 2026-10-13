@@ -233,6 +233,9 @@ async def init_db():
         # Exact resolved contract per signal — lets LTP backfill skipped
         # signals (no trade row) without cross-expiry bleed.
         ("signals",   "trading_symbol",           "TEXT"),
+        # Instrument kind (OPT/FUT/EQ) so cards can badge FUT/EQ rows,
+        # which carry no CE/PE option_type.
+        ("signals",   "kind",                     "TEXT DEFAULT 'OPT'"),
         # positions table — SL config fields
         ("positions", "sl_mode",                  "TEXT DEFAULT 'fixed'"),
         ("positions", "sl_gap",                   "REAL DEFAULT 0"),
@@ -416,8 +419,8 @@ async def save_signal(message_id: int, parsed: dict) -> int:
         """INSERT INTO signals
            (message_id, status, reason, idx, strike, option_type,
             entry_low, entry_high, diff, stoploss, targets, expiry,
-            variant, exchange_segment)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            variant, exchange_segment, kind)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             message_id,
             parsed.get("status"),
@@ -433,6 +436,7 @@ async def save_signal(message_id: int, parsed: dict) -> int:
             parsed.get("expiry"),
             parsed.get("variant") or "standard",
             parsed.get("exchange_segment") or "bse_fo",
+            parsed.get("kind") or "OPT",
         ),
     )
     await db.execute(

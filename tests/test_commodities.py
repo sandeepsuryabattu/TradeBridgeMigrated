@@ -173,6 +173,29 @@ class TestCommodityRouting:
                           "exchange_segment": "mcx_fo", "expiry": None})
         assert out["trading_symbol"] == "GOLDM05NOV26FUT", out["trading_symbol"]
 
+    def test_signal_kind_persisted(self, tmp_path, monkeypatch):
+        """kind (OPT/FUT/EQ) survives save → get so cards can badge FUT rows."""
+        import asyncio
+        import backend.database as dbmod
+        monkeypatch.setattr(dbmod, "DB_PATH", tmp_path / "t.db")
+        monkeypatch.setattr(dbmod, "_db_conn", None)
+
+        async def go():
+            await dbmod.init_db()
+            mid = await dbmod.save_message("GOLDM FUT price 1-2 SL 1", sender="t")
+            sid = await dbmod.save_signal(mid, {
+                "status": "valid", "reason": None, "index": "GOLD",
+                "strike": None, "option_type": None, "entry_low": 1,
+                "entry_high": 2, "diff": 1, "stoploss": 1, "targets": None,
+                "expiry": None, "variant": "standard",
+                "exchange_segment": "mcx_fo", "kind": "FUT",
+            })
+            rows = await dbmod.get_signals(limit=5)
+            await dbmod.close_connections()
+            return [r for r in rows if r["id"] == sid]
+        found = asyncio.run(go())
+        assert len(found) == 1 and found[0]["kind"] == "FUT"
+
     def test_fut_expiry_judged_over_futs_only(self):
         """Option expiries must not poison FUT resolution: Oct-30 standard
         options exist but the nearest standard FUT is Dec — resolve the FUT,

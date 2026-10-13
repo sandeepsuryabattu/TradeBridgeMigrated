@@ -1487,7 +1487,7 @@ function renderSignals() {
                 ${isValid ? `
                     <div class="signal-details">
                         <div><span class="label">Index</span><br><span class="value">${esc(s.idx || s.index || '')}</span></div>
-                        <div><span class="label">Type</span><br><span class="value">${esc(s.option_type || '')}</span></div>
+                        <div><span class="label">Type</span><br><span class="value">${esc(s.option_type || ((s.kind && s.kind !== 'OPT') ? s.kind : ''))}</span></div>
                         <div><span class="label">Strike</span><br><span class="value">${esc(s.strike || '')}</span></div>
                         <div><span class="label">Entry</span><br><span class="value">₹${entryLow || 0} - ₹${entryHigh || 0}${tunedMark}</span></div>
                         <div><span class="label">${esc(cardIdx)}</span><br><span class="value ltp-live signal-index-ltp" data-idx="${esc(cardIdx)}">${indexVal}</span></div>
