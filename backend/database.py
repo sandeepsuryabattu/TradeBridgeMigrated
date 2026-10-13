@@ -399,7 +399,7 @@ async def get_messages(limit: int = 100, date: str = None) -> list[dict]:
     db = await _get_db()
     if date:
         cursor = await db.execute(
-            "SELECT * FROM messages WHERE date(timestamp) = date(?) ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM messages WHERE date(datetime(timestamp, '+5 hours', '+30 minutes')) = date(?) ORDER BY id DESC LIMIT ?",
             (date, limit),
         )
     else:
