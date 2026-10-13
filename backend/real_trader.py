@@ -1458,6 +1458,35 @@ class RealTrader:
 
     # ── Close Position ────────────────────────────────────────────────────────
 
+    async def set_position_stop_loss(self, position_id: int, stop_loss: float) -> dict:
+        """Manual SL edit from the position card. Software SL — just moves
+        trailing_sl in memory + DB; the tick handler enforces it. Broadcasts
+        position_update so every client repaints from confirmed state."""
+        if stop_loss is None or stop_loss <= 0:
+            return {"status": "error", "message": "SL must be above 0"}
+        pos = None
+        for p in self._open_positions:
+            if p["id"] == position_id:
+                pos = p
+                break
+        if pos is None:
+            return {"status": "error", "message": "Position not found"}
+        if pos.get("status") != "open":
+            return {"status": "error", "message": "Position not open"}
+        old_sl = pos.get("trailing_sl", 0)
+        pos["trailing_sl"] = stop_loss
+        try:
+            await db.update_position(position_id, {"trailing_sl": stop_loss})
+        except Exception:
+            log.exception("set_position_stop_loss: db update failed")
+        await self._broadcast("position_update", {
+            "id":          position_id,
+            "status":      "open",
+            "trailing_sl": stop_loss,
+        })
+        return {"status": "ok", "position_id": position_id, "old_sl": old_sl,
+                "trailing_sl": stop_loss, "trading_symbol": pos.get("trading_symbol")}
+
     async def close_position(self, position_id: int, exit_price: float = None, exit_reason: str = None) -> dict:
         async with self._close_lock:
             pos = None

@@ -883,6 +883,23 @@ async def exit_position(position_id: int):
     return result
 
 
+class StopLossRequest(BaseModel):
+    stop_loss: float
+
+
+@app.post("/api/positions/{position_id}/stop-loss", dependencies=[Depends(require_api_token)])
+async def set_position_stop_loss(position_id: int, req: StopLossRequest):
+    """Manual SL edit from the position card — tap snaps to LTP−1, steppers nudge.
+    Takes effect on the next tick. Only confirmed responses repaint the UI."""
+    if req.stop_loss is None or req.stop_loss <= 0:
+        return {"status": "error", "message": "SL must be above 0"}
+    if manager.mode == "real":
+        result = await manager.real_trader.set_position_stop_loss(position_id, req.stop_loss)
+    else:
+        result = await manager.paper_trader.set_position_stop_loss(position_id, req.stop_loss)
+    return result
+
+
 @app.post("/api/orders/{trade_id}/cancel", dependencies=[Depends(require_api_token)])
 async def cancel_pending_order(trade_id: int):
     """Cancel a single pending entry order.

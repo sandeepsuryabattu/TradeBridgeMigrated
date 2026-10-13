@@ -737,6 +737,36 @@ class PaperTrader:
 
     # ── Close position ────────────────────────────────────────────────────────
 
+    async def set_position_stop_loss(self, position_id: int, stop_loss: float) -> dict:
+        """Manual SL edit from the position card (tap = LTP−1, steppers ±).
+
+        Sets trailing_sl in memory + DB — the next tick enforces it exactly
+        like any other SL. Broadcasts position_update so every client repaints
+        from confirmed state. Note: trail modes only ever *raise* SL, so a
+        manual cut stays until the trail climbs past it.
+        """
+        if stop_loss is None or stop_loss <= 0:
+            return {"status": "error", "message": "SL must be above 0"}
+        for pos in self._open_positions:
+            if pos["id"] != position_id:
+                continue
+            if pos.get("status") != "open":
+                return {"status": "error", "message": "Position not open"}
+            old_sl = pos.get("trailing_sl", 0)
+            pos["trailing_sl"] = stop_loss
+            try:
+                await db.update_position(position_id, {"trailing_sl": stop_loss})
+            except Exception:
+                log.exception("set_position_stop_loss: db update failed")
+            await self._broadcast("position_update", {
+                "id":          position_id,
+                "status":      "open",
+                "trailing_sl": stop_loss,
+            })
+            return {"status": "ok", "position_id": position_id, "old_sl": old_sl,
+                    "trailing_sl": stop_loss, "trading_symbol": pos.get("trading_symbol")}
+        return {"status": "error", "message": "Position not found"}
+
     async def close_position(self, position_id: int, exit_price: float = None, exit_reason: str = None) -> dict:
         for pos in self._open_positions:
             if pos["id"] != position_id:

@@ -821,6 +821,56 @@ async function exitPosition(positionId) {
     } catch { toast('Exit failed', 'error'); }
 }
 
+// Manual SL edit from the open-position card: tap the SL value to snap it
+// to LTP−1, or use the −/+ steppers (step 1, or 5 when LTP ≥ 1000).
+// Repaints only on the confirmed response — never optimistically.
+function slControlHTML(p) {
+    const snapBadge = p.sl_mode === 'snap_levels'
+        ? ` <span class="snap-level-badge">${getSnapLevelLabel(p)}</span>` : '';
+    return `<span class="sl-stepper" data-sl-for="${p.id}">`
+        + `<button class="sl-step" onclick="nudgePositionSL(${p.id},-1)" title="Lower SL">−</button>`
+        + `<span class="sl-tag sl-tap" onclick="snapPositionSL(${p.id})" title="Tap: set SL to LTP−1">SL: ₹${(p.trailing_sl || 0).toFixed(2)}${snapBadge}</span>`
+        + `<button class="sl-step" onclick="nudgePositionSL(${p.id},1)" title="Raise SL">+</button></span>`;
+}
+
+async function snapPositionSL(positionId) {
+    const p = state.positions.find(x => x.id === positionId);
+    if (!p) return;
+    const ltp = p.current_price || 0;
+    if (!(ltp > 0)) { toast('No live price — cannot snap SL', 'warning'); return; }
+    await savePositionSL(positionId, Math.round((ltp - 1) * 100) / 100);
+}
+
+async function nudgePositionSL(positionId, dir) {
+    const p = state.positions.find(x => x.id === positionId);
+    if (!p) return;
+    const step = (p.current_price || 0) >= 1000 ? 5 : 1;
+    await savePositionSL(positionId, Math.round(((p.trailing_sl || 0) + dir * step) * 100) / 100);
+}
+
+async function savePositionSL(positionId, value) {
+    if (!(value > 0)) { toast('SL must be above 0', 'error'); return; }
+    try {
+        const res = await fetch(`${API_BASE}/api/positions/${positionId}/stop-loss`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stop_loss: value }),
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            const idx = state.positions.findIndex(x => x.id === positionId);
+            if (idx !== -1) {
+                state.positions[idx] = { ...state.positions[idx], trailing_sl: data.trailing_sl ?? value };
+                renderPositions();
+            }
+            toast(`SL → ₹${Number(data.trailing_sl ?? value).toFixed(2)}`, 'info');
+            scheduleVerifyOnDeadSocket();
+        } else {
+            toast(data.message || 'SL update failed', 'error');
+        }
+    } catch { toast('SL update failed', 'error'); }
+}
+
 async function cancelPendingOrder(tradeId, signalId) {
     try {
         const res = await fetch(`${API_BASE}/api/orders/${tradeId}/cancel`, { method: 'POST' });
@@ -1559,13 +1609,8 @@ function renderPositions() {
             }
             const ltpSpan = existing.querySelector('.pos-meta .mono');
             if (ltpSpan) ltpSpan.textContent = `₹${(p.current_price || 0).toFixed(2)}`;
-            const slTag = existing.querySelector('.sl-tag');
-            if (slTag) {
-                const snapBadge = p.sl_mode === 'snap_levels'
-                    ? ` <span class="snap-level-badge">${getSnapLevelLabel(p)}</span>`
-                    : '';
-                slTag.innerHTML = `SL: ₹${(p.trailing_sl || 0).toFixed(2)}${snapBadge}`;
-            }
+            const slStepper = existing.querySelector('.sl-stepper');
+            if (slStepper) slStepper.outerHTML = slControlHTML(p);
             const maxTag = existing.querySelector('.max-tag');
             if (maxTag && p.max_ltp) maxTag.textContent = `Max: ₹${p.max_ltp.toFixed(2)}`;
         } else {
@@ -1587,7 +1632,7 @@ function renderPositions() {
                         LTP: <span class="mono">₹${(p.current_price || 0).toFixed(2)}</span>
                     </span>
                     <div class="pos-strategy">
-                        <span class="sl-tag">SL: ₹${(p.trailing_sl || 0).toFixed(2)}${p.sl_mode === 'snap_levels' ? ` <span class="snap-level-badge">${getSnapLevelLabel(p)}</span>` : ''}</span>
+                        ${slControlHTML(p)}
                         ${p.max_ltp ? `<span class="max-tag">Max: ₹${p.max_ltp.toFixed(2)}</span>` : ''}
                     </div>
                 </div>
