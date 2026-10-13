@@ -778,6 +778,19 @@ async function sendTestSignal() {
     } catch { toast('Failed to send test', 'error'); }
 }
 
+// Convergence guard: optimistic repaints use confirmed server responses, and
+// every later push/fetch overwrites them (last-write-wins). The only window
+// for divergence is a dead socket + a concurrent change — which heals on the
+// next reconnect (server init replaces full state). As a backstop, verify
+// once from the server after mutations made while offline.
+function scheduleVerifyOnDeadSocket() {
+    setTimeout(() => {
+        if (!state.wsConnected) {
+            fetchInitialData().catch(() => { /* WS init will heal */ });
+        }
+    }, 8000);
+}
+
 async function exitPosition(positionId) {
     if (!confirm('Exit this position at current price?')) return;
     try {
@@ -794,6 +807,7 @@ async function exitPosition(positionId) {
                 renderPositions();
             }
             toast(`Position closed${data.pnl != null ? ` | PnL: Rs${Number(data.pnl).toFixed(2)}` : ''}`, 'info');
+            scheduleVerifyOnDeadSocket();
         } else if (data.status === 'ok') {
             toast('Exit submitted — awaiting confirmation', 'info');
         } else {
@@ -822,6 +836,7 @@ async function cancelPendingOrder(tradeId, signalId) {
                 state.trades[trdIdx] = { ...state.trades[trdIdx], status: 'cancelled' };
                 renderTradesDebounced();
             }
+            scheduleVerifyOnDeadSocket();
         } else if (data.status === 'already_done') {
             // Order already filled/expired/cancelled — update UI to actual status
             // so the timer stops and cancel button disappears
@@ -2756,6 +2771,7 @@ function bindTuneModal() {
                 renderSignals();
                 renderTradesDebounced();
                 toast(`Tuned: ${data.summary}`, 'success');
+                scheduleVerifyOnDeadSocket();
                 $('#tune-modal').style.display = 'none';
             } else {
                 toast(data.message || 'Tune failed', 'error');
