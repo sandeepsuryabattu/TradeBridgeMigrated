@@ -79,6 +79,19 @@
         "<thead><tr><th>Model</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th></tr></thead><tbody>" +
         rows(p.by_model) + "</tbody></table></div></div>";
     }
+    if (p.ledger && p.ledger.length) {
+      html += '<div class="perf-section"><h4 class="perf-sub">Ledger — all ' +
+        p.ledger.length + ' closed trades (newest first)</h4>' +
+        '<div class="table-wrapper"><table class="data-table">' +
+        "<thead><tr><th>Day</th><th>Symbol</th><th>Qty</th><th>Entry</th>" +
+        "<th>Exit</th><th>P&L</th><th>Exit</th><th>Source</th></tr></thead><tbody>" +
+        p.ledger.map(function (t) {
+          return "<tr><td>" + esc(t.day) + "</td><td>" + esc(t.symbol) + "</td>" +
+            "<td>" + esc(t.qty) + "</td><td>" + fmt(t.entry) + "</td>" +
+            "<td>" + fmt(t.exit) + "</td><td>" + fmt(t.pnl) + "</td>" +
+            "<td>" + esc(t.reason) + "</td><td>" + esc(t.source) + "</td></tr>";
+        }).join("") + "</tbody></table></div></div>";
+    }
     el.innerHTML = html;
   }
 

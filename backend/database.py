@@ -621,13 +621,15 @@ def compute_perf(rows: list[dict]) -> dict:
     }
 
 
-async def get_performance(mode: str = "paper", days: int = 30) -> dict:
+async def get_performance(mode: str = "paper", days: int = 30,
+                          ledger_limit: int = 200) -> dict:
     """Closed-position performance, IST trading days.
 
     NOTE: final P&L lives on positions (status='closed'), not trades —
     trades stay 'filled' after fill. Source = message sender (Telegram
     group vs Autotrender); model from signals.model_version set on the
-    autotrender paper path.
+    autotrender paper path. `ledger` holds the individual closed trades,
+    newest first.
     """
     db = await _get_db()
     cursor = await db.execute(
@@ -647,6 +649,23 @@ async def get_performance(mode: str = "paper", days: int = 30) -> dict:
     rows = [dict(r) for r in await cursor.fetchall()]
     out = compute_perf(rows)
     out.update({"mode": mode, "days": days, "closed_trades": len(rows)})
+    cursor = await db.execute(
+        """SELECT date(datetime(p.closed_at, '+5 hours', '+30 minutes')) AS day,
+                  p.trading_symbol AS symbol, p.quantity AS qty,
+                  p.entry_price AS entry, p.current_price AS exit,
+                  p.pnl AS pnl, p.exit_reason AS reason,
+                  COALESCE(m.sender, 'Unknown') AS source
+           FROM positions p
+           LEFT JOIN trades t ON t.id = p.trade_id
+           LEFT JOIN signals s ON s.id = t.signal_id
+           LEFT JOIN messages m ON m.id = s.message_id
+           WHERE p.mode = ? AND p.status = 'closed'
+             AND date(datetime(p.closed_at, '+5 hours', '+30 minutes'))
+                 >= date(datetime('now', '+5 hours', '+30 minutes'), ?)
+           ORDER BY p.id DESC LIMIT ?""",
+        (mode, f"-{max(1, days) - 1} days", max(0, min(ledger_limit, 2000))),
+    )
+    out["ledger"] = [dict(r) for r in await cursor.fetchall()]
     return out
 
 
