@@ -121,6 +121,21 @@ def test_cooldown_suppresses_repeat(wired):
     assert len(wired.process_calls) == 1
 
 
+def test_fresh_breakout_jumps_queue_once(wired):
+    b = _bullish_builder()  # ends in a HIGH breakout
+    # Pretend the last fired call was same-bias but NOT breakout-driven.
+    at._sched_last_bias = "BULLISH"
+    at._sched_last_ts = IST_10AM.timestamp()
+    at._sched_last_breakout = False
+    res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=b))
+    assert res["action"] == "generated", res
+    assert at._sched_last_breakout is True
+    # Same episode persisting: suppressed again.
+    res2 = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=b))
+    assert res2 == {"action": "skip", "reason": "cooldown"}
+    assert len(wired.process_calls) == 1
+
+
 def test_real_mode_never_trades(wired):
     wired.mode = "real"
     res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=_bullish_builder()))

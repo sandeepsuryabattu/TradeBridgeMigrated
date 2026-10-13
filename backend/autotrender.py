@@ -275,6 +275,7 @@ SCHED_WIDTH = 9                 # strikes each side of ATM for the snapshot
 _sched_task = None
 _sched_last_ts: float = 0.0
 _sched_last_bias: Optional[str] = None
+_sched_last_breakout: bool = False
 _sched_day: Optional[str] = None
 _sched_count: int = 0
 _sched_last_chain_keys: List[str] = []
@@ -285,8 +286,10 @@ _last_live: Dict[str, Any] = {}
 def _reset_scheduler_state() -> None:
     """Test-only: clear cooldown/cap state (cooldown + daily cap)."""
     global _sched_last_ts, _sched_last_bias, _sched_day, _sched_count, _sched_last_chain_keys
+    global _sched_last_breakout
     _sched_last_ts = 0.0
     _sched_last_bias = None
+    _sched_last_breakout = False
     _sched_day = None
     _sched_count = 0
     _sched_last_chain_keys = []
@@ -305,6 +308,8 @@ def _in_market_hours(now: Optional[datetime] = None) -> bool:
 async def scheduler_tick(now: Optional[datetime] = None,
                          builder: Optional[CandleBuilder] = None) -> Dict[str, Any]:
     """One scheduler evaluation. Returns {"action": ...} — never raises."""
+    global _sched_day, _sched_count, _sched_last_ts, _sched_last_bias
+    global _sched_last_breakout, _sched_last_chain_keys
     from . import kotak_chain as chain
     b = builder or _candles
     moment = now or datetime.now(timezone.utc)
@@ -318,7 +323,6 @@ async def scheduler_tick(now: Optional[datetime] = None,
         return {"action": "skip", "reason": "outside market hours"}
 
     day = _ist_now(moment).strftime("%Y-%m-%d")
-    global _sched_day, _sched_count, _sched_last_ts, _sched_last_bias, _sched_last_chain_keys
     if _sched_day != day:
         _sched_day, _sched_count = day, 0
     if _sched_count >= SCHED_MAX_PER_DAY:
@@ -343,7 +347,13 @@ async def scheduler_tick(now: Optional[datetime] = None,
         return {"action": "skip", "reason": f"volatility veto ({vol['reason']})"}
 
     ts = moment.timestamp()
-    if trig["direction"] == _sched_last_bias and ts - _sched_last_ts < SCHED_COOLDOWN_SECS:
+    # Cooldown suppresses same-drift repeats, but a FRESH breakout episode
+    # jumps the queue once — new information, not a repeat. Persistent
+    # breakouts (same episode as the last fired call) still wait.
+    fresh_breakout = (trig["direction"] == "BULLISH" and "breakout=HIGH" in trig["reason"]) or \
+                     (trig["direction"] == "BEARISH" and "breakout=LOW" in trig["reason"])
+    if trig["direction"] == _sched_last_bias and ts - _sched_last_ts < SCHED_COOLDOWN_SECS \
+            and not (fresh_breakout and not _sched_last_breakout):
         return {"action": "skip", "reason": "cooldown"}
 
     kotak = getattr(_manager, "kotak", None)
@@ -406,6 +416,7 @@ async def scheduler_tick(now: Optional[datetime] = None,
                        "trigger": trig["reason"], "positioning": pos,
                        "volatility": vol}
     _sched_last_ts, _sched_last_bias = ts, direction
+    _sched_last_breakout = fresh_breakout
     _sched_count += 1
     return {"action": "generated", "call": record}
 
