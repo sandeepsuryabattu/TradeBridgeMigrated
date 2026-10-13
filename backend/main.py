@@ -965,6 +965,7 @@ async def tune_pending_order(req: TuneRequest):
         "status_note": f"Tuned: {tune_summary(tune, order)}",
         "quantity": order["quantity"],
         "price": order.get("price"),
+        "notes": order.get("notes"),
         "tune": tune,
         "tune_json": order["tune_json"],
     }})
