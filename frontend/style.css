@@ -392,13 +392,7 @@ header {
     max-height: 220px;
 }
 
-/* Performance modal content (additive; panel removed in favour of 📈 icon) */
-.perf-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-    gap: 8px;
-    margin-bottom: 10px;
-}
+/* Performance dashboard page (additive) */
 .perf-card {
     background: var(--bg-card);
     border: 1px solid var(--glass-border);
@@ -415,13 +409,6 @@ header {
     font-size: 15px;
     font-weight: 700;
     margin-top: 2px;
-}
-.perf-sub {
-    font-size: 11px;
-    color: var(--text-secondary);
-    margin: 10px 0 4px;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
 }
 
 /* ── Message Bubbles ── */

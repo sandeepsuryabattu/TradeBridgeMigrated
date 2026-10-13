@@ -12,16 +12,77 @@
         rel="stylesheet">
     <link rel="stylesheet" href="style.css?v=8">
     <style>
-        .perf-page { max-width: 1100px; margin: 0 auto; padding: 16px; }
-        .perf-topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-        .perf-topbar h1 { font-size: 17px; margin: 0; }
+        :root { color-scheme: dark; }
+        body { background: var(--bg-primary); }
+        .perf-page { max-width: 1100px; margin: 0 auto; padding: 16px 16px 40px; }
+        .perf-topbar {
+            display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+            padding: 12px 16px; margin-bottom: 14px;
+            background: var(--glass-bg); border: 1px solid var(--glass-border);
+            border-radius: var(--radius-lg); backdrop-filter: blur(12px);
+            position: sticky; top: 0; z-index: 5;
+        }
+        .perf-topbar h1 { font-size: 16px; margin: 0; }
         .perf-topbar .muted { color: var(--text-muted); font-size: 12px; }
+        .perf-topbar .spacer { flex: 1; }
         .perf-topbar select, .perf-topbar input {
             background: var(--bg-card); color: var(--text-primary);
             border: 1px solid var(--glass-border); border-radius: 6px;
-            padding: 5px 8px; font-size: 12px;
+            padding: 5px 8px; font-size: 12px; font-family: inherit;
         }
-        .perf-section { margin-top: 14px; }
+        .perf-hero {
+            display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr;
+            gap: 10px; margin-bottom: 12px;
+        }
+        .perf-hero-main {
+            background: linear-gradient(135deg, var(--bg-card), var(--bg-elevated));
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius-lg); padding: 16px 18px;
+        }
+        .perf-hero-main .num {
+            font-size: 30px; font-weight: 800; font-family: var(--font-mono);
+            letter-spacing: -0.5px;
+        }
+        .perf-card {
+            background: var(--bg-card); border: 1px solid var(--glass-border);
+            border-radius: var(--radius-lg); padding: 12px 14px;
+        }
+        .perf-label {
+            font-size: 10px; color: var(--text-muted); text-transform: uppercase;
+            letter-spacing: 0.6px; font-weight: 600;
+        }
+        .perf-value { font-size: 19px; font-weight: 700; margin-top: 4px; font-family: var(--font-mono); }
+        .pos { color: var(--green, #22c55e); }
+        .neg { color: #ef4444; }
+        .perf-section {
+            background: var(--glass-bg); border: 1px solid var(--glass-border);
+            border-radius: var(--radius-lg); margin-top: 12px; overflow: hidden;
+        }
+        .perf-section > h4 {
+            margin: 0; padding: 12px 16px; font-size: 12px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+        }
+        .perf-scroll { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+        table.perf-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+        table.perf-table thead th {
+            position: sticky; top: 0; background: var(--bg-elevated);
+            text-align: left; font-size: 10.5px; text-transform: uppercase;
+            letter-spacing: 0.5px; color: var(--text-muted); font-weight: 700;
+            padding: 9px 14px; white-space: nowrap; z-index: 1;
+        }
+        table.perf-table td {
+            padding: 8px 14px; border-top: 1px solid var(--border);
+            font-family: var(--font-mono); white-space: nowrap;
+        }
+        table.perf-table td:first-child { font-family: inherit; }
+        table.perf-table tbody tr:hover { background: var(--bg-card-hover); }
+        .pill {
+            display: inline-block; font-size: 10px; font-weight: 700;
+            padding: 2px 9px; border-radius: 20px; letter-spacing: 0.3px;
+            background: var(--bg-elevated); border: 1px solid var(--glass-border);
+        }
+        @media (max-width: 700px) { .perf-hero { grid-template-columns: 1fr 1fr; } }
     </style>
 </head>
 
@@ -31,7 +92,7 @@
             <a href="/" class="btn btn-sm btn-secondary" style="text-decoration:none;">← Dashboard</a>
             <h1>📈 Performance</h1>
             <span class="muted" id="perf-mode">paper · 30d</span>
-            <span style="flex:1;"></span>
+            <span class="spacer"></span>
             <label class="muted">Mode
                 <select id="perf-mode-sel">
                     <option value="paper" selected>paper</option>
@@ -47,7 +108,7 @@
             <div class="empty-state">Loading…</div>
         </div>
     </div>
-    <script src="performance.js?v=2"></script>
+    <script src="performance.js?v=3"></script>
 </body>
 
 </html>

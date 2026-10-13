@@ -11,12 +11,13 @@
   function fmt(n) {
     var v = Number(n);
     if (!Number.isFinite(v)) return "—";
-    return (v >= 0 ? "+" : "") + "₹" + v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+    return (v > 0 ? "+" : "") + "₹" + v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
   }
 
-  function card(label, value, tone) {
-    return '<div class="perf-card"><div class="perf-label">' + esc(label) + "</div>" +
-      '<div class="perf-value ' + (tone || "") + '">' + esc(value) + "</div></div>";
+  function tone(v) {
+    v = Number(v);
+    if (!Number.isFinite(v) || v === 0) return "";
+    return v > 0 ? "pos" : "neg";
   }
 
   function pf(v) {
@@ -24,11 +25,16 @@
     return esc(v);
   }
 
-  function rows(obj) {
+  function card(label, value, cls) {
+    return '<div class="perf-card"><div class="perf-label">' + esc(label) + "</div>" +
+      '<div class="perf-value ' + (cls || "") + '">' + value + "</div></div>";
+  }
+
+  function aggRows(obj) {
     return Object.keys(obj).map(function (k) {
       var b = obj[k];
-      return "<tr><td>" + esc(k) + "</td><td>" + b.trades + "</td>" +
-        "<td>" + b.win_rate + "%</td><td>" + fmt(b.pnl) + "</td>" +
+      return "<tr><td><span class='pill'>" + esc(k) + "</span></td><td>" + b.trades + "</td>" +
+        "<td>" + b.win_rate + "%</td><td class='" + tone(b.pnl) + "'>" + fmt(b.pnl) + "</td>" +
         "<td>" + pf(b.profit_factor) + "</td></tr>";
     }).join("");
   }
@@ -39,6 +45,12 @@
     var mode = modeEl && (modeEl.value === "real" ? "real" : "paper");
     var days = daysEl ? Math.min(365, Math.max(1, parseInt(daysEl.value, 10) || 30)) : 30;
     return { mode: mode || "paper", days: days };
+  }
+
+  function section(title, thead, body) {
+    return '<div class="perf-section"><h4>' + esc(title) + "</h4>" +
+      '<div class="perf-scroll"><table class="perf-table"><thead><tr>' + thead +
+      "</tr></thead><tbody>" + body + "</tbody></table></div></div>";
   }
 
   function render(p) {
@@ -52,45 +64,36 @@
       return;
     }
     var o = p.overall;
-    var html = '<div class="perf-grid">' +
-      card("Total P&L", fmt(o.pnl), o.pnl >= 0 ? "value-up" : "value-down") +
-      card("Win rate", o.win_rate + "% (" + o.wins + "/" + o.trades + ")") +
-      card("Profit factor", pf(o.profit_factor)) +
-      card("Expectancy", fmt(o.expectancy)) +
-      card("Max drawdown", fmt(p.max_drawdown), "value-down") +
-      card("Best / Worst", fmt(o.best) + " / " + fmt(o.worst)) +
+    var html = '<div class="perf-hero">' +
+      '<div class="perf-hero-main"><div class="perf-label">Total P&L</div>' +
+      '<div class="num ' + tone(o.pnl) + '">' + fmt(o.pnl) + "</div>" +
+      '<div class="perf-label">' + o.wins + "/" + o.trades + " wins · PF " + pf(o.profit_factor) + "</div></div>" +
+      card("Win rate", o.win_rate + "%") +
+      card("Expectancy / trade", fmt(o.expectancy), tone(o.expectancy)) +
+      card("Max drawdown", fmt(p.max_drawdown), "neg") +
       "</div>";
     var days = Object.keys(p.by_day).slice(-30).reverse();
-    html += '<div class="perf-section"><h4 class="perf-sub">By day</h4>' +
-      '<div class="table-wrapper"><table class="data-table">' +
-      "<thead><tr><th>Day</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th></tr></thead><tbody>" +
+    html += section("By day", "<th>Day</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th>",
       days.map(function (d) {
         var b = p.by_day[d];
         return "<tr><td>" + esc(d) + "</td><td>" + b.trades + "</td><td>" + b.win_rate +
-          "%</td><td>" + fmt(b.pnl) + "</td><td>" + pf(b.profit_factor) + "</td></tr>";
-      }).join("") + "</tbody></table></div></div>";
-    html += '<div class="perf-section"><h4 class="perf-sub">By source</h4>' +
-      '<div class="table-wrapper"><table class="data-table">' +
-      "<thead><tr><th>Source</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th></tr></thead><tbody>" +
-      rows(p.by_source) + "</tbody></table></div></div>";
+          "%</td><td class='" + tone(b.pnl) + "'>" + fmt(b.pnl) + "</td><td>" + pf(b.profit_factor) + "</td></tr>";
+      }).join(""));
+    html += section("By source", "<th>Source</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th>",
+      aggRows(p.by_source));
     if (p.by_model && Object.keys(p.by_model).length) {
-      html += '<div class="perf-section"><h4 class="perf-sub">By model</h4>' +
-        '<div class="table-wrapper"><table class="data-table">' +
-        "<thead><tr><th>Model</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th></tr></thead><tbody>" +
-        rows(p.by_model) + "</tbody></table></div></div>";
+      html += section("By model", "<th>Model</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th>",
+        aggRows(p.by_model));
     }
     if (p.ledger && p.ledger.length) {
-      html += '<div class="perf-section"><h4 class="perf-sub">Ledger — all ' +
-        p.ledger.length + ' closed trades (newest first)</h4>' +
-        '<div class="table-wrapper"><table class="data-table">' +
-        "<thead><tr><th>Day</th><th>Symbol</th><th>Qty</th><th>Entry</th>" +
-        "<th>Exit</th><th>P&L</th><th>Exit</th><th>Source</th></tr></thead><tbody>" +
+      html += section("Ledger — all " + p.ledger.length + " closed trades (newest first)",
+        "<th>Day</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Exit</th><th>Source</th>",
         p.ledger.map(function (t) {
           return "<tr><td>" + esc(t.day) + "</td><td>" + esc(t.symbol) + "</td>" +
             "<td>" + esc(t.qty) + "</td><td>" + fmt(t.entry) + "</td>" +
-            "<td>" + fmt(t.exit) + "</td><td>" + fmt(t.pnl) + "</td>" +
-            "<td>" + esc(t.reason) + "</td><td>" + esc(t.source) + "</td></tr>";
-        }).join("") + "</tbody></table></div></div>";
+            "<td>" + fmt(t.exit) + "</td><td class='" + tone(t.pnl) + "'>" + fmt(t.pnl) + "</td>" +
+            "<td>" + esc(t.reason) + "</td><td><span class='pill'>" + esc(t.source) + "</span></td></tr>";
+        }).join(""));
     }
     el.innerHTML = html;
   }
