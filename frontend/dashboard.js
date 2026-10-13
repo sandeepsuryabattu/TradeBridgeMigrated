@@ -1391,11 +1391,14 @@ function renderSignals() {
             const id = `signal-card-${s.id}`;
             let card = document.getElementById(id);
             const newClass = `signal-card ${tradeStatus || status}`;
+            // Trade notes carry the tuned pending range — repaint when they change too.
+            const tradeNotes = signalTrade?.notes || '';
 
             if (card) {
-                if (card.className !== newClass || card.dataset.tradeStatus !== tradeStatus) {
+                if (card.className !== newClass || card.dataset.tradeStatus !== tradeStatus || card.dataset.tradeNotes !== tradeNotes) {
                     card.className = newClass;
                     card.dataset.tradeStatus = tradeStatus;
+                    card.dataset.tradeNotes = tradeNotes;
                     card.innerHTML = cardHtml;
                 }
             } else {
@@ -1403,6 +1406,7 @@ function renderSignals() {
                 card.id = id;
                 card.className = newClass;
                 card.dataset.tradeStatus = tradeStatus;
+                card.dataset.tradeNotes = tradeNotes;
                 card.innerHTML = cardHtml;
                 container.appendChild(card);
             }
