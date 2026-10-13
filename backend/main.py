@@ -631,8 +631,18 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(telegram_health_check())
 
     log.info("Trading platform started")
+    try:
+        from .autotrender import start_scheduler
+        start_scheduler()
+    except Exception:
+        log.exception("Autotrender scheduler start failed — bot continues without it")
     yield
 
+    try:
+        from .autotrender import stop_scheduler
+        await stop_scheduler()
+    except Exception:
+        log.exception("Autotrender scheduler stop failed")
     await telegram.stop()
     manager.market_feed.shutdown()
 
@@ -1244,6 +1254,18 @@ async def clear_signal_tracker():
         "message": "Signal dedup is now DB-backed — no in-memory tracker to clear. Signals are only blocked if an open position exists for that strike.",
         "cleared": 0,
     }
+
+
+# ── Autotrender bridge (ISOLATED ADD-ON — no existing routes touched) ──
+try:
+    from .autotrender import router as _autotrender_router
+    from .autotrender import set_manager as _at_set_manager
+    from .autotrender import set_broadcast as _at_set_broadcast
+    app.include_router(_autotrender_router)
+    _at_set_manager(manager)
+    _at_set_broadcast(ws_manager.broadcast)
+except Exception:
+    log.exception("Autotrender bridge wiring failed — bot continues without it")
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
