@@ -164,7 +164,7 @@
                 <button class="icon-btn" id="btn-strategy" title="Strategy Setup">🎯</button>
                 <button class="icon-btn" id="btn-settings" title="Settings">⚙️</button>
                 <a class="icon-btn" id="btn-autotrender" title="Open Autotrender" href="/autotrender/" target="_blank" style="text-decoration:none;">📊</a>
-                <button class="icon-btn" id="btn-perf" title="Performance">📈</button>
+                <a class="icon-btn" id="btn-perf" title="Performance dashboard" href="/performance.html" style="text-decoration:none;">📈</a>
             </div>
         </div>
     </header>
@@ -253,24 +253,6 @@
             </div>
         </section>
     </main>
-
-    <!-- ── Performance Modal (read-only analytics) ── -->
-    <div class="modal-overlay" id="perf-modal" style="display:none;">
-        <div class="modal modal-strategy">
-            <div class="modal-header">
-                <div class="modal-header-title">
-                    <h2>📈 Performance</h2>
-                    <p class="modal-header-subtitle" id="perf-mode">paper · 30d</p>
-                </div>
-                <button class="modal-close" id="btn-close-perf">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div id="performance-body">
-                    <div class="empty-state">No closed trades yet</div>
-                </div>
-            </div>
-        </div>
-    </div>
 
     <!-- ── Strategy Modal ── -->
     <div class="modal-overlay" id="strategy-modal" style="display:none;">

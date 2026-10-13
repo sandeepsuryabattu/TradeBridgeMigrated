@@ -1,5 +1,5 @@
-/* Performance modal — ISOLATED ADD-ON, read-only. Opens from the 📈 header
- * icon, fetches /api/performance on open + every 30s while open. No trading.
+/* Performance dashboard page — read-only analytics over closed trades.
+ * Mode/days controls + auto-refresh. No trading of any kind.
  */
 (function () {
   function esc(s) {
@@ -28,13 +28,22 @@
     }).join("");
   }
 
+  function params() {
+    var modeEl = document.getElementById("perf-mode-sel");
+    var daysEl = document.getElementById("perf-days");
+    var mode = modeEl && (modeEl.value === "real" ? "real" : "paper");
+    var days = daysEl ? Math.min(365, Math.max(1, parseInt(daysEl.value, 10) || 30)) : 30;
+    return { mode: mode || "paper", days: days };
+  }
+
   function render(p) {
     var el = document.getElementById("performance-body");
     var mode = document.getElementById("perf-mode");
     if (!el) return;
-    if (mode) mode.textContent = (p.mode || "paper") + " · " + (p.days || 30) + "d";
+    if (mode) mode.textContent = (p.mode || "paper") + " · " + (p.days || 30) + "d · " +
+      (p.closed_trades || 0) + " closed";
     if (!p.closed_trades) {
-      el.innerHTML = '<div class="empty-state">No closed trades yet</div>';
+      el.innerHTML = '<div class="empty-state">No closed trades in range</div>';
       return;
     }
     var o = p.overall;
@@ -46,58 +55,41 @@
       card("Max drawdown", fmt(p.max_drawdown), "value-down") +
       card("Best / Worst", fmt(o.best) + " / " + fmt(o.worst)) +
       "</div>";
-    var days = Object.keys(p.by_day).slice(-14).reverse();
-    html += '<h4 class="perf-sub">By day</h4><div class="table-wrapper"><table class="data-table">' +
+    var days = Object.keys(p.by_day).slice(-30).reverse();
+    html += '<div class="perf-section"><h4 class="perf-sub">By day</h4>' +
+      '<div class="table-wrapper"><table class="data-table">' +
       "<thead><tr><th>Day</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th></tr></thead><tbody>" +
       days.map(function (d) {
         var b = p.by_day[d];
         return "<tr><td>" + esc(d) + "</td><td>" + b.trades + "</td><td>" + b.win_rate +
           "%</td><td>" + fmt(b.pnl) + "</td><td>" + b.profit_factor + "</td></tr>";
-      }).join("") + "</tbody></table></div>";
-    html += '<h4 class="perf-sub">By source</h4><div class="table-wrapper"><table class="data-table">' +
+      }).join("") + "</tbody></table></div></div>";
+    html += '<div class="perf-section"><h4 class="perf-sub">By source</h4>' +
+      '<div class="table-wrapper"><table class="data-table">' +
       "<thead><tr><th>Source</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th></tr></thead><tbody>" +
-      rows(p.by_source) + "</tbody></table></div>";
+      rows(p.by_source) + "</tbody></table></div></div>";
     if (p.by_model && Object.keys(p.by_model).length) {
-      html += '<h4 class="perf-sub">By model</h4><div class="table-wrapper"><table class="data-table">' +
+      html += '<div class="perf-section"><h4 class="perf-sub">By model</h4>' +
+        '<div class="table-wrapper"><table class="data-table">' +
         "<thead><tr><th>Model</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th></tr></thead><tbody>" +
-        rows(p.by_model) + "</tbody></table></div>";
+        rows(p.by_model) + "</tbody></table></div></div>";
     }
     el.innerHTML = html;
   }
 
-  var timer = null;
-
   function poll() {
-    fetch("/api/performance?mode=paper&days=30")
+    var q = params();
+    fetch("/api/performance?mode=" + encodeURIComponent(q.mode) + "&days=" + q.days)
       .then(function (r) { return r.json(); })
       .then(render)
       .catch(function () { /* keep old view */ });
   }
 
-  function open() {
-    var m = document.getElementById("perf-modal");
-    if (!m) return;
-    m.style.display = "flex";
-    poll();
-    if (!timer) timer = setInterval(poll, 30000);
-  }
-
-  function close() {
-    var m = document.getElementById("perf-modal");
-    if (m) m.style.display = "none";
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
-    }
-  }
-
   document.addEventListener("DOMContentLoaded", function () {
-    var btn = document.getElementById("btn-perf");
-    if (btn) btn.addEventListener("click", open);
-    var x = document.getElementById("btn-close-perf");
-    if (x) x.addEventListener("click", close);
-    var m = document.getElementById("perf-modal");
-    if (m) m.addEventListener("click", function (e) { if (e.target === m) close(); });
-    document.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+    if (!document.getElementById("performance-body")) return;
+    var apply = document.getElementById("perf-apply");
+    if (apply) apply.addEventListener("click", poll);
+    poll();
+    setInterval(poll, 30000);
   });
 })();
