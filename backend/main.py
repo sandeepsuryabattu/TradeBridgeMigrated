@@ -270,10 +270,10 @@ async def tick_consumer():
         try:
             token, ltp, data = await asyncio.wait_for(tick_queue.get(), timeout=1.0)
             symbol = data.get("symbol", "")
-            if token in SENSEX_INDEX_TOKENS or symbol in ("SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY"):
+            if token in SENSEX_INDEX_TOKENS or symbol in ("SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "INDIAVIX"):
                 await ws_manager.broadcast({
                     "type": "index_ltp",
-                    "data": {"symbol": symbol if symbol in ("SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY") else "SENSEX", "ltp": ltp},
+                    "data": {"symbol": symbol if symbol in ("SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "INDIAVIX") else "SENSEX", "ltp": ltp},
                 })
             elif symbol:
                 await ws_manager.broadcast({
