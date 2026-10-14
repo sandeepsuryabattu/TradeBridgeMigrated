@@ -69,13 +69,6 @@ def _token_of(contract: Dict[str, Any]) -> str:
                or contract.get("instrument_token", ""))
 
 
-def _num(v: Any) -> float:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _snapshot_via_option_chain(kotak_client: Any, *, underlying: str,
                                segment: str, spot: Optional[float],
                                width: int) -> Dict[str, Any]:
@@ -99,22 +92,38 @@ def _snapshot_via_option_chain(kotak_client: Any, *, underlying: str,
                         ("PE", data.get("put", []))):
         for leg in items or []:
             leg = leg or {}
-            inst = leg.get("instrument", {}) or {}
+            # Live wire shape (probed 2026-10-14): leg keys are
+            # inst/quote/oi with strkPrc, optType, ltp, cur/prev/chg.
+            # Documented shape (instrument/quote/openInterest) kept as fallback.
+            inst = leg.get("inst", leg.get("instrument", {})) or {}
             q = leg.get("quote", {}) or {}
-            oi = leg.get("openInterest", {}) or {}
+            oi = leg.get("oi", leg.get("openInterest", {})) or {}
             try:
-                strike = int(float(inst.get("strikePrice")))
+                strike = int(float(inst.get("strikePrice",
+                                            inst.get("strkPrc",
+                                                     inst.get("strike")))))
             except (TypeError, ValueError):
+                continue
+            opt = str(inst.get("optionType", inst.get("optType", "")) or "").upper()
+            if opt and opt != side:
                 continue
             if not quote_keys:
                 quote_keys = sorted(
-                    {f"instrument.{k}" for k in inst}
+                    {f"inst.{k}" for k in inst}
                     | {f"quote.{k}" for k in q}
-                    | {f"openInterest.{k}" for k in oi})
+                    | {f"oi.{k}" for k in oi})
+            cur = _first(oi, "current", "cur", "oi")
+            prev_raw = oi.get("previous", oi.get("prev", None))
+            try:
+                prev = float(prev_raw) if prev_raw not in (None, "") else None
+            except (TypeError, ValueError):
+                prev = None
+            # ChgOI = current - previous computed locally (matches the
+            # documented formula; raw change/chg kept as fallback).
+            chg = (cur - prev) if prev is not None else _first(oi, "change", "chg")
             slot = by_strike.setdefault(strike, {})
-            slot[side] = {"ltp": _num(q.get("ltp")),
-                          "oi": _num(oi.get("current")),
-                          "chg": _num(oi.get("change"))}
+            slot[side] = {"ltp": _first(q, "ltp"),
+                          "oi": cur, "chg": chg}
     strikes = sorted(s for s, v in by_strike.items()
                      if "CE" in v and "PE" in v)
     if not strikes:

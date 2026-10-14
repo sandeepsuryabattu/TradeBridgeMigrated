@@ -48,24 +48,26 @@ class _FakeClient:
 
 
 def _std_chain(strikes=(25700, 25750, 25800, 25850, 25900)):
-    def leg(s, opt, ltp, oi, chg):
-        return {"instrument": {"neoSymbol": f"nse_fo|{s}{opt}",
-                               "symbol": f"NIFTY{s}{opt}",
-                               "optionType": opt, "strikePrice": str(s),
-                               "moneyness": "ATM" if s == 25800 else "OTM"},
-                "quote": {"ltp": str(ltp), "open": "90", "high": "110",
-                          "low": "80", "prevClose": "95", "close": None,
-                          "volume": 100000},
-                "openInterest": {"current": oi, "previous": oi - chg,
-                                 "change": chg, "changePct": 5.0}}
-    return {"data": {
-        "common_data": {"mktLot": "65", "multiplier": "1",
-                        "unlSymbol": "NIFTY", "exSeg": "nse_fo",
-                        "expiryDt": "2027-12-30"},
-        "call": [leg(s, "CE", 100.0 + s % 50, 1000 + s, 111 + s % 7)
-                 for s in strikes],
-        "put": [leg(s, "PE", 90.0, 2000 + s, -(222 + s % 9))
-                for s in strikes]}}
+    # Live wire shape as probed 2026-10-14 (inst/quote/oi, NOT the
+    # documented instrument/quote/openInterest names).
+    def leg(s, opt, ltp, oi, prev):
+        return {"inst": {"neoSymbol": f"nse_fo|{s}{opt}",
+                         "symbol": f"NIFTY{s}{opt}",
+                         "optType": opt, "strkPrc": str(s),
+                         "exp": "2027-12-30",
+                         "moneyness": "ATM" if s == 25800 else "OTM"},
+                "quote": {"ltp": str(ltp), "o": "90", "h": "110",
+                          "l": "80", "c": "95", "pc": "95",
+                          "vol": "100000"},
+                "oi": {"cur": str(oi), "prev": str(prev),
+                       "chg": str(oi - prev), "chgPct": "5.0"}}
+    return {"common_data": {"mktLot": "65", "multiplier": "1",
+                            "unlSymbol": "NIFTY", "exSeg": "nse_fo",
+                            "expiryDt": "2027-12-30"},
+            "call": [leg(s, "CE", 100.0 + s % 50, 1000 + s, 900 + s)
+                     for s in strikes],
+            "put": [leg(s, "PE", 90.0, 2000 + s, 2100 + s)
+                    for s in strikes]}
 
 
 def test_option_chain_source_carries_real_chgoi():
@@ -75,10 +77,10 @@ def test_option_chain_source_carries_real_chgoi():
     assert [r["strike"] for r in snap["rows"]] == [25750, 25800, 25850]
     assert snap["atm"] == 25800
     atm_row = next(r for r in snap["rows"] if r["atm"])
-    assert atm_row["callChgOI"] == 111 + 25800 % 7
-    assert atm_row["putChgOI"] == -(222 + 25800 % 9)
+    assert atm_row["callChgOI"] == (1000 + 25800) - (900 + 25800)  # cur - prev
+    assert atm_row["putChgOI"] == (2000 + 25800) - (2100 + 25800)
     assert atm_row["callLTP"] == 100.0 + 25800 % 50
-    assert "openInterest.change" in snap["quote_keys"]
+    assert "oi.cur" in snap["quote_keys"]
     assert snap["expiry"] == "2027-12-30"
     assert snap["warnings"] == []
 

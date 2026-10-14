@@ -53,19 +53,16 @@ class _FakeKotak:
 
     def option_chain(self, exchange=None, underlying=None,
                      instrument_type=None, count=None):
-        def leg(s, opt, ltp, oi, chg):
-            return {"instrument": {"neoSymbol": f"nse_fo|{s}{opt}",
-                                   "symbol": f"NIFTY{s}{opt}",
-                                   "optionType": opt,
-                                   "strikePrice": str(s)},
+        def leg(s, opt, ltp, oi, prev):
+            return {"inst": {"neoSymbol": f"nse_fo|{s}{opt}",
+                             "symbol": f"NIFTY{s}{opt}",
+                             "optType": opt, "strkPrc": str(s)},
                     "quote": {"ltp": str(ltp)},
-                    "openInterest": {"current": oi, "previous": oi - chg,
-                                     "change": chg}}
+                    "oi": {"cur": oi, "prev": prev, "chg": oi - prev}}
         strikes = (25700, 25750, 25800, 25850, 25900)
-        return {"data": {
-            "common_data": {"exSeg": "nse_fo", "expiryDt": "2027-12-30"},
-            "call": [leg(s, "CE", 120.0, 1000 + s, 50) for s in strikes],
-            "put": [leg(s, "PE", 100.0, 2000 + s, -60) for s in strikes]}}
+        return {"common_data": {"exSeg": "nse_fo", "expiryDt": "2027-12-30"},
+                "call": [leg(s, "CE", 120.0, 1000 + s, 950 + s) for s in strikes],
+                "put": [leg(s, "PE", 100.0, 2000 + s, 2060 + s) for s in strikes]}
 
 
 class _FakeFeed:
