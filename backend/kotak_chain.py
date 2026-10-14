@@ -1,21 +1,19 @@
 """
 Kotak chain snapshots — live option-chain rows for the autotrender engine.
 
-Source: Kotak Neo `quotes` REST API (quote_type='all') over NSE_FO option
-tokens enumerated from the contract master. No new credentials, no new
-packages — reuses the authenticated `kotak_trader.client` and the downloaded
-contract master already used for order routing.
+Primary source: Kotak Neo native `option_chain` REST endpoint, which returns
+per-strike quote + openInterest{current, previous, change, changePct} —
+server-computed change-in-OI. Fallback: `quotes` REST API over NSE_FO option
+tokens from the contract master (carries OI but NO ChgOI; rows then carry
+callChgOI/putChgOI = 0 and PCR signals must use total-OI PCR, never
+calc_pcr_chg on zeros).
 
-Honest limits (verified against installed neo_api_client):
-- `quotes` returns a per-instrument snapshot: LTP, day OHLC, volume and —
-  for derivatives — open interest. It does NOT return change-in-OI, so
-  engine rows carry callChgOI/putChgOI = 0 and PCR signals must use total-OI
-  PCR (calc_pcr), never calc_pcr_chg (0/0 would read as STRONG SELL).
-- No historical-candles endpoint exists in this client: multi-day history is
-  unavailable; intraday candles come from candle_builder (live ticks).
-- Quote field names are normalised defensively: every parsed row records
+Honest limits (verified against installed kotakneoapi 3.0.7 + official docs):
+- `quotes` has no ChgOI (fallback path only).
+- No historical-candles use here: intraday candles come from candle_builder.
+- Quote field names are normalised defensively: every snapshot records
   `quote_keys` (sorted raw keys) so the VM's first live response calibrates
-  the parser — check logs, extend _FIRST() maps if a field lands at 0.
+  the parser — check logs, extend maps if a field lands at 0.
 
 Nothing here trades. Output rows are engine-ready
 (strike/callOI/putOI/callLTP/putLTP/atm) for autotrender_engine.
@@ -71,6 +69,82 @@ def _token_of(contract: Dict[str, Any]) -> str:
                or contract.get("instrument_token", ""))
 
 
+def _num(v: Any) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _snapshot_via_option_chain(kotak_client: Any, *, underlying: str,
+                               segment: str, spot: Optional[float],
+                               width: int) -> Dict[str, Any]:
+    """Native option_chain endpoint — carries server-computed ChgOI."""
+    oc = getattr(kotak_client, "option_chain", None)
+    if oc is None:
+        raise ValueError("option_chain API unavailable on client")
+    und = (underlying or "").upper().strip()
+    # count must be a multiple of 10; 20 strikes cover our ±9 window.
+    resp = oc(exchange=segment, underlying=und,
+              instrument_type="option", count=20)
+    if isinstance(resp, dict) and ("error" in resp or "Error" in resp):
+        raise ValueError(f"option_chain error: {resp}")
+    data = resp.get("data", resp) if isinstance(resp, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError("option_chain: empty/unexpected response")
+
+    by_strike: Dict[int, Dict[str, Any]] = {}
+    quote_keys: List[str] = []
+    for side, items in (("CE", data.get("call", [])),
+                        ("PE", data.get("put", []))):
+        for leg in items or []:
+            leg = leg or {}
+            inst = leg.get("instrument", {}) or {}
+            q = leg.get("quote", {}) or {}
+            oi = leg.get("openInterest", {}) or {}
+            try:
+                strike = int(float(inst.get("strikePrice")))
+            except (TypeError, ValueError):
+                continue
+            if not quote_keys:
+                quote_keys = sorted(
+                    {f"instrument.{k}" for k in inst}
+                    | {f"quote.{k}" for k in q}
+                    | {f"openInterest.{k}" for k in oi})
+            slot = by_strike.setdefault(strike, {})
+            slot[side] = {"ltp": _num(q.get("ltp")),
+                          "oi": _num(oi.get("current")),
+                          "chg": _num(oi.get("change"))}
+    strikes = sorted(s for s, v in by_strike.items()
+                     if "CE" in v and "PE" in v)
+    if not strikes:
+        raise ValueError("option_chain: no complete CE/PE strike pairs")
+
+    if spot is None or spot <= 0:
+        atm = strikes[len(strikes) // 2]
+        warnings = ["spot unavailable — ATM is the middle strike, not live ATM"]
+    else:
+        atm = min(strikes, key=lambda s: abs(s - spot))
+        warnings = []
+    centre = strikes.index(atm)
+    wanted = strikes[max(0, centre - width):min(len(strikes), centre + width + 1)]
+
+    common = data.get("common_data", {}) or {}
+    expiry = str(common.get("expiryDt", "") or "").strip()
+    rows = []
+    for s in wanted:
+        ce, pe = by_strike[s]["CE"], by_strike[s]["PE"]
+        rows.append({"strike": s,
+                     "callOI": ce["oi"], "putOI": pe["oi"],
+                     "callChgOI": ce["chg"], "putChgOI": pe["chg"],
+                     "callLTP": ce["ltp"], "putLTP": pe["ltp"],
+                     "atm": s == atm})
+    return {"underlying": und, "segment": segment, "expiry": expiry,
+            "spot": spot, "atm": atm, "rows": rows,
+            "warnings": warnings, "quote_keys": quote_keys,
+            "source": "option_chain"}
+
+
 def chain_snapshot(kotak_client: Any, contract_master: Any, *,
                    underlying: str = "NIFTY", segment: str = "nse_fo",
                    spot: Optional[float] = None, width: int = 9,
@@ -78,9 +152,17 @@ def chain_snapshot(kotak_client: Any, contract_master: Any, *,
     """Fetch live chain rows around ATM for the nearest (or hinted) expiry.
 
     Returns {"underlying","segment","expiry","spot","atm","rows","warnings",
-    "quote_keys"}. rows are engine-ready; callChgOI/putChgOI are 0 (see
-    module docstring — use total-OI PCR only).
+    "quote_keys"}. Preferred source is the native option_chain endpoint
+    (real ChgOI); falls back to quotes (ChgOI = 0 — use total-OI PCR only).
     """
+    try:
+        snap = _snapshot_via_option_chain(kotak_client, underlying=underlying,
+                                          segment=segment, spot=spot,
+                                          width=width)
+        if snap.get("rows"):
+            return snap
+    except Exception:
+        log.exception("chain_snapshot: option_chain failed, falling back to quotes")
     und = (underlying or "").upper().strip()
     cm = contract_master
     pool = [c for c in (cm._segments.get(segment, []) or [])
@@ -175,4 +257,5 @@ def chain_snapshot(kotak_client: Any, contract_master: Any, *,
                      "atm": s == atm})
     return {"underlying": und, "segment": segment, "expiry": expiry,
             "spot": spot, "atm": atm, "rows": rows,
-            "warnings": warnings, "quote_keys": quote_keys}
+            "warnings": warnings, "quote_keys": quote_keys,
+            "source": "quotes"}

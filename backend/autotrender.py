@@ -333,6 +333,7 @@ def _publish_chain(moment, spot: float, snap: Dict[str, Any]) -> None:
         "maxPain": engine.max_pain(snap["rows"]),
         "straddle": engine.straddle(snap["rows"]),
         "quote_keys": snap.get("quote_keys", []),
+        "chain_source": snap.get("source", "unknown"),
     })
 
 

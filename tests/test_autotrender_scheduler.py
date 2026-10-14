@@ -51,6 +51,22 @@ class _FakeKotak:
                      instrument_token=t["instrument_token"])
                 for t in instrument_tokens]
 
+    def option_chain(self, exchange=None, underlying=None,
+                     instrument_type=None, count=None):
+        def leg(s, opt, ltp, oi, chg):
+            return {"instrument": {"neoSymbol": f"nse_fo|{s}{opt}",
+                                   "symbol": f"NIFTY{s}{opt}",
+                                   "optionType": opt,
+                                   "strikePrice": str(s)},
+                    "quote": {"ltp": str(ltp)},
+                    "openInterest": {"current": oi, "previous": oi - chg,
+                                     "change": chg}}
+        strikes = (25700, 25750, 25800, 25850, 25900)
+        return {"data": {
+            "common_data": {"exSeg": "nse_fo", "expiryDt": "2027-12-30"},
+            "call": [leg(s, "CE", 120.0, 1000 + s, 50) for s in strikes],
+            "put": [leg(s, "PE", 100.0, 2000 + s, -60) for s in strikes]}}
+
 
 class _FakeFeed:
     def __init__(self):
@@ -196,3 +212,12 @@ def test_generated_tick_publishes_engine_verdict(wired):
     assert eng["fusion"]["fire"] is True
     assert eng["trigger"]["fire"] is True
     assert eng["auto_today"] == 1
+
+
+def test_native_chain_source_flows_to_live_payload(wired):
+    res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=_bullish_builder()))
+    assert res["action"] == "generated"
+    assert at._last_live.get("chain_source") == "option_chain"
+    atm_row = next(r for r in at._last_live["rows"] if r["atm"])
+    assert atm_row["callChgOI"] == 50 and atm_row["putChgOI"] == -60
+    assert wired.kotak.quote_calls == 0  # native endpoint, no per-leg quotes

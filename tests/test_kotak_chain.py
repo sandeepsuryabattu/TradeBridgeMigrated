@@ -26,8 +26,9 @@ def _cm(strikes=(25700, 25750, 25800, 25850, 25900)):
 
 
 class _FakeClient:
-    def __init__(self, quotes):
+    def __init__(self, quotes, chain=None):
         self._quotes = quotes
+        self._chain = chain
 
     def quotes(self, instrument_tokens=None, quote_type=None):
         assert quote_type == "all"
@@ -38,6 +39,54 @@ class _FakeClient:
             q.setdefault("instrument_token", tok)
             out.append(q)
         return out
+
+    def option_chain(self, exchange=None, underlying=None,
+                     instrument_type=None, count=None):
+        if self._chain is None:
+            raise AttributeError("no option_chain on this client")
+        return self._chain
+
+
+def _std_chain(strikes=(25700, 25750, 25800, 25850, 25900)):
+    def leg(s, opt, ltp, oi, chg):
+        return {"instrument": {"neoSymbol": f"nse_fo|{s}{opt}",
+                               "symbol": f"NIFTY{s}{opt}",
+                               "optionType": opt, "strikePrice": str(s),
+                               "moneyness": "ATM" if s == 25800 else "OTM"},
+                "quote": {"ltp": str(ltp), "open": "90", "high": "110",
+                          "low": "80", "prevClose": "95", "close": None,
+                          "volume": 100000},
+                "openInterest": {"current": oi, "previous": oi - chg,
+                                 "change": chg, "changePct": 5.0}}
+    return {"data": {
+        "common_data": {"mktLot": "65", "multiplier": "1",
+                        "unlSymbol": "NIFTY", "exSeg": "nse_fo",
+                        "expiryDt": "2027-12-30"},
+        "call": [leg(s, "CE", 100.0 + s % 50, 1000 + s, 111 + s % 7)
+                 for s in strikes],
+        "put": [leg(s, "PE", 90.0, 2000 + s, -(222 + s % 9))
+                for s in strikes]}}
+
+
+def test_option_chain_source_carries_real_chgoi():
+    snap = kc.chain_snapshot(_FakeClient({}, chain=_std_chain()),
+                             _cm(), spot=25810.0, width=1)
+    assert snap["source"] == "option_chain"
+    assert [r["strike"] for r in snap["rows"]] == [25750, 25800, 25850]
+    assert snap["atm"] == 25800
+    atm_row = next(r for r in snap["rows"] if r["atm"])
+    assert atm_row["callChgOI"] == 111 + 25800 % 7
+    assert atm_row["putChgOI"] == -(222 + 25800 % 9)
+    assert atm_row["callLTP"] == 100.0 + 25800 % 50
+    assert "openInterest.change" in snap["quote_keys"]
+    assert snap["expiry"] == "2027-12-30"
+    assert snap["warnings"] == []
+
+
+def test_quotes_fallback_when_no_option_chain():
+    snap = kc.chain_snapshot(_FakeClient(_std_quotes()), _cm(),
+                             spot=25810.0, width=1)
+    assert snap["source"] == "quotes"
 
 
 def _std_quotes():
@@ -57,8 +106,16 @@ def _std_quotes():
             for s in (25700, 25750, 25800, 25850, 25900)}
 
 
+class _NoChainClient(_FakeClient):
+    """Client without the native endpoint — forces the quotes fallback."""
+    option_chain = None
+
+    def __init__(self, quotes):
+        super().__init__(quotes)
+
+
 def test_snapshot_window_and_engine_rows():
-    snap = kc.chain_snapshot(_FakeClient(_std_quotes()), _cm(), spot=25810.0, width=1)
+    snap = kc.chain_snapshot(_NoChainClient(_std_quotes()), _cm(), spot=25810.0, width=1)
     assert [r["strike"] for r in snap["rows"]] == [25750, 25800, 25850]
     assert snap["atm"] == 25800
     atm_row = next(r for r in snap["rows"] if r["atm"])
