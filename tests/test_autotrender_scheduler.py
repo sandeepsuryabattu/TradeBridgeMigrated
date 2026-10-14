@@ -211,6 +211,18 @@ def test_generated_tick_publishes_engine_verdict(wired):
     assert eng["auto_today"] == 1
 
 
+def test_ticks_endpoint_lists_feed_ltp(wired):
+    wired.market_feed._subscriptions = {
+        "IDX:NIFTY": {"symbol": "NIFTY", "ltp": 22714.5,
+                      "last_update": "2026-10-14T10:00:00"},
+        "IDX:BANKNIFTY": {"symbol": "BANKNIFTY", "ltp": 0},  # skipped
+    }
+    res = asyncio.run(at.live_ticks())
+    assert res["ticks"] == [{"key": "IDX:NIFTY", "symbol": "NIFTY",
+                             "ltp": 22714.5,
+                             "last_update": "2026-10-14T10:00:00"}]
+
+
 def test_native_chain_source_flows_to_live_payload(wired):
     res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=_bullish_builder()))
     assert res["action"] == "generated"

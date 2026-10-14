@@ -183,6 +183,36 @@ async def _ingest(call: AutotrenderCallIn, auto_forward: bool = True) -> Dict[st
     return record
 
 
+@router.get("/ticks")
+async def live_ticks() -> Dict[str, Any]:
+    """Read-only: latest live LTP per feed subscription (indices + legs).
+
+    Independent of engine readiness — ticks flow from boot, so the dashboard
+    header shows live prices even while candles warm up. Never trades.
+    """
+    ticks: List[Dict[str, Any]] = []
+    try:
+        feed = getattr(_manager, "market_feed", None)
+        subs = getattr(feed, "_subscriptions", None) or {}
+        for key, info in subs.items():
+            if not isinstance(info, dict):
+                continue
+            try:
+                ltp = float(info.get("ltp") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ltp <= 0:
+                continue
+            ticks.append({"key": str(key),
+                          "symbol": str(info.get("symbol", key)),
+                          "ltp": ltp,
+                          "last_update": str(info.get("last_update") or "")})
+    except Exception:
+        log.exception("autotrender ticks failed")
+    ticks.sort(key=lambda t: t["symbol"])
+    return {"ticks": ticks}
+
+
 @router.get("/calls")
 async def list_calls(limit: int = 50) -> Dict[str, Any]:
     return {"calls": _calls[: max(1, min(limit, 200))]}
