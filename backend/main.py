@@ -494,6 +494,8 @@ async def lifespan(app: FastAPI):
                     key="NIFTY", name="Nifty 50", symbol="NIFTY")
                 manager.market_feed.subscribe_index_name(
                     key="BANKNIFTY", name="Nifty Bank", symbol="BANKNIFTY")
+                manager.market_feed.subscribe_index_name(
+                    key="INDIAVIX", name="India VIX", symbol="INDIAVIX")
                 await loop.run_in_executor(None, manager.download_contracts)
                 await manager.resubscribe_recent_signals(limit=100)
 
@@ -714,6 +716,8 @@ async def _restart_feed_with_resubscribe(reason: str):
         key="NIFTY", name="Nifty 50", symbol="NIFTY")
     manager.market_feed.subscribe_index_name(
         key="BANKNIFTY", name="Nifty Bank", symbol="BANKNIFTY")
+    manager.market_feed.subscribe_index_name(
+        key="INDIAVIX", name="India VIX", symbol="INDIAVIX")
     await manager.resubscribe_recent_signals(limit=100)
     log.info("feed restart (%s): complete", reason)
 
