@@ -211,8 +211,12 @@ async def engine_status() -> Dict[str, Any]:
 
 @router.get("/live")
 async def live_snapshot() -> Dict[str, Any]:
-    """Live engine picture for the dashboard. {} with ready:false until the
-    scheduler completes its first chain snapshot (needs feed + market hours)."""
+    """Live engine picture for the dashboard.
+
+    Chain snapshot publishes on every in-hours tick (even without a trigger),
+    so ready=True from the first successful snapshot. The "engine" block holds
+    the why behind the latest tick — trend, trigger, fusion verdict, outcome.
+    """
     if not _last_live.get("ready"):
         return {"ready": False, "scheduler_running": _sched_task is not None}
     return dict(_last_live)
@@ -283,6 +287,55 @@ _sched_last_chain_keys: List[str] = []
 _last_live: Dict[str, Any] = {}
 
 
+def _publish_engine(moment, outcome: str, bars=None, found=None, trend=None,
+                    trig=None, vol=None, pos=None, fused=None) -> None:
+    """Record the why behind every tick (fire AND silence) for the dashboard.
+
+    Chain data (when available) is published separately by _publish_chain;
+    this block is updated on EVERY in-hours tick so "working but quiet" is
+    distinguishable from "broken". Never raises.
+    """
+    try:
+        from datetime import timezone as _tz
+        now_ts = (moment or datetime.now(_tz.utc)).timestamp()
+        remaining = 0
+        if _sched_last_bias and _sched_last_ts:
+            remaining = max(0, int(SCHED_COOLDOWN_SECS - (now_ts - _sched_last_ts)))
+        _last_live["engine"] = {
+            "at": _ist_now(moment).isoformat(timespec="seconds"),
+            "outcome": outcome,
+            "bars": len(bars) if bars else 0,
+            "rsi": (found or {}).get("rsi"),
+            "trend": trend, "trigger": trig, "volatility": vol,
+            "positioning": pos, "fusion": fused,
+            "cooldown": {"last_bias": _sched_last_bias,
+                         "remaining_secs": remaining},
+            "auto_today": _sched_count,
+        }
+    except Exception:
+        log.exception("publish engine state failed")
+
+
+def _publish_chain(moment, spot: float, snap: Dict[str, Any]) -> None:
+    """Cache the live chain picture for the dashboard.
+
+    Called on EVERY successful snapshot — even when no trigger fires — so
+    the dashboard lights up in quiet markets too.
+    """
+    summ = engine.summarize(snap["rows"])
+    sr = engine.get_support_resistance(snap["rows"])
+    _last_live.update({
+        "ready": True, "at": _ist_now(moment).isoformat(timespec="seconds"),
+        "spot": {"symbol": "NIFTY 50", "price": spot},
+        "expiry": snap.get("expiry"), "atm": snap.get("atm"),
+        "rows": snap["rows"], "pcr": summ["pcr"], "pcrChg": summ["pcrChg"],
+        "support": sr["support"], "resistance": sr["resistance"],
+        "maxPain": engine.max_pain(snap["rows"]),
+        "straddle": engine.straddle(snap["rows"]),
+        "quote_keys": snap.get("quote_keys", []),
+    })
+
+
 def _reset_scheduler_state() -> None:
     """Test-only: clear cooldown/cap state (cooldown + daily cap)."""
     global _sched_last_ts, _sched_last_bias, _sched_day, _sched_count, _sched_last_chain_keys
@@ -293,6 +346,7 @@ def _reset_scheduler_state() -> None:
     _sched_day = None
     _sched_count = 0
     _sched_last_chain_keys = []
+    _last_live.clear()
 
 
 def _ist_now(now: Optional[datetime] = None) -> datetime:
@@ -330,20 +384,47 @@ async def scheduler_tick(now: Optional[datetime] = None,
 
     bars = b.get_candles(SCHED_SYMBOL, n=60)
     if len(bars) < 20:
+        _publish_engine(moment, f"warming up ({len(bars)}/20 bars)", bars=bars)
         return {"action": "skip", "reason": f"warming up ({len(bars)}/20 bars)"}
     try:
         found = engine.detect(bars)
     except Exception:
         log.exception("scheduler detect failed")
+        _publish_engine(moment, "detect error", bars=bars)
         return {"action": "skip", "reason": "detect error"}
     # Free local models first (no Kotak calls): trend + trigger + volatility.
     from . import at_models as models
     trend = models.trend_score(bars, models.session_vwap(bars))
     trig = models.trigger_ok(found, bars)
     vol = models.volatility_gate(bars)
+
+    # Chain snapshot BEFORE the trigger gate: the dashboard must light up in
+    # quiet markets too, and positioning needs rows even when we don't fire.
+    kotak = getattr(_manager, "kotak", None)
+    cm = getattr(_manager, "contract_master", None)
+    if kotak is None or cm is None or not getattr(kotak, "is_authenticated", False):
+        _publish_engine(moment, "kotak not authenticated", bars=bars,
+                        found=found, trend=trend, trig=trig, vol=vol)
+        return {"action": "skip", "reason": "kotak not authenticated"}
+    spot = bars[-1]["c"]
+    try:
+        snap = chain.chain_snapshot(kotak.client, cm, underlying=SCHED_SYMBOL,
+                                    spot=spot, width=SCHED_WIDTH)
+    except Exception:
+        log.exception("scheduler chain snapshot failed")
+        _publish_engine(moment, "chain snapshot failed", bars=bars,
+                        found=found, trend=trend, trig=trig, vol=vol)
+        return {"action": "skip", "reason": "chain snapshot failed"}
+    _sched_last_chain_keys = snap.get("quote_keys", [])
+    _publish_chain(moment, spot, snap)
+
     if not trig["fire"]:
+        _publish_engine(moment, f"no trigger ({trig['reason']})", bars=bars,
+                        found=found, trend=trend, trig=trig, vol=vol)
         return {"action": "skip", "reason": f"no trigger ({trig['reason']})"}
     if not vol["ok"]:
+        _publish_engine(moment, f"volatility veto ({vol['reason']})", bars=bars,
+                        found=found, trend=trend, trig=trig, vol=vol)
         return {"action": "skip", "reason": f"volatility veto ({vol['reason']})"}
 
     ts = moment.timestamp()
@@ -354,39 +435,17 @@ async def scheduler_tick(now: Optional[datetime] = None,
                      (trig["direction"] == "BEARISH" and "breakout=LOW" in trig["reason"])
     if trig["direction"] == _sched_last_bias and ts - _sched_last_ts < SCHED_COOLDOWN_SECS \
             and not (fresh_breakout and not _sched_last_breakout):
+        _publish_engine(moment, "cooldown", bars=bars,
+                        found=found, trend=trend, trig=trig, vol=vol)
         return {"action": "skip", "reason": "cooldown"}
-
-    kotak = getattr(_manager, "kotak", None)
-    cm = getattr(_manager, "contract_master", None)
-    if kotak is None or cm is None or not getattr(kotak, "is_authenticated", False):
-        return {"action": "skip", "reason": "kotak not authenticated"}
-    spot = bars[-1]["c"]
-    try:
-        snap = chain.chain_snapshot(kotak.client, cm, underlying=SCHED_SYMBOL,
-                                    spot=spot, width=SCHED_WIDTH)
-    except Exception:
-        log.exception("scheduler chain snapshot failed")
-        return {"action": "skip", "reason": "chain snapshot failed"}
-    _sched_last_chain_keys = snap.get("quote_keys", [])
-
-    # Cache the live picture for the dashboard (same data that drives calls).
-    summ = engine.summarize(snap["rows"])
-    sr = engine.get_support_resistance(snap["rows"])
-    _last_live.update({
-        "ready": True, "at": _ist_now(moment).isoformat(timespec="seconds"),
-        "spot": {"symbol": "NIFTY 50", "price": spot},
-        "expiry": snap.get("expiry"), "atm": snap.get("atm"),
-        "rows": snap["rows"], "pcr": summ["pcr"], "pcrChg": summ["pcrChg"],
-        "support": sr["support"], "resistance": sr["resistance"],
-        "maxPain": engine.max_pain(snap["rows"]),
-        "straddle": engine.straddle(snap["rows"]),
-        "quote_keys": snap.get("quote_keys", []),
-    })
 
     # Positioning needs live chain rows; fuse everything for the final vote.
     pos = models.positioning(snap["rows"], spot, trig["direction"])
     fused = models.fuse(trend, trig, pos, vol)
     if not fused["fire"]:
+        _publish_engine(moment, f"fusion blocked (score={fused['score']})",
+                        bars=bars, found=found, trend=trend, trig=trig,
+                        vol=vol, pos=pos, fused=fused)
         return {"action": "skip",
                 "reason": f"fusion blocked (score={fused['score']})"}
     direction = fused["direction"]
@@ -394,10 +453,16 @@ async def scheduler_tick(now: Optional[datetime] = None,
     a = engine.atr(bars, 14)
     lv = engine.entry_exit(bars[-1], a, direction)
     if lv["entry"] is None:
+        _publish_engine(moment, "no levels", bars=bars,
+                        found=found, trend=trend, trig=trig, vol=vol,
+                        pos=pos, fused=fused)
         return {"action": "skip", "reason": "no levels"}
     details = engine.option_call_details(snap["rows"], spot, direction,
                                          lv["entry"], lv["sl"], lv["tgt"])
     if details["side"] == "NO TRADE":
+        _publish_engine(moment, "no strike", bars=bars,
+                        found=found, trend=trend, trig=trig, vol=vol,
+                        pos=pos, fused=fused)
         return {"action": "skip", "reason": "no strike"}
     try:
         model = AutotrenderCallIn(underlying=SCHED_SYMBOL, side=details["side"],
@@ -418,6 +483,9 @@ async def scheduler_tick(now: Optional[datetime] = None,
     _sched_last_ts, _sched_last_bias = ts, direction
     _sched_last_breakout = fresh_breakout
     _sched_count += 1
+    _publish_engine(moment, f"generated {direction} {details['side']} {details['strike']}",
+                    bars=bars, found=found, trend=trend, trig=trig, vol=vol,
+                    pos=pos, fused=fused)
     return {"action": "generated", "call": record}
 
 

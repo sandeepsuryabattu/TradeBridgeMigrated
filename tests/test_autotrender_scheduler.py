@@ -169,3 +169,30 @@ def test_neutral_bias_skips(wired):
     res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=b))
     assert res["action"] == "skip" and res["reason"].startswith("no trigger")
     assert wired.process_calls == []
+
+
+def test_quiet_tick_still_publishes_chain_and_engine(wired):
+    b = CandleBuilder()
+    t0 = 1_700_000_000 - 30 * 60
+    for i in range(30):  # flat market → NEUTRAL, no trigger
+        b._closed.setdefault("NIFTY", []).append(
+            {"t": t0 + i * 60, "o": 25800, "h": 25802, "l": 25798, "c": 25800, "v": 1000})
+    res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=b))
+    assert res["action"] == "skip"
+    # Dashboard lights up even though nothing fired.
+    assert at._last_live.get("ready") is True
+    assert len(at._last_live.get("rows", [])) > 0
+    eng = at._last_live.get("engine", {})
+    assert eng["outcome"].startswith("no trigger")
+    assert eng["bars"] == 30
+    assert eng["auto_today"] == 0
+
+
+def test_generated_tick_publishes_engine_verdict(wired):
+    res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=_bullish_builder()))
+    assert res["action"] == "generated"
+    eng = at._last_live.get("engine", {})
+    assert eng["outcome"].startswith("generated")
+    assert eng["fusion"]["fire"] is True
+    assert eng["trigger"]["fire"] is True
+    assert eng["auto_today"] == 1
