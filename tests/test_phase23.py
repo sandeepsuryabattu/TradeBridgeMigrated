@@ -200,18 +200,50 @@ def _dated_row(symbol, strike100, opt, exp):
     return {"pTrdSymbol": symbol, "pSymbol": "T", "pStrikePrice": str(strike100),
             "pOptionType": opt, "pExpiryDate": exp}
 
+def _next_tuesday():
+    """Next Tuesday strictly after today — always a future weekly expiry."""
+    from datetime import date, timedelta
+    d = date.today() + timedelta(days=1)
+    while d.weekday() != 1:  # Monday == 0
+        d += timedelta(days=1)
+    return d
+
+def _weekly_parts(strike="22450", opt="CE"):
+    """Dynamic weekly row parts (symbol-mid, row-date, hint) that never expire."""
+    tue = _next_tuesday()
+    yy = f"{tue.year % 100:02d}"
+    mid = f"NIFTY{yy}O{tue.day}{strike}{opt}"
+    exp = f"{tue.day}-{tue.strftime('%b')}-{tue.year}"
+    hint = f"{tue.day} {tue.strftime('%B')} expiry"
+    return mid, exp, hint
+
+def _monthly_parts(strike="22450", opt="CE"):
+    """Monthly row in a later month than the next Tuesday — always farther out."""
+    from datetime import date
+    tue = _next_tuesday()
+    # First day two months ahead, then back up to a safe day-28 in that month.
+    m = tue.month + 2
+    y = tue.year + (m - 1) // 12
+    m = (m - 1) % 12 + 1
+    exp_date = date(y, m, 28)
+    yy = f"{exp_date.year % 100:02d}"
+    mid = f"NIFTY{yy}{exp_date.strftime('%b').upper()}{strike}{opt}"
+    return mid, f"28-{exp_date.strftime('%b')}-{exp_date.year}"
+
 def test_resolve_honours_signal_expiry():
-    """Live case 2026-10-12: 13-Oct NIFTY signal must not take the Oct-monthly row."""
+    """Weekly signal must not take the monthly row (dates roll forward forever)."""
     from backend.contract_master import ContractMaster
+    w_sym, w_exp, w_hint = _weekly_parts()
+    m_sym, m_exp = _monthly_parts()
     c = ContractMaster()
     c._segments = {"nse_fo": [
-        _dated_row("NIFTY26OCT22450CE", 2245000, "CE", "30-Oct-2026"),
-        _dated_row("NIFTY26O1322450CE", 2245000, "CE", "13-Oct-2026"),
+        _dated_row(m_sym, 2245000, "CE", m_exp),
+        _dated_row(w_sym, 2245000, "CE", w_exp),
     ]}
     r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
                    "option_type": "CE", "exchange_segment": "nse_fo",
-                   "expiry": "13 october expiry"})
-    assert r and r["trading_symbol"] == "NIFTY26O1322450CE"
+                   "expiry": w_hint})
+    assert r and r["trading_symbol"] == w_sym
 
 def test_resolve_refuses_unmatched_expiry():
     from backend.contract_master import ContractMaster
@@ -223,30 +255,34 @@ def test_resolve_refuses_unmatched_expiry():
 
 def test_resolve_no_hint_falls_back_to_nearest():
     from backend.contract_master import ContractMaster
+    w_sym, w_exp, _ = _weekly_parts()
+    m_sym, m_exp = _monthly_parts()
     c = ContractMaster()
     c._segments = {"nse_fo": [
-        _dated_row("NIFTY26OCT22450CE", 2245000, "CE", "30-Oct-2026"),
-        _dated_row("NIFTY26O1322450CE", 2245000, "CE", "13-Oct-2026"),
+        _dated_row(m_sym, 2245000, "CE", m_exp),
+        _dated_row(w_sym, 2245000, "CE", w_exp),
     ]}
     r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
                    "option_type": "CE", "exchange_segment": "nse_fo"})
-    assert r and r["trading_symbol"] == "NIFTY26O1322450CE"
+    assert r and r["trading_symbol"] == w_sym
 
 
 def test_symbol_embedded_expiry_beats_stale_row_dates():
     """Live case: rows carry 2016 timestamps; symbols carry the true date."""
     from backend.contract_master import ContractMaster
+    w_sym, _, w_hint = _weekly_parts()
+    m_sym, _ = _monthly_parts()
     c = ContractMaster()
     c._segments = {"nse_fo": [
-        {"pTrdSymbol": "NIFTY26OCT22450CE", "pSymbol": "M",
+        {"pTrdSymbol": m_sym, "pSymbol": "M",
          "pStrikePrice": "2245000", "pOptionType": "CE", "pExpiryDate": "1478701800"},
-        {"pTrdSymbol": "NIFTY26O1322450CE", "pSymbol": "W",
+        {"pTrdSymbol": w_sym, "pSymbol": "W",
          "pStrikePrice": "2245000", "pOptionType": "CE", "pExpiryDate": "1476369000"},
     ]}
     r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
                    "option_type": "CE", "exchange_segment": "nse_fo",
-                   "expiry": "13 october expiry"})
-    assert r and r["trading_symbol"] == "NIFTY26O1322450CE"
+                   "expiry": w_hint})
+    assert r and r["trading_symbol"] == w_sym
     assert r["instrument_token"] == "W"
 
 def test_symbol_expiry_parsing():
@@ -285,13 +321,15 @@ def test_update_signal_ltp_scoped_to_traded_contract():
 def test_no_hint_prefers_symbol_nearest_expiry():
     """No-hint fallback reads dates from symbols, not stale row fields."""
     from backend.contract_master import ContractMaster
+    w_sym, _, _ = _weekly_parts()
+    m_sym, _ = _monthly_parts()
     c = ContractMaster()
     c._segments = {"nse_fo": [
-        {"pTrdSymbol": "NIFTY26NOV22450CE", "pSymbol": "M",
+        {"pTrdSymbol": m_sym, "pSymbol": "M",
          "pStrikePrice": "2245000", "pOptionType": "CE", "pExpiryDate": "1478701800"},
-        {"pTrdSymbol": "NIFTY26O1322450CE", "pSymbol": "W",
+        {"pTrdSymbol": w_sym, "pSymbol": "W",
          "pStrikePrice": "2245000", "pOptionType": "CE", "pExpiryDate": "1476369000"},
     ]}
     r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22450",
                    "option_type": "CE", "exchange_segment": "nse_fo"})
-    assert r and r["trading_symbol"] == "NIFTY26O1322450CE"
+    assert r and r["trading_symbol"] == w_sym
