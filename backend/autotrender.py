@@ -10,6 +10,7 @@ Does NOT touch existing telegram/signal/trading paths:
 No DB migration: in-memory list only. Restart clears it (paper-test scope).
 """
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -32,7 +33,11 @@ _manager = None
 _broadcast = None
 
 # Live-tick candle store for the engine (read-only; never trades by itself).
-_candles = CandleBuilder(timeframe_secs=60, max_bars=500)
+# Closed bars persist to data/candles.json so restarts reload the session.
+_CANDLE_FILE = os.path.join(os.path.dirname(__file__), "..", "data",
+                            "candles.json")
+_candles = CandleBuilder(timeframe_secs=60, max_bars=500,
+                         persist_path=_CANDLE_FILE)
 
 
 def _tick_handler(token, ltp, tick):

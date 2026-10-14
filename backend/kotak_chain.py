@@ -19,9 +19,35 @@ Nothing here trades. Output rows are engine-ready
 (strike/callOI/putOI/callLTP/putLTP/atm) for autotrender_engine.
 """
 import logging
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
+
+
+def _nearest_expiry_via_api(kotak_client: Any, segment: str, und: str) -> Optional[date]:
+    """Nearest live expiry from the expiries API (clean ISO dates, no 2FA
+    needed). The scrip-master expiry *fields* are stale (2016 timestamps),
+    so this is the trustworthy source when the master can't deliver."""
+    try:
+        fn = getattr(kotak_client, "expiries", None)
+        if fn is None:
+            return None
+        resp = fn(exchange=segment, underlying=und)
+        dates = (resp or {}).get("expiries", []) if isinstance(resp, dict) else []
+        today = date.today()
+        parsed = []
+        for s in dates:
+            try:
+                d = datetime.strptime(str(s).strip(), "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                continue
+            if d >= today:
+                parsed.append(d)
+        return min(parsed) if parsed else None
+    except Exception:
+        log.exception("chain_snapshot: expiries API failed")
+        return None
 
 
 def _first(d: Dict[str, Any], *keys: str, default: float = 0.0) -> float:
@@ -182,25 +208,36 @@ def chain_snapshot(kotak_client: Any, contract_master: Any, *,
     # Standard desk product first (minis only as fallback).
     pool = cm._prefer_standard(pool, und)
 
-    expiry = None
+    # Expiry resolution: hint → expiries API → master fields (last, they're
+    # known-stale). Row matching uses the SYMBOL-embedded expiry first
+    # (trustworthy) with row-date equality as backup.
+    target = None
     if expiry_hint:
         try:
-            hint = cm._expiry_hint_to_date(expiry_hint)
-            if hint is not None:
-                for c in pool:
-                    rd = cm._row_expiry_date(c)
-                    if rd is not None and cm._hint_matches(hint, rd):
-                        expiry = str(c.get("pExpiryDate", "") or c.get("expiry_date", "")
-                                     or c.get("expiry", "")).strip()
-                        break
+            target = cm._expiry_hint_to_date(expiry_hint)
+            if target is not None and not any(
+                    cm._hint_matches(
+                        target, cm._symbol_expiry(cm._sym_of(c), und))
+                    or cm._row_expiry_date(c) == target for c in pool):
+                target = None
         except Exception:
             log.exception("chain_snapshot: expiry hint parse failed")
-    if not expiry:
+            target = None
+    if target is None:
+        target = _nearest_expiry_via_api(kotak_client, segment, und)
+    expiry = target.isoformat() if target is not None else None
+    if expiry is None:
         expiry = cm._nearest_expiry(pool)
     if not expiry:
         raise ValueError(f"No live expiry found for {und}")
-    exp_rows = [c for c in pool if str(
-        c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")).strip() == expiry]
+    if target is not None:
+        exp_rows = [c for c in pool
+                    if cm._hint_matches(
+                        target, cm._symbol_expiry(cm._sym_of(c), und))
+                    or cm._row_expiry_date(c) == target]
+    else:
+        exp_rows = [c for c in pool if str(
+            c.get("pExpiryDate", "") or c.get("expiry_date", "") or c.get("expiry", "")).strip() == expiry]
 
     by_strike: Dict[int, Dict[str, Any]] = {}
     for c in exp_rows:

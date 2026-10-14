@@ -145,6 +145,32 @@ def test_quotes_error_raises():
         kc.chain_snapshot(_Err(), _cm(), spot=25800.0)
 
 
+def test_stale_master_expiry_resolves_via_api_and_symbols():
+    # Live Kotak master rows carry stale 2016 pExpiryDate values — resolution
+    # must use expiries() + symbol-embedded expiry, not the row fields.
+    rows = []
+    for s in (25700, 25800):
+        for opt in ("CE", "PE"):
+            rows.append({"pTrdSymbol": f"NIFTY27DEC{s}{opt}",
+                         "pSymbol": f"TOK-{opt}-{s}",
+                         "pStrikePrice": str(s), "pOptionType": opt,
+                         "pExpiryDate": "1483021800"})  # stale Dec-2016
+    cm = ContractMaster()
+    cm._segments = {"nse_fo": rows}
+
+    class _ApiClient(_NoChainClient):
+        def expiries(self, exchange=None, underlying=None):
+            assert underlying == "NIFTY"
+            return {"expiries": ["2027-12-30", "2028-01-27"]}
+
+    snap = kc.chain_snapshot(_ApiClient(_std_quotes()), cm,
+                             spot=25750.0, width=1)
+    assert snap["source"] == "quotes"
+    assert snap["expiry"] == "2027-12-30"
+    assert [r["strike"] for r in snap["rows"]] == [25700, 25800]
+    assert snap["warnings"] == []
+
+
 def test_no_pairs_raises():
     cm = ContractMaster()
     cm._segments = {"nse_fo": [_row(25800, "CE", "TOK-CE-25800")]}
