@@ -213,6 +213,24 @@ async def live_ticks() -> Dict[str, Any]:
     return {"ticks": ticks}
 
 
+@router.get("/candles")
+async def live_candles(symbol: str = "NIFTY", n: int = 60) -> Dict[str, Any]:
+    """Read-only: recent 1-min bars (closed + forming) for a symbol.
+
+    The same tape the engine decides on — now visible on the dashboard.
+    Never trades.
+    """
+    sym = (symbol or "NIFTY").upper().strip()
+    n = max(1, min(n, 500))
+    try:
+        bars = _candles.get_candles(sym, n=n)
+        return {"symbol": sym, "timeframe_secs": _candles.timeframe,
+                "bars": bars, "count": len(bars)}
+    except Exception:
+        log.exception("autotrender candles failed")
+        return {"symbol": sym, "bars": [], "count": 0}
+
+
 @router.get("/calls")
 async def list_calls(limit: int = 50) -> Dict[str, Any]:
     return {"calls": _calls[: max(1, min(limit, 200))]}
