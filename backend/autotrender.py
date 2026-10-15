@@ -423,6 +423,34 @@ async def universe(segment: str = "nse_fo") -> Dict[str, Any]:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
+@router.get("/debug-resolve")
+async def debug_resolve(kind: str = "FUT", underlying: str = "CRUDEOIL",
+                        segment: str = "mcx_fo") -> Dict[str, Any]:
+    """Read-only: show exactly what contract_master.resolve returns for a
+    signal dict (minus strike/option fields). For diagnosing dead FUT subs."""
+    try:
+        if _manager is None:
+            return {"ok": False, "error": "unwired"}
+        cm = getattr(_manager, "contract_master", None)
+        if cm is None:
+            return {"ok": False, "error": "no contract-master"}
+        res = cm.resolve({"kind": kind, "underlying": underlying,
+                          "exchange_segment": segment})
+        if not res:
+            return {"ok": True, "resolved": None}
+        res = dict(res)
+        res.pop("raw", None)
+        feed = getattr(_manager, "market_feed", None)
+        subs = (getattr(feed, "_subscriptions", {}) or {}) if feed else {}
+        tok = str(res.get("instrument_token") or "")
+        res["subscribed_as"] = (subs.get(tok) or {}).get("symbol") if tok in subs else None
+        res["n_subs"] = len(subs)
+        return {"ok": True, "resolved": res}
+    except Exception as e:
+        log.exception("debug resolve failed")
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
 @router.get("/chain-probe")
 async def chain_probe(underlying: str = "CRUDEOIL", segment: str = "mcx_fo",
                       spot: float = 0, width: int = 5,
