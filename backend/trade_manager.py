@@ -60,6 +60,38 @@ def is_commodity(underlying: str = "") -> bool:
     return str(underlying or "").upper() in MCX_UNDERLYINGS
 
 
+# Mini books trade the same desks as their standard contracts.
+MINI_TO_COMMODITY = frozenset({"NATGASMINI", "GOLDM", "CRUDEOILM", "SILVERM"})
+
+# Mirror of autotrender.EQUITY_WATCH (lazy import preferred; fallback here).
+EQUITY_BOOKS_FALLBACK = (
+    "HDFCBANK", "RELIANCE", "BHARTIARTL", "SBIN", "KOTAKBANK", "BSE",
+    "ICICIBANK", "INFY", "AXISBANK", "TITAN", "TCS", "ITC", "LT", "M&M",
+)
+
+_STRATEGY_SCOPES = ("default", "NIFTY", "SENSEX", "EQUITY", "COMMODITY")
+
+
+def strategy_scope_for(underlying: str = "") -> str:
+    """Map a signal underlying to its strategy scope (desk grouping)."""
+    u = str(underlying or "").upper()
+    if u == "NIFTY":
+        return "NIFTY"
+    if u == "SENSEX":
+        return "SENSEX"
+    if u in MINI_TO_COMMODITY or is_commodity(u):
+        return "COMMODITY"
+    try:
+        from .autotrender import EQUITY_WATCH
+        if u in EQUITY_WATCH:
+            return "EQUITY"
+    except Exception:
+        pass
+    if u in EQUITY_BOOKS_FALLBACK:
+        return "EQUITY"
+    return "default"
+
+
 def _utc_now() -> str:
     """[FIX #16] Return current UTC time as ISO-8601 string with Z suffix."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -144,6 +176,9 @@ class TradeManager:
         self.strategies: Dict[str, Dict[str, Any]] = {
             "default": dict(self.strategy),
             "NIFTY": dict(self.strategy),
+            "SENSEX": dict(self.strategy),
+            "EQUITY": dict(self.strategy),
+            "COMMODITY": dict(self.strategy),
         }
 
         self._ws_broadcast: Optional[Callable] = None
@@ -165,18 +200,18 @@ class TradeManager:
 
     def get_strategy(self, underlying: str = "") -> Dict[str, Any]:
         """Return the strategy scope for an underlying, falling back to default."""
-        und = str(underlying or "").upper()
         scopes = getattr(self, "strategies", None) or {"default": self.strategy}
-        if und == "NIFTY" and isinstance(scopes.get("NIFTY"), dict):
-            return scopes["NIFTY"]
+        scope = strategy_scope_for(underlying)
+        if isinstance(scopes.get(scope), dict):
+            return scopes[scope]
         return scopes.get("default", self.strategy)
 
     def set_strategy_for(self, scope: str, strategy: Dict[str, Any]) -> Dict[str, Any]:
         """Save one scope; keep self.strategy synced to default."""
         raw = str(scope or "default").upper()
-        key = "NIFTY" if raw == "NIFTY" else "default"
+        key = raw if raw in _STRATEGY_SCOPES else "default"
         if not hasattr(self, "strategies") or not isinstance(self.strategies, dict):
-            self.strategies = {"default": dict(self.strategy), "NIFTY": dict(self.strategy)}
+            self.strategies = {s: dict(self.strategy) for s in _STRATEGY_SCOPES}
         self.strategies[key] = dict(strategy or {})
         self.strategy = self.strategies.get("default", self.strategy)
         return self.strategies[key]

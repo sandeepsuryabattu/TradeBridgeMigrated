@@ -127,11 +127,21 @@ def load_strategies() -> dict:
                 saved = json.load(f)
                 if isinstance(saved, dict):
                     if "default" in saved or "NIFTY" in saved:
-                        default = _normalize_strategy(saved.get("default", {}))
-                        nifty = _normalize_strategy(
-                            saved.get("NIFTY", saved.get("default", {}))
-                        )
-                        return {"default": default, "NIFTY": nifty}
+                        # Preserve every saved scope; backfill new desks
+                        # (SENSEX/EQUITY/COMMODITY) from default so live
+                        # tuning is never clobbered.
+                        out = {"default": _normalize_strategy(
+                            saved.get("default", {}))}
+                        for scope in ("NIFTY", "SENSEX", "EQUITY",
+                                      "COMMODITY"):
+                            if isinstance(saved.get(scope), dict):
+                                out[scope] = _normalize_strategy(saved[scope])
+                            elif scope == "NIFTY":
+                                out[scope] = _normalize_strategy(
+                                    saved.get("default", {}))
+                            else:
+                                out[scope] = dict(out["default"])
+                        return out
                     # Legacy flat file → same config for both scopes
                     default = _normalize_strategy(saved)
                     return {"default": dict(default), "NIFTY": dict(default)}
@@ -1088,7 +1098,8 @@ async def set_lot_size(req: LotSizeRequest):
 async def set_strategy(req: StrategyRequest):
     data = req.dict()
     raw_scope = str(data.pop("scope", "default") or "default").upper()
-    scope = "NIFTY" if raw_scope == "NIFTY" else "default"
+    from .trade_manager import _STRATEGY_SCOPES
+    scope = raw_scope if raw_scope in _STRATEGY_SCOPES else "default"
     strategies = getattr(manager, "strategies", None) or {"default": manager.strategy}
     strategies[scope] = {**STRATEGY_DEFAULTS, **data}
     manager.strategies = strategies
@@ -1097,7 +1108,7 @@ async def set_strategy(req: StrategyRequest):
         if req.lots and req.lots != manager.lot_size:
             manager.set_lot_size(req.lots)
     else:
-        # Keep default alias untouched; NIFTY lots live inside its own scope.
+        # Keep default alias untouched; scoped lots live inside their scope.
         manager.strategy = strategies.get("default", manager.strategy)
     save_strategies(manager.strategies)
     await ws_manager.broadcast({"type": "settings_update", "data": {

@@ -245,3 +245,26 @@ class TestCommodityRouting:
             tm = TradeManager()
         tm.strategies = {"default": {"lots": 50}, "NIFTY": {"lots": 5}}
         assert tm.get_strategy("CRUDEOIL") == {"lots": 50}
+
+    def test_strategy_scopes_per_desk(self):
+        from backend.trade_manager import TradeManager, strategy_scope_for
+        from unittest.mock import patch
+        with patch("backend.trade_manager.KotakTrader"), \
+             patch("backend.trade_manager.MarketFeed"), \
+             patch("backend.trade_manager.PaperTrader"), \
+             patch("backend.trade_manager.RealTrader"), \
+             patch("backend.trade_manager.ContractMaster"):
+            tm = TradeManager()
+        assert strategy_scope_for("NIFTY") == "NIFTY"
+        assert strategy_scope_for("SENSEX") == "SENSEX"
+        assert strategy_scope_for("CRUDEOIL") == "COMMODITY"
+        assert strategy_scope_for("NATGASMINI") == "COMMODITY"
+        assert strategy_scope_for("GOLDM") == "COMMODITY"
+        assert strategy_scope_for("RELIANCE") == "EQUITY"
+        assert strategy_scope_for("M&M") == "EQUITY"
+        assert strategy_scope_for("UNKNOWN") == "default"
+        assert tm.get_strategy("SENSEX") is tm.strategies["SENSEX"]
+        assert tm.get_strategy("RELIANCE") is tm.strategies["EQUITY"]
+        assert tm.get_strategy("GOLDM") is tm.strategies["COMMODITY"]
+        tm.set_strategy_for("equity", {"lots": 7})
+        assert tm.strategies["EQUITY"] == {"lots": 7}
