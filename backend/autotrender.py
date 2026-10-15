@@ -364,8 +364,8 @@ async def universe(segment: str = "nse_fo") -> Dict[str, Any]:
         groups: Dict[str, dict] = {}
         for c in pool:
             sym = cm._sym_of(c) or ""
-            m = _re.match(r"^([A-Z&]+?)(?:WK\d*)?\d", sym)
-            und = (m.group(1) if m else sym).upper()
+            m = _re.match(r"^(.*?)(\d{2}[A-Z])", sym)
+            und = (m.group(1) if m else sym).upper().rstrip("-_ ")
             g = groups.setdefault(und, {"n": 0, "lots": set()})
             g["n"] += 1
             lot = (c.get("lLotSize", "") or c.get("pLotSize", "")
