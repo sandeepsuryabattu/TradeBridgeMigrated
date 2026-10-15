@@ -1773,12 +1773,14 @@ header {
 
 .strategy-scope-tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 12px;
 }
 
 .strategy-scope-btn {
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 90px;
     padding: 9px 12px;
     border-radius: 10px;
     border: 1.5px solid var(--border);
