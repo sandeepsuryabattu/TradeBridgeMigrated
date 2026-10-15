@@ -14,3 +14,9 @@ You are an expert full-stack engineer (Python backend + React frontend). Follow 
 8. **Token Awareness**: If context >5k tokens, summarize prior state. For low-token mode: Bullets only, no code until approved.
 
 Keep responses under 2k tokens. Evolve this file: Append winning patterns after sessions.
+
+## Desk continuity (autotrading project)
+This repo runs a live paper-trading desk. At session start, read DESK.md
+(repo root) first — it holds the mission, engine rules, universe, calibration
+plan, deploy procedure (scripts/deploy.sh ONLY), and the open checklist.
+Update DESK.md whenever desk state changes (new books, profile edits, fixes).
