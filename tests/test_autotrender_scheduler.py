@@ -260,6 +260,18 @@ def test_session_gate_routes_ticks():
     assert at._in_session("CRUDEOIL15OCT269000PE", IST_6PM) is True
     assert at._in_session("NIFTY26O1922650CE", IST_6PM) is False
     assert at._in_session("NIFTY", IST_10AM) is True
+    # Mini books trade MCX hours, not NSE hours.
+    assert at._in_session("NATGASMINI", IST_6PM) is True
+    assert at._in_session("GOLDM", IST_6PM) is True
+    assert at._in_session("NATGASMINI", IST_10AM) is True
+
+
+def test_mini_cfg_uses_standard_future_for_tape():
+    assert at.NATGAS_CFG["fut"] == "NATURALGAS"
+    assert at.GOLDM_CFG["fut"] == "GOLD"
+    assert at.NATGAS_CFG["symbol"] == "NATGASMINI"
+    assert [c["symbol"] for c in at.SYMBOL_CFGS] == [
+        "NIFTY", "CRUDEOIL", "NATGASMINI", "GOLDM"]
 
 
 def test_neutral_bias_skips(wired):

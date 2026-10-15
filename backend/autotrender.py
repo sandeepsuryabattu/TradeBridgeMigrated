@@ -169,7 +169,8 @@ def _in_session(sym: str, now: Optional[datetime] = None) -> bool:
     except Exception:
         MCX_CANONICALS = frozenset()
     root = _sym_root(sym)
-    if any(root.startswith(c) for c in MCX_CANONICALS):
+    if root in ("NATGASMINI", "GOLDM", "CRUDEOILM", "SILVERM") or \
+            any(root.startswith(c) for c in MCX_CANONICALS):
         return _in_market_hours(now, (9, 0), (23, 30))
     return _in_market_hours(now)
 
@@ -179,7 +180,8 @@ def _ensure_underlying_sub(cfg: Dict[str, Any]) -> None:
     front-month FUT tick subscribed or bars never form. Idempotent."""
     try:
         sym = str(cfg.get("symbol", ""))
-        if not sym or sym in ("NIFTY", "BANKNIFTY", "SENSEX", "INDIAVIX"):
+        futsym = str(cfg.get("fut", sym) or sym)
+        if not sym or futsym in ("NIFTY", "BANKNIFTY", "SENSEX", "INDIAVIX"):
             return
         if _manager is None:
             return
@@ -187,7 +189,7 @@ def _ensure_underlying_sub(cfg: Dict[str, Any]) -> None:
         cm = getattr(_manager, "contract_master", None)
         if feed is None or cm is None:
             return
-        resolved = cm.resolve({"kind": "FUT", "underlying": sym,
+        resolved = cm.resolve({"kind": "FUT", "underlying": futsym,
                                "exchange_segment": cfg.get("segment", "mcx_fo")})
         if not resolved or not resolved.get("instrument_token"):
             return
@@ -328,30 +330,36 @@ async def _ingest(call: AutotrenderCallIn, auto_forward: bool = True) -> Dict[st
     _calls.insert(0, record)
     del _calls[200:]  # cap memory
     log.info("Autotrender call stored id=%s %s %s%s", record["id"], record["underlying"], record["strike"], record["side"].replace("BUY ", ""))
-    # Mirror into the Telegram Messages feed (message only — never trades).
-    # Uses the same save + new_message broadcast as the telegram listener,
-    # so the call simply appears in 📨 Telegram Messages with sender=Autotrender.
-    try:
-        text = _format_as_signal_text(record)
-        msg_id = await db.save_message(text, sender="Autotrender", source="autotrender")
-        record["bot_message_id"] = msg_id
-        if _broadcast:
-            try:
-                await _broadcast({"type": "new_message", "data": {
-                    "id": msg_id,
-                    "raw_text": text,
-                    "sender": "Autotrender",
-                    "timestamp": record["created_at"],
-                }})
-            except Exception:
-                log.exception("autotrender broadcast failed")
-    except Exception:
-        log.exception("autotrender message mirror failed (call still stored)")
+    # Auto-forward first: the paper pipeline saves its OWN message row, so a
+    # separate mirror here would print the same call twice in 📨 Messages
+    # (live bug 2026-10-15: every auto-call appeared doubled). Mirror only
+    # when the call is held as received.
+    will_forward = bool(auto_forward and _manager is not None
+                        and getattr(_manager, "mode", "paper") == "paper"
+                        and not getattr(_manager, "stop_trading", False))
+    text = _format_as_signal_text(record)
+    if not will_forward:
+        # Mirror into the Telegram Messages feed (message only — never trades).
+        # Uses the same save + new_message broadcast as the telegram listener,
+        # so the call simply appears in 📨 Telegram Messages with sender=Autotrender.
+        try:
+            msg_id = await db.save_message(text, sender="Autotrender", source="autotrender")
+            record["bot_message_id"] = msg_id
+            if _broadcast:
+                try:
+                    await _broadcast({"type": "new_message", "data": {
+                        "id": msg_id,
+                        "raw_text": text,
+                        "sender": "Autotrender",
+                        "timestamp": record["created_at"],
+                    }})
+                except Exception:
+                    log.exception("autotrender broadcast failed")
+        except Exception:
+            log.exception("autotrender message mirror failed (call still stored)")
     # Auto-forward: same pipeline as the manual paper-trade endpoint, but inline.
     # Paper-mode + stop-trading guards keep real trading untouched.
-    if auto_forward and _manager is not None \
-            and getattr(_manager, "mode", "paper") == "paper" \
-            and not getattr(_manager, "stop_trading", False):
+    if will_forward:
         try:
             result = await _manager.process_message(
                 text=_format_as_signal_text(record),
@@ -686,7 +694,18 @@ CRUDE_CFG = {"symbol": "CRUDEOIL", "segment": "mcx_fo",
              "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
              "width": 5, "count": 120, "lot": 100,
              "dashboard": False, "vix": False}
-SYMBOL_CFGS = [NIFTY_CFG, CRUDE_CFG]
+# Minis trade the liquid small-ticket books; fut= points the underlying
+# FUT subscription at the standard contract (minis have no own future
+# tape in the master, and options settle to the standard future).
+NATGAS_CFG = {"symbol": "NATGASMINI", "fut": "NATURALGAS", "segment": "mcx_fo",
+              "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
+              "width": 5, "count": 60, "lot": 250,
+              "dashboard": False, "vix": False}
+GOLDM_CFG = {"symbol": "GOLDM", "fut": "GOLD", "segment": "mcx_fo",
+             "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
+             "width": 5, "count": 60, "lot": 100,
+             "dashboard": False, "vix": False}
+SYMBOL_CFGS = [NIFTY_CFG, CRUDE_CFG, NATGAS_CFG, GOLDM_CFG]
 
 _sched_task = None
 # Per-symbol scheduler state (cooldown/cap/prev-snapshot are per book).
