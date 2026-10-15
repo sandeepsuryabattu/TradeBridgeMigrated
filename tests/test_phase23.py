@@ -45,6 +45,31 @@ def test_resolve_nifty_opt(master):
     assert r["exchange_segment"] == "nse_fo" and r["lot_size"] == "65"
 
 
+def test_slim_drops_fat_csv_columns_but_resolves():
+    c = ContractMaster()
+    fat = dict(_opt_row("NIFTY13OCT2522500CE", 2250000, "CE"))
+    for i in range(30):
+        fat[f"junkCol{i}"] = "x" * 50
+    slimmed = c._slim([fat])
+    assert len(slimmed) == 1
+    assert not any(k.startswith("junkCol") for k in slimmed[0])
+    assert slimmed[0]["pTrdSymbol"] == "NIFTY13OCT2522500CE"
+    c._segments = {"nse_fo": slimmed}
+    r = c.resolve({"kind": "OPT", "underlying": "NIFTY", "strike": "22500",
+                   "option_type": "CE", "exchange_segment": "nse_fo"})
+    assert r and r["trading_symbol"] == "NIFTY13OCT2522500CE"
+
+
+def test_parse_scrip_master_returns_slim_rows():
+    c = ContractMaster()
+    csv_text = ("pTrdSymbol,pSymbol,pStrikePrice,pOptionType,pExpiryDate,"
+                "lLotSize,junkA,junkB\n"
+                "NIFTY13OCT2522500CE,TKN,2250000,CE,30-Dec-2026,65,zzz,yyy\n")
+    rows = c._parse_scrip_master(csv_text)
+    assert len(rows) == 1 and "junkA" not in rows[0]
+    assert rows[0]["pTrdSymbol"] == "NIFTY13OCT2522500CE"
+
+
 def test_resolve_future(master):
     r = master.resolve({"kind": "FUT", "underlying": "NIFTY",
                     "exchange_segment": "nse_fo"})

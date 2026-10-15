@@ -21,6 +21,23 @@ log = logging.getLogger(__name__)
 
 _KEEP_BARS = 150  # per symbol on disk — plenty for the 60-bar engine window
 
+# Single-tick jump limits (fraction of last accepted LTP). A 2-sec NIFTY
+# tick never legitimately jumps 0.3%; reconnect replays do (2026-10-14:
+# stale 22491 print inside a 22650 market). Derivatives/VIX get room.
+_INDEX_JUMP_LIMIT = 0.003
+_VIX_JUMP_LIMIT = 0.05
+_DEFAULT_JUMP_LIMIT = 0.10
+_GAP_MULT = 2  # idle longer than this × timeframe marks the next bar gapped
+
+
+def _jump_limit(symbol: str) -> float:
+    s = (symbol or "").upper()
+    if any(ch.isdigit() for ch in s):
+        return _DEFAULT_JUMP_LIMIT  # derivative leg
+    if "VIX" in s:
+        return _VIX_JUMP_LIMIT
+    return _INDEX_JUMP_LIMIT
+
 
 def _today_ist_midnight_epoch() -> float:
     try:
@@ -43,16 +60,46 @@ class CandleBuilder:
         self.max_bars = max_bars
         self._closed: dict[str, list[dict]] = {}
         self._open: dict[str, dict] = {}
+        self._last_ltp: dict[str, float] = {}
+        self._last_ts: dict[str, float] = {}
+        self.rejected_ticks = 0
         self._persist_path = persist_path
         if persist_path:
             self._load()
 
     def update(self, symbol: str, ltp: float, ts: Optional[float] = None) -> Optional[dict]:
-        """Fold one tick into its bar. Returns the closed bar when one rolls over."""
+        """Fold one tick into its bar. Returns the closed bar when one rolls over.
+
+        Stale-tick guard: a tick jumping further than the symbol's limit
+        from the last ACCEPTED tick is dropped (reconnect replays) and
+        counted in `rejected_ticks`. A fresh bar opened after a long idle
+        carries `"gap": True` so the engine can distrust its OHLC.
+        """
         sym = (symbol or "").upper().strip()
         if not sym or ltp is None or ltp <= 0:
             return None
+        try:
+            px = float(ltp)
+        except (TypeError, ValueError):
+            return None
         ts = ts if ts is not None else time.time()
+        last = self._last_ltp.get(sym)
+        prev_ts = self._last_ts.get(sym)
+        # No comparison across long idles: overnight gaps are real, and
+        # yesterday's close must never veto today's open tick.
+        fresh_basis = (last and last > 0 and prev_ts is not None
+                       and ts - prev_ts <= 15 * 60)
+        if fresh_basis:
+            if abs(px - last) / last > _jump_limit(sym):
+                self.rejected_ticks += 1
+                log.warning("stale tick rejected: %s %.2f vs last %.2f",
+                            sym, px, last)
+                return None
+        self._last_ltp[sym] = px
+        gap = False
+        if prev_ts is not None and ts - prev_ts > _GAP_MULT * self.timeframe:
+            gap = True
+        self._last_ts[sym] = ts
         bucket = int(ts // self.timeframe) * self.timeframe
         cur = self._open.get(sym)
         if cur is None or cur["bucket"] != bucket:
@@ -62,12 +109,13 @@ class CandleBuilder:
                 self._closed.setdefault(sym, []).append(closed)
                 del self._closed[sym][:-self.max_bars]
                 self._save()
-            self._open[sym] = {"bucket": bucket, "t": bucket, "o": ltp,
-                               "h": ltp, "l": ltp, "c": ltp, "v": 1}
+            self._open[sym] = {"bucket": bucket, "t": bucket, "o": px,
+                               "h": px, "l": px, "c": px, "v": 1,
+                               "gap": gap}
             return closed
-        cur["h"] = max(cur["h"], ltp)
-        cur["l"] = min(cur["l"], ltp)
-        cur["c"] = ltp
+        cur["h"] = max(cur["h"], px)
+        cur["l"] = min(cur["l"], px)
+        cur["c"] = px
         cur["v"] += 1
         return None
 

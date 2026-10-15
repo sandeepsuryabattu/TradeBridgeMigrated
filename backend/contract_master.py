@@ -111,6 +111,27 @@ class ContractMaster:
         """Load contracts from the saved CSV file (called on startup before first live download)."""
         return self._load_from_csv()
 
+    # Row slimming: scrip-master CSVs carry 30+ columns per contract and
+    # 150k+ rows across segments (~650MB as full DictReader rows — live
+    # OOM-adjacent finding 2026-10-15). Only these keys are ever read
+    # (audited across the codebase); everything else is dropped at parse.
+    _KEEP_KEYS = frozenset({
+        "pTrdSymbol", "pSymbolName", "pSymbol", "symbol", "trading_symbol",
+        "dStrikePrice;", "pStrikePrice", "strike_price", "dStrikePrice",
+        "pOptionType", "option_type",
+        "pExpiryDate", "expiry_date", "expiry",
+        "pInstrumentToken", "pSymbol", "instrument_token",
+        "lLotSize", "pLotSize", "lot_size",
+        "dTickSize", "pTickSize", "tick_size",
+        "pScripRefKey",
+    })
+
+    @classmethod
+    def _slim(cls, contracts: list) -> list:
+        """Project fat CSV rows to the keys the bot actually reads."""
+        keep = cls._KEEP_KEYS
+        return [{k: c[k] for k in keep if k in c} for c in contracts]
+
     def _parse_scrip_master(self, result) -> list[dict]:
         """Parse the scrip master result into a list of contract dicts.
         
@@ -156,7 +177,14 @@ class ContractMaster:
         except Exception as e:
             log.error(f"Error parsing scrip master: {e}")
 
-        return contracts
+        slimmed = self._slim(contracts)
+        try:
+            import gc as _gc
+            del contracts
+            _gc.collect()
+        except Exception:
+            pass
+        return slimmed
 
     def _download_csv_from_url(self, url: str) -> Optional[str]:
         """Download CSV content from a URL."""
@@ -805,7 +833,7 @@ class ContractMaster:
         try:
             with open(MASTER_FILE, "r") as f:
                 reader = csv.DictReader(f)
-                self._contracts = list(reader)
+                self._contracts = self._slim(list(reader))
             if self._contracts:
                 log.info(f"Loaded {len(self._contracts)} contracts from cached CSV")
                 self._build_lookup_index()

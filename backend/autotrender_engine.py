@@ -112,6 +112,92 @@ def atr(candles: List[Dict[str, Any]], period: int = 14) -> float:
     return a
 
 
+def adx(candles: List[Dict[str, Any]], period: int = 14) -> Dict[str, float]:
+    """Wilder ADX + DI+/DI-. Returns {adx, plus_di, minus_di} (0.0 when N/A)."""
+    if not candles or len(candles) < period + 1:
+        return {"adx": 0.0, "plus_di": 0.0, "minus_di": 0.0}
+    highs = [_num(b.get("h")) for b in candles]
+    lows = [_num(b.get("l")) for b in candles]
+    closes = [_num(b.get("c")) for b in candles]
+    s_tr = s_pdm = s_mdm = 0.0
+    dxs: List[float] = []
+    for i in range(1, len(candles)):
+        up = highs[i] - highs[i - 1]
+        dn = lows[i - 1] - lows[i]
+        pdm = up if (up > 0 and up > dn) else 0.0
+        mdm = dn if (dn > 0 and dn > up) else 0.0
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]),
+                 abs(lows[i] - closes[i - 1]))
+        if i <= period:
+            s_tr += tr / period
+            s_pdm += pdm / period
+            s_mdm += mdm / period
+        else:
+            s_tr = (s_tr * (period - 1) + tr) / period
+            s_pdm = (s_pdm * (period - 1) + pdm) / period
+            s_mdm = (s_mdm * (period - 1) + mdm) / period
+        if i >= period and s_tr > 0:
+            pdi = 100.0 * s_pdm / s_tr
+            mdi = 100.0 * s_mdm / s_tr
+            den = pdi + mdi
+            dxs.append(0.0 if den <= 0 else 100.0 * abs(pdi - mdi) / den)
+    if not dxs:
+        return {"adx": 0.0, "plus_di": 0.0, "minus_di": 0.0}
+    n = min(period, len(dxs))
+    a = sum(dxs[:n]) / n
+    for i in range(n, len(dxs)):
+        a = (a * (period - 1) + dxs[i]) / period
+    pdi = 100.0 * s_pdm / s_tr if s_tr > 0 else 0.0
+    mdi = 100.0 * s_mdm / s_tr if s_tr > 0 else 0.0
+    return {"adx": a, "plus_di": pdi, "minus_di": mdi}
+
+
+def supertrend(candles: List[Dict[str, Any]], period: int = 10,
+               mult: float = 3.0) -> Dict[str, Any]:
+    """Supertrend direction witness. Returns {direction: UP|DOWN, value}."""
+    if not candles or len(candles) < period + 1:
+        return {"direction": None, "value": None}
+    atr_v = atr(candles, period)
+    direction: Optional[str] = None
+    st: Optional[float] = None
+    for i, cur in enumerate(candles):
+        h, ll, c = _num(cur.get("h")), _num(cur.get("l")), _num(cur.get("c"))
+        mid = (h + ll) / 2.0
+        ub, lb = mid + mult * atr_v, mid - mult * atr_v
+        if direction is None:
+            direction = "UP" if c >= mid else "DOWN"
+            st = lb if direction == "UP" else ub
+            continue
+        assert st is not None
+        if direction == "UP":
+            st = max(lb, st)
+            if c < st:
+                direction, st = "DOWN", ub
+        else:
+            st = min(ub, st)
+            if c > st:
+                direction, st = "UP", lb
+    return {"direction": direction, "value": st}
+
+
+def resample(candles: List[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
+    """Group consecutive 1-min bars into n-min bars. {o,h,l,c,v} dicts."""
+    out: List[Dict[str, Any]] = []
+    for i in range(0, len(candles or []), max(1, n)):
+        grp = candles[i:i + max(1, n)]
+        try:
+            out.append({
+                "o": _num(grp[0].get("o")),
+                "h": max(_num(b.get("h")) for b in grp),
+                "l": min(_num(b.get("l")) for b in grp),
+                "c": _num(grp[-1].get("c")),
+                "v": sum(_num(b.get("v")) for b in grp),
+            })
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def detect(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Pattern scan over >= 20 candles. Raises ValueError if fewer."""
     if not candles or len(candles) < 20:
@@ -205,24 +291,6 @@ def calc_pcr_chg(rows: List[Dict[str, Any]]) -> float:
     return round2(put / call)
 
 
-def gen_signal(pcr: Any) -> str:
-    try:
-        v = float(pcr)
-    except (TypeError, ValueError):
-        return "NEUTRAL"
-    if not math.isfinite(v):
-        return "NEUTRAL"
-    if v > 1.25:
-        return "STRONG BUY"
-    if v > 1.05:
-        return "BUY"
-    if v < 0.75:
-        return "STRONG SELL"
-    if v < 0.95:
-        return "SELL"
-    return "NEUTRAL"
-
-
 def get_support_resistance(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not rows:
         return {"support": 0, "supportOI": 0, "resistance": 0, "resistanceOI": 0}
@@ -271,19 +339,6 @@ def summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "totalCallChg": _rows_sum(rows, "callChgOI"),
             "totalPutChg": _rows_sum(rows, "putChgOI"),
             "pcr": calc_pcr(rows), "pcrChg": calc_pcr_chg(rows)}
-
-
-def calc_position(capital: Any, risk_pct: Any, entry: Any, stop: Any) -> Dict[str, Any]:
-    cap = _num(capital)
-    risk = _num(risk_pct)
-    en = _num(entry)
-    st = _num(stop)
-    risk_amt = round2(cap * risk / 100)
-    per_share = abs(en - st)
-    if not per_share or risk_amt <= 0:
-        return {"riskAmt": risk_amt, "qty": 0, "positionValue": 0}
-    qty = math.floor(risk_amt / per_share)
-    return {"riskAmt": risk_amt, "qty": qty, "positionValue": round2(qty * en)}
 
 
 def option_call_details(chain_rows: List[Dict[str, Any]], spot_price: Any,

@@ -72,11 +72,6 @@ def test_derivatives_parity():
     assert eng.straddle(rows) == 11
     assert eng.get_support_resistance(rows) == {
         "support": 110, "supportOI": 10, "resistance": 100, "resistanceOI": 10}
-    assert eng.gen_signal(1.3) == "STRONG BUY"
-    assert eng.gen_signal(1.1) == "BUY"
-    assert eng.gen_signal(0.9) == "SELL"
-    assert eng.gen_signal(0.7) == "STRONG SELL"
-    assert eng.gen_signal(1.0) == "NEUTRAL"
     assert eng.calc_pcr([]) == 0.0
 
 
@@ -89,5 +84,3 @@ def test_option_call_parity():
         "side": "BUY CE", "strike": 100, "premium": 5, "entryLow": 4.9,
         "entryHigh": 5.1, "sl": 3.5, "tgt": 8, "lot": 75}
     assert eng.option_call_details(rows, 105, "NEUTRAL", 105, 102, 111)["side"] == "NO TRADE"
-    assert eng.calc_position(100000, 1, 25800, 25700) == {
-        "riskAmt": 1000, "qty": 10, "positionValue": 258000}

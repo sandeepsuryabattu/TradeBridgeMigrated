@@ -97,7 +97,8 @@ def _token_of(contract: Dict[str, Any]) -> str:
 
 def _snapshot_via_option_chain(kotak_client: Any, *, underlying: str,
                                segment: str, spot: Optional[float],
-                               width: int) -> Dict[str, Any]:
+                               width: int, count: int = 20,
+                               expiry: Optional[str] = None) -> Dict[str, Any]:
     """Native option_chain endpoint — carries server-computed ChgOI."""
     oc = getattr(kotak_client, "option_chain", None)
     if oc is None:
@@ -105,7 +106,8 @@ def _snapshot_via_option_chain(kotak_client: Any, *, underlying: str,
     und = (underlying or "").upper().strip()
     # count must be a multiple of 10; 20 strikes cover our ±9 window.
     resp = oc(exchange=segment, underlying=und,
-              instrument_type="option", count=20)
+              instrument_type="option", count=count,
+              expiry=expiry)
     if isinstance(resp, dict) and ("error" in resp or "Error" in resp):
         raise ValueError(f"option_chain error: {resp}")
     data = resp.get("data", resp) if isinstance(resp, dict) else None
@@ -183,7 +185,8 @@ def _snapshot_via_option_chain(kotak_client: Any, *, underlying: str,
 def chain_snapshot(kotak_client: Any, contract_master: Any, *,
                    underlying: str = "NIFTY", segment: str = "nse_fo",
                    spot: Optional[float] = None, width: int = 9,
-                   expiry_hint: Optional[str] = None) -> Dict[str, Any]:
+                   expiry_hint: Optional[str] = None,
+                   count: int = 20) -> Dict[str, Any]:
     """Fetch live chain rows around ATM for the nearest (or hinted) expiry.
 
     Returns {"underlying","segment","expiry","spot","atm","rows","warnings",
@@ -193,7 +196,8 @@ def chain_snapshot(kotak_client: Any, contract_master: Any, *,
     try:
         snap = _snapshot_via_option_chain(kotak_client, underlying=underlying,
                                           segment=segment, spot=spot,
-                                          width=width)
+                                          width=width, count=count,
+                                          expiry=expiry_hint or None)
         if snap.get("rows"):
             return snap
     except Exception:

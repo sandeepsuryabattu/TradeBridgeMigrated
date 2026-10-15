@@ -41,7 +41,7 @@ class _FakeClient:
         return out
 
     def option_chain(self, exchange=None, underlying=None,
-                     instrument_type=None, count=None):
+                     instrument_type=None, count=None, expiry=None):
         if self._chain is None:
             raise AttributeError("no option_chain on this client")
         return self._chain
