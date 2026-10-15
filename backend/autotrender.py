@@ -718,6 +718,12 @@ NIFTY_CFG = {"symbol": "NIFTY", "segment": "nse_fo",
              "open": (9, 15), "close": CLOSE_HM, "cutoff": ENTRY_CUTOFF_HM,
              "width": SCHED_WIDTH, "count": 20, "lot": None,
              "dashboard": True, "vix": True}
+# SENSEX options live on BSE (bse_fo, lot 20). Tape arrives via the existing
+# SENSEX index subscription, so no FUT wiring needed (ensure skips indices).
+SENSEX_CFG = {"symbol": "SENSEX", "segment": "bse_fo",
+              "open": (9, 15), "close": (15, 30), "cutoff": (15, 15),
+              "width": 9, "count": 60, "lot": 20,
+              "dashboard": False, "vix": False}
 CRUDE_CFG = {"symbol": "CRUDEOIL", "segment": "mcx_fo",
              "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
              "width": 5, "count": 120, "lot": 100,
@@ -740,7 +746,7 @@ CRUDEMINI_CFG = {"symbol": "CRUDEOILM", "fut": "CRUDEOIL", "segment": "mcx_fo",
                  "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
                  "width": 5, "count": 60, "lot": 10,
                  "dashboard": False, "vix": False}
-SYMBOL_CFGS = [NIFTY_CFG, CRUDE_CFG, NATGAS_CFG, GOLDM_CFG,
+SYMBOL_CFGS = [NIFTY_CFG, SENSEX_CFG, CRUDE_CFG, NATGAS_CFG, GOLDM_CFG,
                CRUDEMINI_CFG]
 # SILVERM dropped 2026-10-16 (desk call) — re-add with fut SILVER if wanted.
 
