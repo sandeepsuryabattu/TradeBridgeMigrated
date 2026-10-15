@@ -348,6 +348,40 @@ async def _ingest(call: AutotrenderCallIn, auto_forward: bool = True) -> Dict[st
     return record
 
 
+@router.get("/universe")
+async def universe(segment: str = "nse_fo") -> Dict[str, Any]:
+    """List distinct option underlyings in a segment with contract counts
+    and lot size. Read-only diagnostic for universe scans."""
+    import re as _re
+    try:
+        if _manager is None:
+            return {"ok": False, "error": "unwired"}
+        cm = getattr(_manager, "contract_master", None)
+        if cm is None:
+            return {"ok": False, "error": "no contract-master"}
+        pool = [c for c in (cm._segments.get(segment, []) or [])
+                if cm._opt_of(c) in ("CE", "PE")]
+        groups: Dict[str, dict] = {}
+        for c in pool:
+            sym = cm._sym_of(c) or ""
+            m = _re.match(r"^([A-Z&]+?)(?:WK\d*)?\d", sym)
+            und = (m.group(1) if m else sym).upper()
+            g = groups.setdefault(und, {"n": 0, "lots": set()})
+            g["n"] += 1
+            lot = (c.get("lLotSize", "") or c.get("pLotSize", "")
+                   or c.get("lot_size", ""))
+            if lot:
+                g["lots"].add(str(lot))
+        out = [{"underlying": u, "contracts": g["n"],
+                "lots": sorted(g["lots"])} for u, g in groups.items()]
+        out.sort(key=lambda r: -r["contracts"])
+        return {"ok": True, "segment": segment,
+                "n_underlyings": len(out), "underlyings": out}
+    except Exception as e:
+        log.exception("universe failed")
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
 @router.get("/chain-probe")
 async def chain_probe(underlying: str = "CRUDEOIL", segment: str = "mcx_fo",
                       spot: float = 0, width: int = 5,
