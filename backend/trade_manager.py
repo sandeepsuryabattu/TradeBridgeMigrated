@@ -69,7 +69,8 @@ EQUITY_BOOKS_FALLBACK = (
     "ICICIBANK", "INFY", "AXISBANK", "TITAN", "TCS", "ITC", "LT", "M&M",
 )
 
-_STRATEGY_SCOPES = ("default", "NIFTY", "SENSEX", "EQUITY", "COMMODITY")
+_STRATEGY_SCOPES = ("default", "NIFTY", "SENSEX", "EQUITY", "COMMODITY",
+                   "CRUDEOIL", "NATGASMINI", "GOLDM")
 
 
 def strategy_scope_for(underlying: str = "") -> str:
@@ -199,9 +200,15 @@ class TradeManager:
         self.real_trader.set_ws_broadcast(broadcast_fn)
 
     def get_strategy(self, underlying: str = "") -> Dict[str, Any]:
-        """Return the strategy scope for an underlying, falling back to default."""
+        """Return the strategy scope for an underlying, falling back to default.
+
+        Exact symbol scopes (NATGASMINI/GOLDM) win over their desk group.
+        """
         scopes = getattr(self, "strategies", None) or {"default": self.strategy}
-        scope = strategy_scope_for(underlying)
+        und = str(underlying or "").upper()
+        if und != strategy_scope_for(und) and isinstance(scopes.get(und), dict):
+            return scopes[und]
+        scope = strategy_scope_for(und)
         if isinstance(scopes.get(scope), dict):
             return scopes[scope]
         return scopes.get("default", self.strategy)

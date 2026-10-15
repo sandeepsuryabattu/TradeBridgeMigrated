@@ -268,3 +268,6 @@ class TestCommodityRouting:
         assert tm.get_strategy("GOLDM") is tm.strategies["COMMODITY"]
         tm.set_strategy_for("equity", {"lots": 7})
         assert tm.strategies["EQUITY"] == {"lots": 7}
+        tm.strategies["NATGASMINI"] = {"lots": 25}
+        assert tm.get_strategy("NATGASMINI") == {"lots": 25}
+        assert tm.get_strategy("CRUDEOIL") is tm.strategies["COMMODITY"]

@@ -2258,7 +2258,7 @@ const STRATEGY_DEFAULTS = {
     snapTrailGap: 3.0,
 };
 
-const STRATEGY_SCOPES = ['default', 'NIFTY', 'SENSEX', 'EQUITY', 'COMMODITY'];
+const STRATEGY_SCOPES = ['default', 'NIFTY', 'SENSEX', 'EQUITY', 'COMMODITY', 'CRUDEOIL', 'NATGASMINI', 'GOLDM'];
 
 function currentScope() {
     return STRATEGY_SCOPES.includes(state.strategyScope) ? state.strategyScope : 'default';

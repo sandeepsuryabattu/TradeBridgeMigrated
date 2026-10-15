@@ -113,6 +113,29 @@ def _normalize_strategy(saved: dict) -> dict:
     return {**STRATEGY_DEFAULTS, **saved}
 
 
+# Theory seeds: premium-scaled starters for new scopes, applied ONLY when
+# strategy.json has no value for that scope. NOT calibrations — paper tape
+# corrects them. Format: scope -> (base_scope, overrides).
+_THEORY_SEEDS = {
+    "SENSEX": ("NIFTY", {}),
+    "EQUITY": ("default", {"lots": 25, "activationPoints": 4.0,
+                            "activationSLOffset": 1.0, "trailGap": 3.0,
+                            "bouncePoints": 2,
+                            "signalTrailInitialSLPoints": 4.0,
+                            "exitSlippage": 0.5}),
+    "NATGASMINI": ("COMMODITY", {"lots": 25, "activationPoints": 1.5,
+                                 "activationSLOffset": 0.5, "trailGap": 1.0,
+                                 "bouncePoints": 1,
+                                 "signalTrailInitialSLPoints": 2.0,
+                                 "exitSlippage": 0.2}),
+    "GOLDM": ("COMMODITY", {"lots": 2, "activationPoints": 120.0,
+                            "activationSLOffset": 30.0, "trailGap": 80.0,
+                            "bouncePoints": 50,
+                            "signalTrailInitialSLPoints": 150.0,
+                            "exitSlippage": 5.0}),
+}
+
+
 def load_strategies() -> dict:
     """Load per-underlying strategies, falling back to defaults.
 
@@ -128,26 +151,37 @@ def load_strategies() -> dict:
                 if isinstance(saved, dict):
                     if "default" in saved or "NIFTY" in saved:
                         # Preserve every saved scope; backfill new desks
-                        # (SENSEX/EQUITY/COMMODITY) from default so live
-                        # tuning is never clobbered.
+                        # from default so live tuning is never clobbered.
+                        # Per-symbol theory seeds (premium-scaled starters —
+                        # paper will correct) apply only when the file has
+                        # no value for that scope.
                         out = {"default": _normalize_strategy(
                             saved.get("default", {}))}
-                        for scope in ("NIFTY", "SENSEX", "EQUITY",
-                                      "COMMODITY"):
+                        if isinstance(saved.get("NIFTY"), dict):
+                            out["NIFTY"] = _normalize_strategy(saved["NIFTY"])
+                        else:
+                            out["NIFTY"] = _normalize_strategy(
+                                saved.get("default", {}))
+                        for scope, (base, seed) in _THEORY_SEEDS.items():
                             if isinstance(saved.get(scope), dict):
                                 out[scope] = _normalize_strategy(saved[scope])
-                            elif scope == "NIFTY":
-                                out[scope] = _normalize_strategy(
-                                    saved.get("default", {}))
                             else:
-                                out[scope] = dict(out["default"])
+                                merged = dict(out.get(base, out["default"]))
+                                merged.update(seed)
+                                out[scope] = _normalize_strategy(merged)
+                        if "COMMODITY" not in out:
+                            out["COMMODITY"] = dict(out["default"])
                         return out
-                    # Legacy flat file → same config for both scopes
+                    # Legacy flat file → same config for every scope
                     default = _normalize_strategy(saved)
-                    return {"default": dict(default), "NIFTY": dict(default)}
+                    return {s: dict(default) for s in
+                            ("default", "NIFTY", "SENSEX", "EQUITY",
+                             "COMMODITY", "CRUDEOIL", "NATGASMINI", "GOLDM")}
     except Exception:
         log.exception("Could not load strategy from disk")  # [FIX #23]
-    return {"default": dict(STRATEGY_DEFAULTS), "NIFTY": dict(STRATEGY_DEFAULTS)}
+    return {s: dict(STRATEGY_DEFAULTS) for s in
+            ("default", "NIFTY", "SENSEX", "EQUITY",
+             "COMMODITY", "CRUDEOIL", "NATGASMINI", "GOLDM")}
 
 
 def load_strategy() -> dict:
