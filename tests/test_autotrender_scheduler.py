@@ -271,8 +271,12 @@ def test_mini_cfg_uses_standard_future_for_tape():
     assert at.GOLDM_CFG["fut"] == "GOLD"
     assert at.NATGAS_CFG["symbol"] == "NATGASMINI"
     assert [c["symbol"] for c in at.SYMBOL_CFGS] == [
-        "NIFTY", "SENSEX", "CRUDEOIL", "NATGASMINI", "GOLDM"]
+        "NIFTY", "SENSEX", "CRUDEOIL", "NATGASMINI", "GOLDM",
+        "HDFCBANK", "RELIANCE", "BHARTIARTL", "SBIN", "KOTAKBANK", "BSE",
+        "ICICIBANK", "INFY", "AXISBANK", "TITAN", "TCS", "ITC", "LT", "M&M"]
     assert at.SENSEX_CFG["segment"] == "bse_fo"
+    assert all(c.get("equity") for c in at.EQUITY_CFGS)
+    assert len(at.EQUITY_CFGS) == 14
 
 
 def test_neutral_bias_skips(wired):

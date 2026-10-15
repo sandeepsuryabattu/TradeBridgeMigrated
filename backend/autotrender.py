@@ -180,14 +180,26 @@ def _ensure_underlying_sub(cfg: Dict[str, Any]) -> None:
     front-month FUT tick subscribed or bars never form. Idempotent."""
     try:
         sym = str(cfg.get("symbol", ""))
-        futsym = str(cfg.get("fut", sym) or sym)
-        if not sym or futsym in ("NIFTY", "BANKNIFTY", "SENSEX", "INDIAVIX"):
-            return
         if _manager is None:
             return
         feed = getattr(_manager, "market_feed", None)
         cm = getattr(_manager, "contract_master", None)
         if feed is None or cm is None:
+            return
+        if cfg.get("equity"):
+            # Equity tape is the nse_cm EQ feed (also covered by the watch
+            # list — idempotent either way).
+            resolved = cm.resolve({"kind": "EQ", "underlying": sym,
+                                   "exchange_segment": "nse_cm"})
+            if not resolved or not resolved.get("instrument_token"):
+                return
+            token = str(resolved["instrument_token"])
+            subs = getattr(feed, "_subscriptions", {}) or {}
+            if token not in subs:
+                feed.subscribe_instrument(token, sym, "nse_cm")
+            return
+        futsym = str(cfg.get("fut", sym) or sym)
+        if not sym or futsym in ("NIFTY", "BANKNIFTY", "SENSEX", "INDIAVIX"):
             return
         resolved = cm.resolve({"kind": "FUT", "underlying": futsym,
                                "exchange_segment": cfg.get("segment", "mcx_fo")})
@@ -222,6 +234,19 @@ def _ensure_underlying_sub(cfg: Dict[str, Any]) -> None:
 EQUITY_WATCH = ["HDFCBANK", "RELIANCE", "BHARTIARTL", "SBIN", "KOTAKBANK",
                 "BSE", "ICICIBANK", "INFY", "AXISBANK", "TITAN", "TCS",
                 "ITC", "LT", "M&M"]
+# Equity engine books (desk order 2026-10-16): full scheduler evaluation on
+# the nse_fo option chain with tape from the nse_cm EQ feed. Paper-only.
+# NOTE: thresholds are still the shared NIFTY-tuned seeds — paper fires are
+# the calibration sample. Watch REST rate (14 extra chain snapshots/min).
+_EQUITY_LOTS = {"HDFCBANK": 650, "RELIANCE": 500, "BHARTIARTL": 475,
+                "SBIN": 750, "KOTAKBANK": 2000, "BSE": 200,
+                "ICICIBANK": 700, "INFY": 400, "AXISBANK": 625,
+                "TITAN": 175, "TCS": 225, "ITC": 1725, "LT": 175,
+                "M&M": 200}
+EQUITY_CFGS = [{"symbol": s, "equity": True, "segment": "nse_fo",
+                "open": (9, 15), "close": (15, 30), "cutoff": (15, 15),
+                "width": 4, "count": 100, "lot": _EQUITY_LOTS[s],
+                "dashboard": False, "vix": False} for s in EQUITY_WATCH]
 
 
 def _ensure_watch_subs() -> None:
@@ -743,7 +768,8 @@ GOLDM_CFG = {"symbol": "GOLDM", "fut": "GOLD", "segment": "mcx_fo",
 # lists — no fires possible without a chain snapshot.
 # (CRUDEOILM dropped 2026-10-16, chain dead; SILVERM dropped same night.
 # Re-add with fut CRUDEOIL / SILVER when wanted.)
-SYMBOL_CFGS = [NIFTY_CFG, SENSEX_CFG, CRUDE_CFG, NATGAS_CFG, GOLDM_CFG]
+SYMBOL_CFGS = [NIFTY_CFG, SENSEX_CFG, CRUDE_CFG, NATGAS_CFG, GOLDM_CFG,
+               *EQUITY_CFGS]
 
 _sched_task = None
 # Per-symbol scheduler state (cooldown/cap/prev-snapshot are per book).
