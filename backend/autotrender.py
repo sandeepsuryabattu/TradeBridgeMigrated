@@ -351,7 +351,8 @@ async def _ingest(call: AutotrenderCallIn, auto_forward: bool = True) -> Dict[st
 @router.get("/chain-probe")
 async def chain_probe(underlying: str = "CRUDEOIL", segment: str = "mcx_fo",
                       spot: float = 0, width: int = 5,
-                      count: int = 0, expiry: str = "") -> Dict[str, Any]:
+                      count: int = 0, expiry: str = "",
+                      full: int = 0) -> Dict[str, Any]:
     """Read-only probe: run a chain snapshot for any underlying/segment
     (MCX evenings, BANKNIFTY checks). Returns source/rows/expiry/warnings
     plus sample rows — or the error string. Never trades, never raises."""
@@ -381,15 +382,18 @@ async def chain_probe(underlying: str = "CRUDEOIL", segment: str = "mcx_fo",
                 expiries = exp(exchange=segment, underlying=underlying.upper())
         except Exception:
             pass
-        return {"ok": True, "underlying": snap.get("underlying"),
-                "segment": snap.get("segment"), "expiry": snap.get("expiry"),
-                "spot": snap.get("spot"), "atm": snap.get("atm"),
-                "n_rows": len(rows), "source": snap.get("source"),
-                "warnings": snap.get("warnings", []),
-                "quote_keys": snap.get("quote_keys", []),
-                "strikes": strikes,
-                "expiries": expiries,
-                "sample": sample}
+        out = {"ok": True, "underlying": snap.get("underlying"),
+               "segment": snap.get("segment"), "expiry": snap.get("expiry"),
+               "spot": snap.get("spot"), "atm": snap.get("atm"),
+               "n_rows": len(rows), "source": snap.get("source"),
+               "warnings": snap.get("warnings", []),
+               "quote_keys": snap.get("quote_keys", []),
+               "strikes": strikes,
+               "expiries": expiries,
+               "sample": sample}
+        if full:
+            out["rows"] = rows
+        return out
     except Exception as e:
         log.exception("chain probe failed")
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
