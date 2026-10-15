@@ -733,7 +733,19 @@ GOLDM_CFG = {"symbol": "GOLDM", "fut": "GOLD", "segment": "mcx_fo",
              "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
              "width": 5, "count": 60, "lot": 100,
              "dashboard": False, "vix": False}
-SYMBOL_CFGS = [NIFTY_CFG, CRUDE_CFG, NATGAS_CFG, GOLDM_CFG]
+# Minis with thin/no current chain (CRUDEOILM's only contract died with the
+# Oct-15 expiry). They idle in warmup until the next contract lists — no
+# fires possible without a chain snapshot.
+CRUDEMINI_CFG = {"symbol": "CRUDEOILM", "fut": "CRUDEOIL", "segment": "mcx_fo",
+                 "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
+                 "width": 5, "count": 60, "lot": 10,
+                 "dashboard": False, "vix": False}
+SILVERM_CFG = {"symbol": "SILVERM", "fut": "SILVER", "segment": "mcx_fo",
+               "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
+               "width": 5, "count": 60, "lot": 5,
+               "dashboard": False, "vix": False}
+SYMBOL_CFGS = [NIFTY_CFG, CRUDE_CFG, NATGAS_CFG, GOLDM_CFG,
+               CRUDEMINI_CFG, SILVERM_CFG]
 
 _sched_task = None
 # Per-symbol scheduler state (cooldown/cap/prev-snapshot are per book).

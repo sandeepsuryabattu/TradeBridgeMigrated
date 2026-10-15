@@ -271,7 +271,10 @@ def test_mini_cfg_uses_standard_future_for_tape():
     assert at.GOLDM_CFG["fut"] == "GOLD"
     assert at.NATGAS_CFG["symbol"] == "NATGASMINI"
     assert [c["symbol"] for c in at.SYMBOL_CFGS] == [
-        "NIFTY", "CRUDEOIL", "NATGASMINI", "GOLDM"]
+        "NIFTY", "CRUDEOIL", "NATGASMINI", "GOLDM",
+        "CRUDEOILM", "SILVERM"]
+    assert at.CRUDEMINI_CFG["fut"] == "CRUDEOIL"
+    assert at.SILVERM_CFG["fut"] == "SILVER"
 
 
 def test_neutral_bias_skips(wired):
