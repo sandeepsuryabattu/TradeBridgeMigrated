@@ -214,6 +214,39 @@ def _ensure_underlying_sub(cfg: Dict[str, Any]) -> None:
         log.exception("autotrender underlying subscribe failed")
 
 
+# Track-only equity universe (verified 2026-10-15 liquidity scan).
+# EQ feeds + candle books only — no scheduler entry, no fires. The tape
+# accumulates here for future per-symbol calibration.
+EQUITY_WATCH = ["HDFCBANK", "RELIANCE", "BHARTIARTL", "SBIN", "KOTAKBANK",
+                "BSE", "ICICIBANK", "INFY", "AXISBANK", "TITAN", "TCS",
+                "ITC", "LT", "M&M"]
+
+
+def _ensure_watch_subs() -> None:
+    """Subscribe the EQUITY_WATCH EQ feeds (idempotent)."""
+    try:
+        if _manager is None:
+            return
+        feed = getattr(_manager, "market_feed", None)
+        cm = getattr(_manager, "contract_master", None)
+        if feed is None or cm is None:
+            return
+        subs = getattr(feed, "_subscriptions", {}) or {}
+        for sym in EQUITY_WATCH:
+            try:
+                resolved = cm.resolve({"kind": "EQ", "underlying": sym,
+                                       "exchange_segment": "nse_cm"})
+                if not resolved or not resolved.get("instrument_token"):
+                    continue
+                token = str(resolved["instrument_token"])
+                if token not in subs:
+                    feed.subscribe_instrument(token, sym, "nse_cm")
+            except Exception:
+                continue
+    except Exception:
+        log.exception("equity watch subscribe failed")
+
+
 def set_manager(manager) -> None:
     global _manager
     _manager = manager
@@ -1303,6 +1336,10 @@ async def _scheduler_loop() -> None:
     while True:
         try:
             await asyncio.sleep(SCHED_INTERVAL_SECS)
+            try:
+                _ensure_watch_subs()
+            except Exception:
+                pass
             for cfg in SYMBOL_CFGS:
                 try:
                     result = await scheduler_tick(cfg=cfg)
