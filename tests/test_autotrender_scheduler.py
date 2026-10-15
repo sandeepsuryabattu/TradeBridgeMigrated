@@ -283,6 +283,34 @@ def test_mini_cfg_uses_standard_future_for_tape():
                for p in at.PROFILES.values())
 
 
+def test_shadow_logged_then_judged_win():
+    S = at._st("SHADOWTEST")
+    S["shadows"], S["shadow_stats"] = [], {"n": 0, "wins": 0}
+    bars = [{"t": 1_700_000_000 + i * 60, "o": 100 + i, "h": 101 + i,
+             "l": 99 + i, "c": 100 + i, "v": 100} for i in range(40)]
+    fused = {"fire": False, "score": 60.0, "vetoes": ["exhaust-chase"]}
+    at._log_shadow(S, bars, fused, {"direction": "BULLISH"})
+    assert len(S["shadows"]) == 1
+    bars += [{"t": 1_700_000_000 + i * 60, "o": 140 + i, "h": 141 + i,
+              "l": 139 + i, "c": 140 + i, "v": 100} for i in range(40, 70)]
+    at._judge_shadows(S, bars)
+    assert S["shadow_stats"] == {"n": 1, "wins": 1}
+    at._sched.pop("SHADOWTEST", None)
+
+
+def test_shadow_judged_loss_when_flat():
+    S = at._st("SHADOWTEST2")
+    S["shadows"], S["shadow_stats"] = [], {"n": 0, "wins": 0}
+    bars = [{"t": 1_700_000_000 + i * 60, "o": 100, "h": 100.1,
+             "l": 99.9, "c": 100, "v": 100} for i in range(70)]
+    at._log_shadow(S, bars[:40],
+                   {"fire": False, "score": 58.0, "vetoes": ["thin-agreement"]},
+                   {"direction": "BULLISH"})
+    at._judge_shadows(S, bars)
+    assert S["shadow_stats"] == {"n": 1, "wins": 0}
+    at._sched.pop("SHADOWTEST2", None)
+
+
 def test_neutral_bias_skips(wired):
     b = CandleBuilder()
     t0 = 1_700_000_000 - 30 * 60

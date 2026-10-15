@@ -66,7 +66,10 @@ def _save_state() -> None:
                               "scratches": st.get("scratches", 0),
                               "silent": bool(st.get("silent")),
                               "last_bias": st.get("last_bias"),
-                              "last_ts": st.get("last_ts", 0.0)}
+                              "last_ts": st.get("last_ts", 0.0),
+                              "shadows": (st.get("shadows") or [])[-120:],
+                              "shadow_stats": st.get("shadow_stats",
+                                                     {"n": 0, "wins": 0})}
             except Exception:
                 continue
         with open(tmp, "w") as f:
@@ -121,6 +124,11 @@ def _restore_state() -> None:
                     S["silent"] = bool(snap.get("silent"))
                     S["last_bias"] = snap.get("last_bias")
                     S["last_ts"] = float(snap.get("last_ts", 0.0) or 0.0)
+                    S["shadows"] = [s for s in (snap.get("shadows") or [])
+                                    if isinstance(s, dict)][-120:]
+                    ss = snap.get("shadow_stats") or {}
+                    S["shadow_stats"] = {"n": int(ss.get("n", 0) or 0),
+                                         "wins": int(ss.get("wins", 0) or 0)}
                 except Exception:
                     continue
         try:
@@ -730,6 +738,11 @@ REGIME_MIN_DENSITY = 0.5        # bars per session-minute; thinner tapes are
                                 # unreadable longer -> chop rules while EARLY
 SCHED_SYMBOL = "NIFTY"
 SCHED_WIDTH = 9                 # strikes each side of ATM for the snapshot
+# Shadow book: setups scoring at/above this but not fired are logged and
+# judged 30 bars later. Counterfactual data for the tuner — zero live effect.
+SHADOW_SCORE = 55.0
+SHADOW_HORIZON = 30
+SHADOW_WIN_PCT = 0.005         # >=0.5% follow-through = "would have worked"
 # Group profiles: separate engines per asset class, one codebase. Values
 # start identical to the proven NIFTY-tuned seeds — paper tape sets them
 # apart per group later. See at_models constants for the shared defaults.
@@ -804,7 +817,7 @@ def _st(sym: str) -> Dict[str, Any]:
         # Regime era: morning label + kill rules (reset daily below).
         "regime": "EARLY", "regime_dir": None, "regime_locked": False,
         "regime_checked_ts": 0.0, "scratches": 0, "silent": False,
-        "fires": [],
+        "fires": [], "shadows": [], "shadow_stats": {"n": 0, "wins": 0},
     })
 # Last successful live snapshot for the dashboard (GET /api/autotrender/live).
 _last_live: Dict[str, Any] = {}
@@ -960,6 +973,10 @@ def _publish_engine(moment, outcome: str, bars=None, found=None, trend=None,
             "cooldown": {"last_bias": S.get("last_bias"),
                           "remaining_secs": remaining},
             "auto_today": S.get("count", 0),
+            "shadows": {"judged": (S.get("shadow_stats") or {}).get("n", 0),
+                        "wins": (S.get("shadow_stats") or {}).get("wins", 0),
+                        "open": sum(1 for s in (S.get("shadows") or [])
+                                    if not s.get("judged"))},
             "regime": {"label": S.get("regime", "EARLY"),
                        "direction": S.get("regime_dir"),
                        "detail": S.get("regime_detail", []),
@@ -1102,6 +1119,49 @@ def _judge_fires(S: Dict[str, Any], bars) -> None:
         log.exception("scratch judging failed")
 
 
+def _log_shadow(S: Dict[str, Any], bars, fused, trig) -> None:
+    """Record a vetoed/sub-threshold setup for later judging. Never raises."""
+    try:
+        sh = S.setdefault("shadows", [])
+        if sum(1 for s in sh if not s.get("judged")) >= 50:
+            return
+        sh.append({"bar_idx": len(bars) - 1, "entry": bars[-1].get("c", 0),
+                   "direction": (trig or {}).get("direction"),
+                   "score": fused.get("score"),
+                   "vetoes": list(fused.get("vetoes") or [])})
+        S["shadows"] = sh[-120:]
+    except Exception:
+        log.exception("shadow log failed")
+
+
+def _judge_shadows(S: Dict[str, Any], bars) -> None:
+    """Judge open shadows SHADOW_HORIZON bars later: >=0.5% follow-through
+    in the signal direction = would have worked. Never raises."""
+    try:
+        closes = [b.get("c", 0) or 0 for b in bars]
+        st = S.setdefault("shadow_stats", {"n": 0, "wins": 0})
+        for s in S.get("shadows", []):
+            if s.get("judged"):
+                continue
+            idx, entry = s.get("bar_idx", 0), s.get("entry", 0) or 0
+            window = closes[idx + 1: idx + 1 + SHADOW_HORIZON]
+            if not window or entry <= 0:
+                continue
+            moves = ([c - entry for c in window]
+                     if s.get("direction") == "BULLISH"
+                     else [entry - c for c in window])
+            fav = max(moves)
+            if fav >= abs(entry) * SHADOW_WIN_PCT:
+                s["judged"], s["won"] = True, True
+                st["n"] = st.get("n", 0) + 1
+                st["wins"] = st.get("wins", 0) + 1
+            elif len(window) >= SHADOW_HORIZON:
+                s["judged"], s["won"] = True, False
+                st["n"] = st.get("n", 0) + 1
+    except Exception:
+        log.exception("shadow judging failed")
+
+
 def _reentry_pick(S: Dict[str, Any], bars) -> Optional[Dict[str, Any]]:
     """Most recent scratched fire whose level was reclaimed + held.
 
@@ -1214,6 +1274,7 @@ async def scheduler_tick(now: Optional[datetime] = None,
         S["regime"], S["regime_dir"] = "EARLY", None
         S["regime_locked"], S["regime_checked_ts"] = False, 0.0
         S["scratches"], S["silent"], S["fires"] = 0, False, []
+        S["shadows"], S["shadow_stats"] = [], {"n": 0, "wins": 0}
     # No count caps by design: the score bar (75+) is the only quota.
     # S["count"] is kept for stats only.
 
@@ -1233,6 +1294,7 @@ async def scheduler_tick(now: Optional[datetime] = None,
     # fires (scratch rule). All additive — EARLY sessions behave as before.
     regime = _update_regime(S, bars, moment.timestamp())
     _judge_fires(S, bars)
+    _judge_shadows(S, bars)
     try:
         found = engine.detect(bars)
     except Exception:
@@ -1366,6 +1428,8 @@ async def scheduler_tick(now: Optional[datetime] = None,
                            fire_threshold=P["fire_threshold"],
                            min_witnesses=P["min_witnesses"])
     if not fused["fire"]:
+        if (fused.get("score") or 0) >= SHADOW_SCORE:
+            _log_shadow(S, bars, fused, trig)
         _publish_engine(moment, f"fusion blocked {fused['vetoes']} (score={fused['score']})",
                         bars=bars, found=found, trend=trend, trig=trig,
                         vol=vol, pos=pos, fused=fused, v2=v2ctx,
