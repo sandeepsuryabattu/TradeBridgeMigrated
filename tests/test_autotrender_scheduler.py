@@ -277,7 +277,7 @@ def test_mini_cfg_uses_standard_future_for_tape():
     assert at.SENSEX_CFG["segment"] == "bse_fo"
     assert all(c.get("equity") for c in at.EQUITY_CFGS)
     assert len(at.EQUITY_CFGS) == 14
-    assert set(at.PROFILES) == {"index", "equity", "commodity"}
+    assert set(at.PROFILES) == {"index", "sensex", "equity", "commodity"}
     assert all(set(p) == {"fire_threshold", "min_witnesses", "cooldown_secs",
                           "exhaust_z", "climax_ratio", "extension_ratio"}
                for p in at.PROFILES.values())

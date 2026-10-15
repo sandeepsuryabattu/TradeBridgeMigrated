@@ -737,6 +737,9 @@ PROFILES = {
     "index":     {"fire_threshold": 70.0, "min_witnesses": 2,
                   "cooldown_secs": 900, "exhaust_z": 3.0,
                   "climax_ratio": 1.3, "extension_ratio": 2.5},
+    "sensex":    {"fire_threshold": 70.0, "min_witnesses": 2,
+                  "cooldown_secs": 900, "exhaust_z": 3.0,
+                  "climax_ratio": 1.3, "extension_ratio": 2.5},
     "equity":    {"fire_threshold": 70.0, "min_witnesses": 2,
                   "cooldown_secs": 900, "exhaust_z": 3.0,
                   "climax_ratio": 1.3, "extension_ratio": 2.5},
@@ -760,7 +763,7 @@ NIFTY_CFG = {"symbol": "NIFTY", "segment": "nse_fo", "profile": "index",
              "dashboard": True, "vix": True}
 # SENSEX options live on BSE (bse_fo, lot 20). Tape arrives via the existing
 # SENSEX index subscription, so no FUT wiring needed (ensure skips indices).
-SENSEX_CFG = {"symbol": "SENSEX", "segment": "bse_fo", "profile": "index",
+SENSEX_CFG = {"symbol": "SENSEX", "segment": "bse_fo", "profile": "sensex",
               "open": (9, 15), "close": (15, 30), "cutoff": (15, 15),
               "width": 9, "count": 60, "lot": 20,
               "dashboard": False, "vix": False}
