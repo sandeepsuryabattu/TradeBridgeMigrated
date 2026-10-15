@@ -244,6 +244,7 @@ _EQUITY_LOTS = {"HDFCBANK": 650, "RELIANCE": 500, "BHARTIARTL": 475,
                 "TITAN": 175, "TCS": 225, "ITC": 1725, "LT": 175,
                 "M&M": 200}
 EQUITY_CFGS = [{"symbol": s, "equity": True, "segment": "nse_fo",
+                "profile": "equity",
                 "open": (9, 15), "close": (15, 30), "cutoff": (15, 15),
                 "width": 4, "count": 100, "lot": _EQUITY_LOTS[s],
                 "dashboard": False, "vix": False} for s in EQUITY_WATCH]
@@ -729,6 +730,20 @@ REGIME_MIN_DENSITY = 0.5        # bars per session-minute; thinner tapes are
                                 # unreadable longer -> chop rules while EARLY
 SCHED_SYMBOL = "NIFTY"
 SCHED_WIDTH = 9                 # strikes each side of ATM for the snapshot
+# Group profiles: separate engines per asset class, one codebase. Values
+# start identical to the proven NIFTY-tuned seeds — paper tape sets them
+# apart per group later. See at_models constants for the shared defaults.
+PROFILES = {
+    "index":     {"fire_threshold": 70.0, "min_witnesses": 2,
+                  "cooldown_secs": 900, "exhaust_z": 3.0,
+                  "climax_ratio": 1.3, "extension_ratio": 2.5},
+    "equity":    {"fire_threshold": 70.0, "min_witnesses": 2,
+                  "cooldown_secs": 900, "exhaust_z": 3.0,
+                  "climax_ratio": 1.3, "extension_ratio": 2.5},
+    "commodity": {"fire_threshold": 70.0, "min_witnesses": 2,
+                  "cooldown_secs": 900, "exhaust_z": 3.0,
+                  "climax_ratio": 1.3, "extension_ratio": 2.5},
+}
 # No fresh entries after the cash closing auction takes over (15:15) — the
 # engine keeps publishing its read, but fusion becomes exit-management only.
 # Derivatives now trade to 15:40 (NSE Aug-2026 extension), so data flows on.
@@ -739,17 +754,17 @@ CLOSE_HM = (15, 40)
 # evenings on the same v2 models with commodity-appropriate chain windows.
 # lot=None means the engine default (NIFTY lot); dashboard=True publishes
 # to the top-level dashboard shape, others nest under live["symbols"].
-NIFTY_CFG = {"symbol": "NIFTY", "segment": "nse_fo",
+NIFTY_CFG = {"symbol": "NIFTY", "segment": "nse_fo", "profile": "index",
              "open": (9, 15), "close": CLOSE_HM, "cutoff": ENTRY_CUTOFF_HM,
              "width": SCHED_WIDTH, "count": 20, "lot": None,
              "dashboard": True, "vix": True}
 # SENSEX options live on BSE (bse_fo, lot 20). Tape arrives via the existing
 # SENSEX index subscription, so no FUT wiring needed (ensure skips indices).
-SENSEX_CFG = {"symbol": "SENSEX", "segment": "bse_fo",
+SENSEX_CFG = {"symbol": "SENSEX", "segment": "bse_fo", "profile": "index",
               "open": (9, 15), "close": (15, 30), "cutoff": (15, 15),
               "width": 9, "count": 60, "lot": 20,
               "dashboard": False, "vix": False}
-CRUDE_CFG = {"symbol": "CRUDEOIL", "segment": "mcx_fo",
+CRUDE_CFG = {"symbol": "CRUDEOIL", "segment": "mcx_fo", "profile": "commodity",
              "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
              "width": 5, "count": 120, "lot": 100,
              "dashboard": False, "vix": False}
@@ -757,10 +772,12 @@ CRUDE_CFG = {"symbol": "CRUDEOIL", "segment": "mcx_fo",
 # FUT subscription at the standard contract (minis have no own future
 # tape in the master, and options settle to the standard future).
 NATGAS_CFG = {"symbol": "NATGASMINI", "fut": "NATURALGAS", "segment": "mcx_fo",
+              "profile": "commodity",
               "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
               "width": 5, "count": 60, "lot": 250,
               "dashboard": False, "vix": False}
 GOLDM_CFG = {"symbol": "GOLDM", "fut": "GOLD", "segment": "mcx_fo",
+             "profile": "commodity",
              "open": (9, 0), "close": (23, 30), "cutoff": (23, 0),
              "width": 5, "count": 60, "lot": 100,
              "dashboard": False, "vix": False}
@@ -1175,6 +1192,7 @@ async def scheduler_tick(now: Optional[datetime] = None,
     cfg = cfg or NIFTY_CFG
     sym = str(cfg.get("symbol", "NIFTY"))
     S = _st(sym)
+    P = PROFILES.get(cfg.get("profile") or "index", PROFILES["index"])
     b = builder or _candles
     moment = now or datetime.now(timezone.utc)
     if _manager is None:
@@ -1228,8 +1246,9 @@ async def scheduler_tick(now: Optional[datetime] = None,
     vol = models.volatility_gate(bars)
     strength = models.trend_strength(bars)
     htf = models.higher_tf_bias(bars)
-    exh = models.exhaustion(bars, vwap)
-    ext = models.extension_check(bars)
+    exh = models.exhaustion(bars, vwap, exhaust_z=P["exhaust_z"],
+                              climax_ratio=P["climax_ratio"])
+    ext = models.extension_check(bars, extension_ratio=P["extension_ratio"])
     htfx = models.htf_exhaustion(bars)
     stw = models.supertrend_witness(bars)
     v2ctx = {"strength": strength, "htf": htf, "exhaustion": exh,
@@ -1329,7 +1348,7 @@ async def scheduler_tick(now: Optional[datetime] = None,
     # breakouts (same episode as the last fired call) still wait.
     fresh_breakout = (trig["direction"] == "BULLISH" and "breakout=HIGH" in trig["reason"]) or \
                      (trig["direction"] == "BEARISH" and "breakout=LOW" in trig["reason"])
-    if trig["direction"] == S["last_bias"] and ts - S["last_ts"] < SCHED_COOLDOWN_SECS \
+    if trig["direction"] == S["last_bias"] and ts - S["last_ts"] < P["cooldown_secs"] \
             and not (fresh_breakout and not S["last_breakout"]) \
             and pick is None:
         _publish_engine(moment, "cooldown", bars=bars,
@@ -1340,7 +1359,9 @@ async def scheduler_tick(now: Optional[datetime] = None,
     # Positioning already computed above for every tick; fuse for the vote.
     fused_v1 = models.fuse(trend, trig, pos, vol)
     fused = models.fuse_v2(trend, trig, pos_eff, vol, strength, htf, exh, ext,
-                           htfx, flow, skew, strad, vixr, stw)
+                           htfx, flow, skew, strad, vixr, stw,
+                           fire_threshold=P["fire_threshold"],
+                           min_witnesses=P["min_witnesses"])
     if not fused["fire"]:
         _publish_engine(moment, f"fusion blocked {fused['vetoes']} (score={fused['score']})",
                         bars=bars, found=found, trend=trend, trig=trig,

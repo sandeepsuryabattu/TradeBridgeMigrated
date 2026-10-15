@@ -232,7 +232,8 @@ def higher_tf_bias(bars: List[Dict[str, Any]],
     return {"bias": bias, "tf_bars": len(tf), "ema20": e20, "last": last}
 
 
-def extension_check(bars: List[Dict[str, Any]]) -> Dict[str, Any]:
+def extension_check(bars: List[Dict[str, Any]],
+                    extension_ratio: Optional[float] = None) -> Dict[str, Any]:
     """ExtensionModel: day-range vs √time-scaled expectation
     (median-bar-range × √N). A random-walk day stays ~1.0; a spent
     directional move prints well above — veto fresh continuation then."""
@@ -245,13 +246,16 @@ def extension_check(bars: List[Dict[str, Any]]) -> Dict[str, Any]:
         min(engine._num(b.get("l")) for b in bars)
     expected = med * math.sqrt(len(bars)) if med > 0 else 0.0
     ratio = (day_range / expected) if expected > 0 else 0.0
-    vetoed = ratio > EXTENSION_RATIO
+    er = extension_ratio if extension_ratio is not None else EXTENSION_RATIO
+    vetoed = ratio > er
     return {"vetoed": vetoed, "ratio": round(ratio, 2),
             "reason": f"day_range={day_range:.1f} expected={expected:.1f}"}
 
 
 def exhaustion(bars: List[Dict[str, Any]],
-               vwap: Optional[float] = None) -> Dict[str, Any]:
+                vwap: Optional[float] = None,
+                exhaust_z: Optional[float] = None,
+                climax_ratio: Optional[float] = None) -> Dict[str, Any]:
     """ExhaustionModel: VWAP distance in ATR units + climax check. Far from
     VWAP alone is just a trend day (price rides ATRs above VWAP for hours);
     the killer is ACCELERATION into the extreme — 5-bar slope outrunning
@@ -275,7 +279,9 @@ def exhaustion(bars: List[Dict[str, Any]],
                 "stretched": False, "side": 1 if z > 0 else (-1 if z < 0 else 0)}
     climax = (abs(s5) / abs(s20)) if s20 else 0.0
     side = 1 if z > 0 else (-1 if z < 0 else 0)
-    stretched = abs(z) > EXHAUST_Z and climax > CLIMAX_RATIO
+    ez = exhaust_z if exhaust_z is not None else EXHAUST_Z
+    cr = climax_ratio if climax_ratio is not None else CLIMAX_RATIO
+    stretched = abs(z) > ez and climax > cr
     return {"z": round(z, 2), "climax": round(climax, 2),
             "stretched": stretched, "side": side}
 
@@ -481,7 +487,9 @@ def fuse_v2(trend: Dict[str, Any], trigger: Dict[str, Any],
             skew: Optional[Dict[str, Any]] = None,
             strad: Optional[Dict[str, Any]] = None,
             vixr: Optional[Dict[str, Any]] = None,
-            stw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            stw: Optional[Dict[str, Any]] = None,
+            fire_threshold: Optional[float] = None,
+            min_witnesses: Optional[int] = None) -> Dict[str, Any]:
     """Weighted v2 fusion with hard vetoes. Fires only when every gate
     below holds; score must clear FIRE_THRESHOLD_V2."""
     t = max(-2, min(2, int(trend.get("score", 0))))
@@ -560,13 +568,14 @@ def fuse_v2(trend: Dict[str, Any], trigger: Dict[str, Any],
     _f = int((flow or {}).get("score", 0))
     if (_bull and _f > 0) or (not _bull and _f < 0):
         wit += 1
-    if wit < MIN_WITNESSES:
+    if wit < (min_witnesses if min_witnesses is not None else MIN_WITNESSES):
         vetoes.append("thin-agreement")
     score = 100.0 * (W2_TREND * (t + 2) / 4 + W2_TRIGGER * (1.0 if trig else 0.0)
                       + W2_POSITIONING * (p + 1) / 2 + W2_STRENGTH * s
                       + W2_HTF * (1.0 if htf_agree else 0.0)
                       + W2_VOLATILITY * (1.0 if v else 0.0))
-    fire = not vetoes and score >= FIRE_THRESHOLD_V2
+    ft = fire_threshold if fire_threshold is not None else FIRE_THRESHOLD_V2
+    fire = not vetoes and score >= ft
     return {"fire": fire, "score": round(score, 1),
             "direction": direction if fire else None,
             "version": MODEL_VERSION, "vetoes": vetoes,

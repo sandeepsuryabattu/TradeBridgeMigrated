@@ -120,6 +120,12 @@ def test_fuse_v2_fires_on_full_agreement():
     assert f["fire"] and f["direction"] == "BULLISH" and f["vetoes"] == [], f
 
 
+def test_fuse_v2_profile_knobs_override_defaults():
+    assert m.fuse_v2(**_fuse_args(fire_threshold=99.9))["fire"] is False
+    assert m.fuse_v2(**_fuse_args(min_witnesses=5))["fire"] is False
+    assert m.fuse_v2(**_fuse_args())["fire"] is True
+
+
 def test_fuse_v2_htf_disagree_vetoes():
     f = m.fuse_v2(**_fuse_args(htf={"bias": "BEAR"}))
     assert not f["fire"] and "htf-disagree" in f["vetoes"], f
