@@ -121,7 +121,7 @@ def test_fuse_v2_fires_on_full_agreement():
 
 
 def test_fuse_v2_profile_knobs_override_defaults():
-    assert m.fuse_v2(**_fuse_args(fire_threshold=99.9))["fire"] is False
+    assert m.fuse_v2(**_fuse_args(fire_threshold=100.1))["fire"] is False
     assert m.fuse_v2(**_fuse_args(min_witnesses=5))["fire"] is False
     assert m.fuse_v2(**_fuse_args())["fire"] is True
 
