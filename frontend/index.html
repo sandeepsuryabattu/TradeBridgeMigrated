@@ -260,7 +260,7 @@
             <div class="modal-header">
                 <div class="modal-header-title">
                     <h2>🎯 Strategy Setup</h2>
-                    <p class="modal-header-subtitle">Default applies to all — NIFTY can override with its own values</p>
+                    <p class="modal-header-subtitle">Default applies to all — each desk can override with its own values</p>
                 </div>
                 <button class="modal-close" id="btn-close-strategy">&times;</button>
             </div>
@@ -268,6 +268,9 @@
                 <div class="strategy-scope-tabs">
                     <button class="strategy-scope-btn active" data-scope="default">Default (all)</button>
                     <button class="strategy-scope-btn" data-scope="NIFTY">NIFTY</button>
+                    <button class="strategy-scope-btn" data-scope="SENSEX">SENSEX</button>
+                    <button class="strategy-scope-btn" data-scope="EQUITY">EQUITY</button>
+                    <button class="strategy-scope-btn" data-scope="COMMODITY">COMMODITY</button>
                 </div>
                 <div class="strategy-current-box">
                     <div class="strategy-current-title" id="strategy-current-title">Current Running Strategy — Default</div>
@@ -619,7 +622,7 @@
             <div class="modal-header">
                 <div class="modal-header-title">
                     <h2 id="tune-modal-title">🎚 Tune Trade</h2>
-                    <p class="modal-header-subtitle">Override strategy for this pending entry only — global Default/NIFTY untouched</p>
+                    <p class="modal-header-subtitle">Override strategy for this pending entry only — global desk strategies untouched</p>
                 </div>
                 <button class="modal-close" id="btn-close-tune">&times;</button>
             </div>
