@@ -13,6 +13,10 @@ calibrate per-group profiles from real paper tape. Paper-only. No real orders.
 - Shadow book: vetoed setups ≥55 logged, judged +30 bars (≥0.5% = win).
 - Profiles: index (NIFTY) / sensex / equity / commodity. Same seeds now;
   paper tape diverges them. Manual tuning; auto-tuner later (shadow harness).
+- Strategy scopes (exits/sizing, trade_manager + strategy.json): default /
+  NIFTY / SENSEX / EQUITY / COMMODITY. VM-live default+NIFTY values preserved;
+  new scopes backfilled from default. Lots branch unchanged (NIFTY scope lots,
+  else global lot_size).
 - Duplicates fixed 2026-10-15: _ingest forwards OR mirrors, never both.
 
 ## Universe (verified 2026-10-15, true-ATM notional)
