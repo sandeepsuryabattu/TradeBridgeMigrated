@@ -1961,14 +1961,14 @@ function updateBadge(id, connected) {
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
-// Net P&L calculation constants (BSE F&O Options)
+// Net P&L calculation constants (F&O Options — NSE/BSE)
 const CHARGES = {
-    stt_rate: 0.0015,           // 0.15% on premium
-    txn_rate: 0.000325,        // 0.0325% on premium
+    stt_rate: 0.001,            // 0.1% on SELL premium only (no STT on option buys)
+    txn_rate: 0.000325,        // 0.0325% on premium, both sides
     sebi_rate: 0.000001,       // 0.0001% (₹10/crore)
-    stamp_rate: 0.00003,      // 0.003% on buy side
+    stamp_rate: 0.00002,       // 0.002% on buy side (options)
     brokerage_per_side: 0.05, // ₹0.05 per side
-    gst_rate: 0.18            // 18%
+    gst_rate: 0.18            // 18% on brokerage + txn + sebi
 };
 
 function getSnapLevelLabel(p) {
@@ -1995,25 +1995,25 @@ function calculateNetPnL(trade) {
     const buyPremium = fillPrice * quantity;
     const sellPremium = exitPrice * quantity;
 
-    // Brokerage per side (both buy and sell = ₹0.10 total)
+    // Brokerage (both sides)
     const totalBrokerage = CHARGES.brokerage_per_side * 2;
 
-    // Buy side charges
-    const sttBuy = buyPremium * CHARGES.stt_rate;
+    // Buy side charges (no STT on option buys)
     const txnBuy = buyPremium * CHARGES.txn_rate;
     const sebiBuy = buyPremium * CHARGES.sebi_rate;
     const stampBuy = buyPremium * CHARGES.stamp_rate;
-    const gstBuy = CHARGES.gst_rate * (totalBrokerage + sebiBuy + txnBuy);
 
-    // Sell side charges
+    // Sell side charges (STT only here)
     const sttSell = sellPremium * CHARGES.stt_rate;
     const txnSell = sellPremium * CHARGES.txn_rate;
     const sebiSell = sellPremium * CHARGES.sebi_rate;
-    const gstSell = CHARGES.gst_rate * (totalBrokerage + sebiSell + txnSell);
+
+    // GST 18% on brokerage + txn + sebi (stamp/STT exempt)
+    const gst = CHARGES.gst_rate * (totalBrokerage + sebiBuy + sebiSell + txnBuy + txnSell);
 
     // Total charges
-    const totalCharges = sttBuy + txnBuy + sebiBuy + stampBuy + gstBuy +
-        sttSell + txnSell + sebiSell + gstSell;
+    const totalCharges = txnBuy + sebiBuy + stampBuy +
+        sttSell + txnSell + sebiSell + gst;
 
     return pnl - totalCharges;
 }
