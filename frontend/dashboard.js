@@ -1564,7 +1564,9 @@ function renderPositions() {
     const totalPnl = open.reduce((sum, p) => sum + (p.pnl || 0), 0);
     const deployedEl = $('#pnl-deployed');
     if (deployedEl) {
-        const totalDeployed = open.reduce((sum, p) => sum + (p.quantity || 0) * (p.entry_price || 0), 0);
+        // All capital deployed in this view (positions are date-scoped —
+        // today by default): open + closed, not just currently open.
+        const totalDeployed = state.positions.reduce((sum, p) => sum + (p.quantity || 0) * (p.entry_price || 0), 0);
         deployedEl.textContent = `₹${fmtINR(totalDeployed)}`;
     }
     const realisedEl = $('#pnl-realised');
