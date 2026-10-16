@@ -2,8 +2,9 @@
 from backend import database as db
 
 
-def _row(pnl, day="2026-10-14", sender="Target group", model=None):
-    return {"pnl": pnl, "ist_date": day, "sender": sender, "model_version": model}
+def _row(pnl, day="2026-10-14", sender="Target group", model=None, qty=0, entry=0):
+    return {"pnl": pnl, "ist_date": day, "sender": sender, "model_version": model,
+            "qty": qty, "entry": entry}
 
 
 def test_compute_perf_overall_and_drawdown():
@@ -17,6 +18,21 @@ def test_compute_perf_overall_and_drawdown():
     assert out["max_drawdown"] == -50.0  # single day at -50 from peak 0
     eq = [p["equity"] for p in out["equity_curve"]]
     assert eq == [-50.0]
+    assert o["deployed"] == 0.0  # no qty/entry on these rows
+
+
+def test_deployed_sums_qty_times_entry():
+    rows = [_row(100, qty=100, entry=10.0),
+            _row(-50, day="2026-10-15", sender="Autotrender", qty=50, entry=20.0),
+            _row(200, day="2026-10-15", sender="Autotrender", qty=25, entry=4.0)]
+    out = db.compute_perf(rows)
+    assert out["overall"]["deployed"] == 2100.0  # 1000 + 1000 + 100
+    assert out["by_day"]["2026-10-14"]["deployed"] == 1000.0
+    assert out["by_day"]["2026-10-15"]["deployed"] == 1100.0
+    assert out["by_source"]["Autotrender"]["deployed"] == 1100.0
+    # JSON-safe
+    import json
+    json.dumps(out)
 
 
 def test_grouping_and_empty():

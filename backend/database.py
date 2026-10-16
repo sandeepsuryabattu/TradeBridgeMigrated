@@ -579,11 +579,12 @@ def compute_perf(rows: list[dict]) -> dict:
     def blank():
         return {"trades": 0, "wins": 0, "win_rate": 0.0, "pnl": 0.0,
                 "gross_win": 0.0, "gross_loss": 0.0, "profit_factor": 0.0,
-                "expectancy": 0.0, "best": 0.0, "worst": 0.0}
+                "expectancy": 0.0, "best": 0.0, "worst": 0.0, "deployed": 0.0}
 
-    def fill(b, ps):
-        b["trades"] = len(ps)
-        if not ps:
+    def fill(b, rs):
+        ps = [float(r.get("pnl") or 0) for r in rs]
+        b["trades"] = len(rs)
+        if not rs:
             return b
         b["wins"] = sum(1 for p in ps if p > 0)
         b["win_rate"] = round(100.0 * b["wins"] / len(ps), 1)
@@ -595,29 +596,34 @@ def compute_perf(rows: list[dict]) -> dict:
         b["expectancy"] = round(sum(ps) / len(ps), 2)
         b["best"] = round(max(ps), 2)
         b["worst"] = round(min(ps), 2)
+        b["deployed"] = round(
+            sum(float(r.get("qty") or 0) * float(r.get("entry") or 0) for r in rs), 2)
         return b
 
-    overall = fill(blank(), [float(r.get("pnl") or 0) for r in rows])
+    overall = fill(blank(), rows)
     by_day, by_source, by_model = {}, {}, {}
     for r in rows:
-        p = float(r.get("pnl") or 0)
-        by_day.setdefault(str(r.get("ist_date") or "?"), []).append(p)
-        by_source.setdefault(str(r.get("sender") or "Unknown"), []).append(p)
+        by_day.setdefault(str(r.get("ist_date") or "?"), []).append(r)
+        by_source.setdefault(str(r.get("sender") or "Unknown"), []).append(r)
         mv = r.get("model_version")
         if mv:
-            by_model.setdefault(str(mv), []).append(p)
+            by_model.setdefault(str(mv), []).append(r)
+
+    def _pnls(rs):
+        return [float(r.get("pnl") or 0) for r in rs]
+
     eq, peak, maxdd = 0.0, 0.0, 0.0
     for day in sorted(by_day):
-        eq += sum(by_day[day])
+        eq += sum(_pnls(by_day[day]))
         peak = max(peak, eq)
         maxdd = min(maxdd, eq - peak)
     return {
         "overall": overall,
-        "by_day": {d: fill(blank(), ps) for d, ps in sorted(by_day.items())},
-        "by_source": {s: fill(blank(), ps) for s, ps in sorted(by_source.items())},
-        "by_model": {m: fill(blank(), ps) for m, ps in sorted(by_model.items())},
+        "by_day": {d: fill(blank(), rs) for d, rs in sorted(by_day.items())},
+        "by_source": {s: fill(blank(), rs) for s, rs in sorted(by_source.items())},
+        "by_model": {m: fill(blank(), rs) for m, rs in sorted(by_model.items())},
         "max_drawdown": round(maxdd, 2),
-        "equity_curve": [{"day": d, "equity": round(sum(sum(by_day[x]) for x in sorted(by_day) if x <= d), 2)}
+        "equity_curve": [{"day": d, "equity": round(sum(sum(_pnls(by_day[x])) for x in sorted(by_day) if x <= d), 2)}
                          for d in sorted(by_day)],
     }
 
@@ -638,6 +644,8 @@ async def get_performance(mode: str = "paper", days: int = 30,
     src_arg = [source] if source else []
     cursor = await db.execute(
         """SELECT p.pnl AS pnl,
+                  p.quantity AS qty,
+                  p.entry_price AS entry,
                   date(datetime(p.closed_at, '+5 hours', '+30 minutes')) AS ist_date,
                   COALESCE(m.sender, 'Unknown') AS sender,
                   s.model_version AS model_version

@@ -14,6 +14,13 @@
     return (v > 0 ? "+" : "") + "₹" + v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
   }
 
+  // Unsigned money (capital deployed is never negative — no +/- sign).
+  function fmtAbs(n) {
+    var v = Number(n);
+    if (!Number.isFinite(v)) return "—";
+    return "₹" + v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+  }
+
   function tone(v) {
     v = Number(v);
     if (!Number.isFinite(v) || v === 0) return "";
@@ -35,6 +42,7 @@
       var b = obj[k];
       return "<tr><td><span class='pill'>" + esc(k) + "</span></td><td>" + b.trades + "</td>" +
         "<td>" + b.win_rate + "%</td><td class='" + tone(b.pnl) + "'>" + fmt(b.pnl) + "</td>" +
+        "<td>" + fmtAbs(b.deployed) + "</td>" +
         "<td>" + pf(b.profit_factor) + "</td></tr>";
     }).join("");
   }
@@ -74,28 +82,31 @@
       '<div class="perf-label">' + o.wins + "/" + o.trades + " wins · PF " + pf(o.profit_factor) + "</div></div>" +
       card("Win rate", o.win_rate + "%") +
       card("Expectancy / trade", fmt(o.expectancy), tone(o.expectancy)) +
+      card("Capital Deployed", fmtAbs(o.deployed)) +
       card("Max drawdown", fmt(p.max_drawdown), "neg") +
       "</div>";
     var days = Object.keys(p.by_day).slice(-30).reverse();
-    html += section("By day", "<th>Day</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th>",
+    html += section("By day", "<th>Day</th><th>#</th><th>Win%</th><th>P&L</th><th>Deployed</th><th>PF</th>",
       days.map(function (d) {
         var b = p.by_day[d];
         return "<tr><td>" + esc(d) + "</td><td>" + b.trades + "</td><td>" + b.win_rate +
-          "%</td><td class='" + tone(b.pnl) + "'>" + fmt(b.pnl) + "</td><td>" + pf(b.profit_factor) + "</td></tr>";
+          "%</td><td class='" + tone(b.pnl) + "'>" + fmt(b.pnl) + "</td><td>" + fmtAbs(b.deployed) +
+          "</td><td>" + pf(b.profit_factor) + "</td></tr>";
       }).join(""));
-    html += section("By source", "<th>Source</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th>",
+    html += section("By source", "<th>Source</th><th>#</th><th>Win%</th><th>P&L</th><th>Deployed</th><th>PF</th>",
       aggRows(p.by_source));
     if (p.by_model && Object.keys(p.by_model).length) {
-      html += section("By model", "<th>Model</th><th>#</th><th>Win%</th><th>P&L</th><th>PF</th>",
+      html += section("By model", "<th>Model</th><th>#</th><th>Win%</th><th>P&L</th><th>Deployed</th><th>PF</th>",
         aggRows(p.by_model));
     }
     if (p.ledger && p.ledger.length) {
       html += section("Ledger — all " + p.ledger.length + " closed trades (newest first)",
-        "<th>Day</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Exit</th><th>Source</th>",
+        "<th>Day</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Deployed</th><th>P&L</th><th>Exit</th><th>Source</th>",
         p.ledger.map(function (t) {
           return "<tr><td>" + esc(t.day) + "</td><td>" + esc(t.symbol) + "</td>" +
             "<td>" + esc(t.qty) + "</td><td>" + fmt(t.entry) + "</td>" +
-            "<td>" + fmt(t.exit) + "</td><td class='" + tone(t.pnl) + "'>" + fmt(t.pnl) + "</td>" +
+            "<td>" + fmt(t.exit) + "</td><td>" + fmtAbs(Number(t.qty) * Number(t.entry)) + "</td>" +
+            "<td class='" + tone(t.pnl) + "'>" + fmt(t.pnl) + "</td>" +
             "<td>" + esc(t.reason) + "</td><td><span class='pill'>" + esc(t.source) + "</span></td></tr>";
         }).join(""));
     }
