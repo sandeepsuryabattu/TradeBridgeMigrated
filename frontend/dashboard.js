@@ -1438,7 +1438,9 @@ function renderSignals() {
 
             const ltpVal = s.live_ltp ? `₹${fmtINR(s.live_ltp)}` : '--';
             const cardIdx = String(s.idx || s.index || 'SENSEX').toUpperCase();
-            const cardIdxVal = state.index_ltp[cardIdx] ?? state.sensex_ltp;
+            // No SENSEX fallback: an unknown quote must show '--', never
+            // another instrument's price (GOLD/NATURALGAS once showed SENSEX).
+            const cardIdxVal = state.index_ltp[cardIdx];
             const indexVal = cardIdxVal ? fmtINR(cardIdxVal) : '--';
 
             let targetsText = '--';
