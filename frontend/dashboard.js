@@ -1615,6 +1615,11 @@ function renderPositions() {
         }, 0);
         realisedEl.textContent = `₹${fmtINR(realisedPnl)}`;
         realisedEl.className = `pnl-value ${realisedPnl > 0 ? 'positive' : realisedPnl < 0 ? 'negative' : ''}`;
+        const grossEl = $('#pnl-realised-gross');
+        if (grossEl) {
+            const grossPnl = closed.reduce((sum, p) => sum + (p.pnl || 0), 0);
+            grossEl.textContent = `Gross ₹${fmtINR(grossPnl)}`;
+        }
     }
     pnlEl.textContent = `₹${fmtINR(totalPnl)}`;
     pnlEl.className = `pnl-value ${totalPnl > 0 ? 'positive' : totalPnl < 0 ? 'negative' : ''}`;
