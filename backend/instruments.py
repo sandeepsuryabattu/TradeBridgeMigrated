@@ -28,6 +28,26 @@ INDEX_UNDERLYINGS: dict[str, tuple[str, str]] = {
 
 EQUITY_SEGMENT = "nse_cm"
 
+
+# Exchange tick grid: NSE/BSE option premiums move in 0.05 steps — every
+# traded price (entry, SL, targets) must sit on it. Nearest-tick rounding
+# with float-dust cleanup (28.700000000000003 -> 28.7).
+TICK_SIZE = 0.05
+
+
+def round_tick(price: float, tick: float = TICK_SIZE) -> float:
+    """Round a price to the nearest exchange tick (default 0.05)."""
+    try:
+        return round(round(float(price) / tick) * tick, 2)
+    except (ValueError, TypeError):
+        return price
+
+
+def _round_targets(targets: Optional[list]) -> Optional[list]:
+    if not targets:
+        return targets
+    return [round_tick(t) for t in targets]
+
 MCX_SEGMENT = "mcx_fo"
 
 # MCX commodity underlyings: keyword variants -> (canonical, segment).
@@ -410,9 +430,9 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
             return ParsedInstrument(status="ignored", reason="High < Low")
         return ParsedInstrument(
             status="valid", kind="FUT", underlying=canonical,
-            exchange_segment=segment, entry_low=low, entry_high=high,
-            targets=targets, diff=abs(high - low), stoploss=sl,
-            expiry=_parse_expiry(stripped), average=average,
+            exchange_segment=segment, entry_low=round_tick(low), entry_high=round_tick(high),
+            targets=_round_targets(targets), diff=abs(high - low), stoploss=round_tick(sl) if sl is not None else None,
+            expiry=_parse_expiry(stripped), average=round_tick(average) if average is not None else None,
             signal_type=_detect_signal_type(lower),
             variant=_detect_variant(stripped),
         )
@@ -468,9 +488,9 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
                 return ParsedInstrument(status="ignored", reason="High < Low")
             return ParsedInstrument(
                 status="valid", kind="EQ", underlying=sym,
-                exchange_segment=EQUITY_SEGMENT, entry_low=low, entry_high=high,
-                targets=targets, diff=abs(high - low), stoploss=sl,
-                expiry=None, average=average,
+                exchange_segment=EQUITY_SEGMENT, entry_low=round_tick(low), entry_high=round_tick(high),
+                targets=_round_targets(targets), diff=abs(high - low), stoploss=round_tick(sl) if sl is not None else None,
+                expiry=None, average=round_tick(average) if average is not None else None,
                 signal_type=_detect_signal_type(lower),
                 holding=_detect_holding(stripped), lots=_detect_lots(stripped),
                 entry_trigger=trig,
@@ -499,8 +519,8 @@ def _finish_opt(stripped, lower, canonical, segment, strike, option_type, low, h
     return ParsedInstrument(
         status="valid", kind="OPT", underlying=canonical,
         exchange_segment=segment, strike=strike, option_type=option_type,
-        entry_low=float(low), entry_high=float(high),
-        targets=targets, diff=float(abs(high - low)), stoploss=sl,
-        expiry=_parse_expiry(stripped), average=average,
+        entry_low=round_tick(low), entry_high=round_tick(high),
+        targets=_round_targets(targets), diff=float(abs(high - low)), stoploss=round_tick(sl) if sl is not None else None,
+        expiry=_parse_expiry(stripped), average=round_tick(average) if average is not None else None,
         signal_type=_detect_signal_type(lower), variant=variant,
     )

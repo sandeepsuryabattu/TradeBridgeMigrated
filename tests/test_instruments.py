@@ -159,7 +159,7 @@ def test_single_stock_equity_option():
     assert s.status == "valid" and s.kind == "OPT"
     assert s.underlying == "INFY" and s.exchange_segment == "nse_fo"
     assert s.display_symbol == "INFY1160CE"
-    assert (s.entry_low, s.entry_high) == (28.71, 29.89)
+    assert (s.entry_low, s.entry_high) == (28.7, 29.9)  # 0.05 tick grid
 
     t = parse_instrument_signal(
         "AUTOTRENDER\nTCS\n2440CE\nPRICE @ 40.92-42.59\nSTOPLOSS\n39.38\nTARGETS\n45.0"

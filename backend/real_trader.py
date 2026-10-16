@@ -39,6 +39,7 @@ from typing import Optional, Callable
 from zoneinfo import ZoneInfo
 
 from . import database as db
+from .instruments import round_tick
 from .order_tune import build_tune, tune_to_json, parse_tune_json, TUNE_FIELDS, sane_position_tick
 
 log = logging.getLogger(__name__)
@@ -396,6 +397,12 @@ class RealTrader:
                 DEFAULT_BUFFER_POINTS, entry_low, entry_high,
             )
 
+        # Exchange tick grid (0.05): buffer/widen math can push prices off-grid.
+        entry_low  = round_tick(entry_low)
+        entry_high = round_tick(entry_high)
+        if signal_stoploss is not None:
+            signal_stoploss = round_tick(float(signal_stoploss))
+
         activation_points    = float(strategy.get("activationPoints") or DEFAULT_ACTIVATION_PTS)
         activation_sl_offset = float(strategy.get("activationSLOffset") or 0.0)
         trail_gap            = float(strategy.get("trailGap")         or DEFAULT_TRAIL_GAP)
@@ -417,7 +424,7 @@ class RealTrader:
         signal_trail_initial_sl        = strategy.get("signalTrailInitialSL", "telegram")
         signal_trail_initial_sl_points = float(strategy.get("signalTrailInitialSLPoints") or 5.0)
 
-        order_price   = float(entry_high or entry_low or 0)
+        order_price   = round_tick(float(entry_high or entry_low or 0))
         # Bounce 0 = fill on first touch; only missing values default to 5.
         _bp = strategy.get("bouncePoints")
         bounce_points = float(_bp if _bp is not None else DEFAULT_BOUNCE_POINTS)
@@ -524,7 +531,7 @@ class RealTrader:
     async def _place_entry_order(self, order: dict, bounce_price: float) -> Optional[dict]:
         """Place Limit BUY IOC on Kotak. Returns fill info or None."""
         slippage = order.get("entry_slippage", DEFAULT_ENTRY_SLIPPAGE)
-        limit_price = round(bounce_price + slippage, 2)
+        limit_price = _round_to_tick(round(bounce_price + slippage, 2))
 
         log.info(
             "Placing real BUY: %s @ %.2f (bounce=%.2f + slip=%.2f) IOC",
@@ -849,6 +856,8 @@ class RealTrader:
         """
         # Software SL — no exchange order to modify, just update the level
         # The sentinel sl_order_id ("SW:<id>") signals software SL is active.
+        # Tick grid: keep software SL on 0.05 like everything else.
+        new_trigger = round_tick(new_trigger)
         sl_order_id = pos.get("sl_order_id")
         if not sl_order_id:
             # SL not yet set — initialise it now
@@ -923,10 +932,10 @@ class RealTrader:
         initial_sl_source = order.get("signal_trail_initial_sl", "telegram")
         if initial_sl_source == "points_from_ltp":
             pts = float(order.get("signal_trail_initial_sl_points") or 5.0)
-            initial_sl = fill_price - pts
+            initial_sl = round_tick(fill_price - pts)
         else:
             signal_stoploss = order.get("signal_stoploss")
-            initial_sl = (
+            initial_sl = round_tick(
                 float(signal_stoploss)
                 if signal_stoploss and float(signal_stoploss) < fill_price
                 else fill_price - SIGNAL_TRAIL_FALLBACK
@@ -1284,7 +1293,7 @@ class RealTrader:
             db_updates = {}
             if not pos.get("sl_activated") and ltp >= activation_trigger:
                 pos["sl_activated"] = True
-                activation_sl = activation_trigger - activation_sl_offset
+                activation_sl = round_tick(activation_trigger - activation_sl_offset)
                 if activation_sl > pos.get("trailing_sl", 0):
                     new_sl = activation_sl
                     pos["trailing_sl"] = new_sl
@@ -1307,7 +1316,7 @@ class RealTrader:
                     continue
                 if ltp >= trigger:
                     offset = float(snap_levels[i].get("offset", 2))
-                    candidate_sl = trigger - offset
+                    candidate_sl = round_tick(trigger - offset)
                     if candidate_sl > pos.get("trailing_sl", 0):
                         new_sl = candidate_sl
                         pos["trailing_sl"] = new_sl
@@ -1333,7 +1342,7 @@ class RealTrader:
             if snap_trailing_active:
                 if ltp > pos.get("max_ltp", 0):
                     pos["max_ltp"] = ltp
-                trail_sl = pos["max_ltp"] - snap_trail_gap
+                trail_sl = round_tick(pos["max_ltp"] - snap_trail_gap)
                 if trail_sl > pos.get("trailing_sl", 0):
                     new_sl = trail_sl
                     pos["trailing_sl"] = new_sl
@@ -1362,7 +1371,7 @@ class RealTrader:
             if not pos.get("sl_activated") and ltp >= entry_price + activation_points:
                 pos["sl_activated"] = True
                 pos["max_ltp"]      = ltp
-                new_sl              = entry_price + activation_points - activation_sl_offset
+                new_sl              = round_tick(entry_price + activation_points - activation_sl_offset)
                 try:
                     await db.update_position(pos["id"], {"sl_activated": 1, "max_ltp": ltp})
                 except Exception:
@@ -1370,7 +1379,7 @@ class RealTrader:
             elif pos.get("sl_activated"):
                 if ltp > pos.get("max_ltp", 0):
                     pos["max_ltp"] = ltp
-                    new_sl         = ltp - trail_gap
+                    new_sl         = round_tick(ltp - trail_gap)
 
             if new_sl is not None and new_sl > pos.get("trailing_sl", 0):
                 pos["trailing_sl"] = new_sl
@@ -1474,6 +1483,7 @@ class RealTrader:
         if pos.get("status") != "open":
             return {"status": "error", "message": "Position not open"}
         old_sl = pos.get("trailing_sl", 0)
+        stop_loss = round_tick(stop_loss)  # exchange tick grid (0.05)
         pos["trailing_sl"] = stop_loss
         try:
             await db.update_position(position_id, {"trailing_sl": stop_loss})
