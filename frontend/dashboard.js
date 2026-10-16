@@ -1562,6 +1562,11 @@ function renderPositions() {
     count.textContent = open.length;
 
     const totalPnl = open.reduce((sum, p) => sum + (p.pnl || 0), 0);
+    const deployedEl = $('#pnl-deployed');
+    if (deployedEl) {
+        const totalDeployed = open.reduce((sum, p) => sum + (p.quantity || 0) * (p.entry_price || 0), 0);
+        deployedEl.textContent = `₹${fmtINR(totalDeployed)}`;
+    }
     const realisedEl = $('#pnl-realised');
     const closed = state.positions.filter(p => p.status === 'closed');
     if (realisedEl) {
@@ -1635,7 +1640,8 @@ function renderPositions() {
                     <span class="pos-meta">
                         Qty: ${p.quantity || 0} |
                         Entry: ₹${fmtINR(p.entry_price || 0)} |
-                        LTP: <span class="mono">₹${fmtINR(p.current_price || 0)}</span>
+                        LTP: <span class="mono">₹${fmtINR(p.current_price || 0)}</span> |
+                        Deployed: ₹${fmtINR((p.quantity || 0) * (p.entry_price || 0))}
                     </span>
                     <div class="pos-strategy">
                         ${slControlHTML(p)}
@@ -1694,7 +1700,8 @@ function renderClosedPositions(closed, container) {
                 <span class="pos-meta">
                     Qty: ${p.quantity || 0} |
                     In: ₹${fmtINR(p.entry_price || 0)} |
-                    Out: <span class="mono">₹${fmtINR(p.exit_price || p.current_price || 0)}</span>
+                    Out: <span class="mono">₹${fmtINR(p.exit_price || p.current_price || 0)}</span> |
+                    Deployed: ₹${fmtINR((p.quantity || 0) * (p.entry_price || 0))}
                 </span>
                 <div class="pos-strategy">
                     <span class="sl-tag">SL: ₹${fmtINR(p.trailing_sl || 0)}</span>
