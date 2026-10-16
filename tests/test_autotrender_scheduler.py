@@ -474,10 +474,11 @@ def test_gate_chop_without_reclaim_blocks():
     assert g["allowed"] is False and g["reason"].startswith("chop:")
 
 
-def test_gate_silent_circuit_breaker():
+def test_gate_no_silent_circuit_breaker():
+    # Scratches never silence: gate judges regime only.
     g = at._regime_gate(_fresh_state(silent=True, scratches=2),
                         {"fire": True, "direction": "BULLISH"}, [])
-    assert g["allowed"] is False and "silent" in g["reason"]
+    assert g["allowed"] is True, g
 
 
 def test_no_count_cap_high_scores_always_eligible():
@@ -506,14 +507,14 @@ def test_thin_agreement_vetoed_despite_score():
     assert f["fire"] is False and "thin-agreement" in f["vetoes"], f
 
 
-def test_judge_fires_scratches_and_silences():
+def test_judge_fires_counts_scratches_without_silencing():
     S = _fresh_state(fires=[
         {"bar_idx": 0, "entry": 100.0, "direction": "BULLISH"},
         {"bar_idx": 1, "entry": 100.0, "direction": "BULLISH"}])
     bars = [{"t": 1_700_000_000 + i * 60, "o": 100, "h": 100, "l": 99,
              "c": 99.5 - i * 0.05, "v": 100} for i in range(35)]
     at._judge_fires(S, bars)
-    assert S["scratches"] == 2 and S["silent"] is True
+    assert S["scratches"] == 2 and S["silent"] is not True
 
 
 def test_trend_day_counter_trigger_blocked_live(wired):

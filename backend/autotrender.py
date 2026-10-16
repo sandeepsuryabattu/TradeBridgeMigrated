@@ -729,9 +729,8 @@ async def paper_trade_call(call_id: int) -> Dict[str, Any]:
 SCHED_INTERVAL_SECS = 60        # evaluate every minute (live-test cadence)
 SCHED_COOLDOWN_SECS = 900       # min gap between auto calls (same bias)
 SCHED_MAX_PER_DAY = 20          # legacy safety cap (kept for compat)
-SCHED_MAX_FIRES_PER_DAY = 3     # regime era: frequency never saved a bad regime read
 SCHED_SCRATCH_FRAC = 0.0015     # adverse close excursion marking a scratch
-SCHED_MAX_SCRATCHES = 2         # scratches -> silent rest of day (any regime)
+                                # (counted for stats only — never silences)
 REGIME_LOCK_BARS = 45           # morning label locks when the tape is this long
 REGIME_RECHECK_SECS = 900       # re-verify a trend-day thesis this often
 REGIME_MIN_DENSITY = 0.5        # bars per session-minute; thinner tapes are
@@ -1118,7 +1117,8 @@ def _update_regime(S: Dict[str, Any], bars, now_ts: float) -> Dict[str, Any]:
 def _judge_fires(S: Dict[str, Any], bars) -> None:
     """Mark old fires scratched when price went against them (scratch rule).
 
-    Two scratches silence the book for the day. Never raises.
+    Scratches are counted for stats only — no silencing, no fire cap.
+    Never raises.
     """
     try:
         closes = [b.get("c", 0) or 0 for b in bars]
@@ -1138,8 +1138,6 @@ def _judge_fires(S: Dict[str, Any], bars) -> None:
                 S["scratches"] = S.get("scratches", 0) + 1
             elif done:
                 f["judged"] = True
-            if S.get("scratches", 0) >= SCHED_MAX_SCRATCHES:
-                S["silent"] = True
     except Exception:
         log.exception("scratch judging failed")
 
@@ -1220,10 +1218,6 @@ def _regime_gate(S: Dict[str, Any], trig, bars,
     from . import day_regime as rg
     direction = (trig or {}).get("direction")
     label = S.get("regime", "EARLY")
-    if S.get("silent"):
-        return {"allowed": False,
-                "reason": f"silent: {S.get('scratches', 0)} scratches today",
-                "squeeze": {}}
     if label == "EARLY":
         # Thin tape, unreadable morning: a bar every few minutes means the
         # "morning" never really formed — demand chop-grade proof (reclaim),
@@ -1422,8 +1416,9 @@ async def scheduler_tick(now: Optional[datetime] = None,
                         S=S, pub=pub, hist=hist)
         return {"action": "skip", "reason": f"volatility veto ({vol['reason']})"}
 
-    # Regime gate: trend days confirm (one direction), chop days reclaim-only,
-    # 3 fires/day, 2 scratches -> silent. Runs before fusion/cooldown.
+    # Regime gate: trend days confirm (one direction), chop days reclaim-only.
+    # No fire cap, no scratch silencing — score bar + cooldown govern frequency.
+    # Runs before fusion/cooldown.
     gate = _regime_gate(S, trig, bars, moment.timestamp(),
                         cfg.get("open", (9, 15)))
     if not gate["allowed"]:
