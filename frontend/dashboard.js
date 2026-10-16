@@ -560,7 +560,7 @@ function handleWSMessage(msg) {
                         if (incomingSymbol.startsWith(idxStr) && incomingSymbol.endsWith(suffixStr)) {
                             s.live_ltp = msg.data.ltp;
                             const el = document.getElementById(`signal-ltp-${s.id}`);
-                            if (el) el.textContent = `₹${fmtINR(s.live_ltp)}`;
+                            if (el) el.textContent = `₹${s.live_ltp}`;
                         }
                     });
                 }
@@ -579,7 +579,7 @@ function handleWSMessage(msg) {
                         });
                     }
                     document.querySelectorAll(`.signal-index-ltp[data-idx="${sym}"]`).forEach(el => {
-                        el.textContent = fmtINR(state.index_ltp[sym] || 0);
+                        el.textContent = String(state.index_ltp[sym] || 0);
                     });
                 }
                 break;
@@ -1436,12 +1436,14 @@ function renderSignals() {
             const tradeStatus = s.trade_status || '';
             const timerStart = s.created_at || s.timestamp;
 
-            const ltpVal = s.live_ltp ? `₹${fmtINR(s.live_ltp)}` : '--';
+            // Plain numbers on signal cards — no locale grouping (matches
+            // entry/targets/SL style elsewhere on the card).
+            const ltpVal = s.live_ltp ? `₹${s.live_ltp}` : '--';
             const cardIdx = String(s.idx || s.index || 'SENSEX').toUpperCase();
             // No SENSEX fallback: an unknown quote must show '--', never
             // another instrument's price (GOLD/NATURALGAS once showed SENSEX).
             const cardIdxVal = state.index_ltp[cardIdx];
-            const indexVal = cardIdxVal ? fmtINR(cardIdxVal) : '--';
+            const indexVal = cardIdxVal ? String(cardIdxVal) : '--';
 
             let targetsText = '--';
             if (s.targets && Array.isArray(s.targets) && s.targets.length > 0) {
