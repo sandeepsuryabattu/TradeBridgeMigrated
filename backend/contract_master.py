@@ -731,7 +731,15 @@ class ContractMaster:
         except (ValueError, TypeError):
             return None
         opt = str(sig.get("option_type") or "").upper()
-        cands = [c for c in cands if self._strike_of(c) == want and self._opt_of(c) == opt]
+        opt_cands = [c for c in cands if self._opt_of(c) == opt]
+        # Kotak stores strike x100 ("73000.0" = strike 730). _strike_of only
+        # undoes that above 99999, so sub-1000 strikes (HDFCBANK 730, ITC 262,
+        # KOTAKBANK 450, NATGAS 305) never match. Prefer the exact strike,
+        # fall back to the x100-scaled value (live bug 2026-10-16: pending
+        # HDFC call never got LTP).
+        cands = [c for c in opt_cands if self._strike_of(c) == want]
+        if not cands:
+            cands = [c for c in opt_cands if self._strike_of(c) == want * 100]
         if not cands:
             log.warning("No contract for %s %s %s (%s)", und, want, opt, segment)
             return None

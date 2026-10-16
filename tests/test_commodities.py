@@ -149,6 +149,25 @@ class TestCommodityRouting:
         from backend.contract_master import ContractMaster
         assert "mcx_fo" in ContractMaster.MULTI_SEGMENTS
 
+    def test_sub_1000_strike_x100_scaled(self):
+        """Live bug 2026-10-16: HDFCBANK 730PE never resolved (pending, no LTP).
+        Kotak stores strike x100 ("73000") and _strike_of only undoes that
+        above 99999, so sub-1000 strikes never matched."""
+        from backend.contract_master import ContractMaster
+        cm = ContractMaster()
+        cm._segments["nse_fo"] = [
+            {"pTrdSymbol": "HDFCBANK26NOV730PE", "pSymbol": "T1",
+             "pStrikePrice": "73000", "pOptionType": "PE",
+             "pExpiryDate": "1795824000", "lLotSize": "650"},
+            {"pTrdSymbol": "HDFCBANK26OCT730PE", "pSymbol": "T2",
+             "pStrikePrice": "73000", "pOptionType": "PE",
+             "pExpiryDate": "1793404800", "lLotSize": "650"},
+        ]
+        out = cm.resolve({"kind": "OPT", "underlying": "HDFCBANK", "strike": "730",
+                          "option_type": "PE", "exchange_segment": "nse_fo", "expiry": None})
+        assert out is not None and out["trading_symbol"] == "HDFCBANK26OCT730PE"
+        assert out["instrument_token"] == "T2"
+
     def test_guinea_never_wins_standard_fut(self):
         """Live bug 2026-10-13: GOLDM FUT resolved to GOLDGUINEA30OCT26FUT.
         Micro products (Guinea/Petal) must lose to standard even with a
