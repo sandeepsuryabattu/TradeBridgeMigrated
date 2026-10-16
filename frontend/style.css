@@ -392,6 +392,49 @@ header {
     max-height: 220px;
 }
 
+/* Autotrender calls panel — full width below trades */
+.panel-calls {
+    grid-column: 1 / -1;
+    max-height: 260px;
+}
+
+/* Engine-rationale ("Why?") expander on autotrender call cards */
+.why {
+    margin-top: 6px;
+    font-size: 12px;
+}
+.why > summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    font-weight: 600;
+    user-select: none;
+}
+.why > summary:hover {
+    color: var(--text-primary);
+}
+.why-score {
+    font-family: var(--font-mono);
+    font-weight: 700;
+}
+.why-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 2px 0;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+}
+.why-row > span:first-child {
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.why-row > span:last-child {
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
 /* Performance dashboard page (additive) */
 .perf-card {
     background: var(--bg-card);
