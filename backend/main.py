@@ -265,6 +265,10 @@ _stop_trading: bool = False
 # NameError on every reconnect attempt. Promoted to module-level.
 SENSEX_INDEX_TOKENS: set[str] = {"1", "999901", "50060"}
 tick_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
+# Monotonic timestamps of the last live index tick per name — the spot relay
+# backfills only names with no tick in the last 2 minutes, so chain snapshots
+# never override streaming ticks during market hours.
+_last_index_tick: dict[str, float] = {}
 _main_loop: Optional[asyncio.AbstractEventLoop] = None
 _tick_drain_task: list[asyncio.Task] = []
 
@@ -319,6 +323,8 @@ async def tick_consumer():
                     "type": "index_ltp",
                     "data": {"symbol": symbol if symbol in ("SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "INDIAVIX") else "SENSEX", "ltp": ltp},
                 })
+                # Freshness mark so the spot relay below never overrides live ticks.
+                _last_index_tick[symbol if symbol in ("SENSEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "INDIAVIX") else "SENSEX"] = time.monotonic()
             elif symbol:
                 await ws_manager.broadcast({
                     "type": "instrument_ltp",
@@ -447,7 +453,9 @@ async def lifespan(app: FastAPI):
 
     # Spot board relay: autotrender chain snapshots hold the true underlying
     # (MCX/equity books never get index ticks), so rebroadcast them as
-    # index_ltp every 15s for the dashboard signal cards. Never raises.
+    # index_ltp every 15s for the dashboard signal cards. Names with a live
+    # tick in the last 2 minutes are skipped — streaming ticks stay
+    # authoritative during market hours. Never raises.
     async def spot_board_relay():
         while True:
             try:
@@ -457,7 +465,10 @@ async def lifespan(app: FastAPI):
                     board = get_spot_board()
                 except Exception:
                     board = {}
+                now = time.monotonic()
                 for name, price in (board or {}).items():
+                    if now - _last_index_tick.get(name, 0.0) < 120:
+                        continue
                     try:
                         await ws_manager.broadcast({
                             "type": "index_ltp",

@@ -822,10 +822,7 @@ def _st(sym: str) -> Dict[str, Any]:
 # Last successful live snapshot for the dashboard (GET /api/autotrender/live).
 _last_live: Dict[str, Any] = {}
 # Autotrender book key -> signal-card display name (Telegram parser canonicals).
-# Index books are skipped: live index ticks own those names on the dashboard.
-_SPOT_ALIASES = {"GOLDM": "GOLD", "NATGASMINI": "NATURALGAS",
-                 "SENSEX": None, "NIFTY": None, "BANKNIFTY": None,
-                 "FINNIFTY": None, "INDIAVIX": None}
+_SPOT_ALIASES = {"GOLDM": "GOLD", "NATGASMINI": "NATURALGAS"}
 
 
 def get_spot_board() -> Dict[str, float]:
@@ -838,11 +835,13 @@ def get_spot_board() -> Dict[str, float]:
         out: Dict[str, float] = {}
         for sym, payload in ((_last_live.get("symbols") or {}).items()):
             name = _SPOT_ALIASES.get(sym, sym)
-            if not name:
-                continue
             price = ((payload or {}).get("spot") or {}).get("price") or 0
             if price > 0:
                 out[name] = float(price)
+        # NIFTY book lives at the top level (not under symbols/).
+        top_spot = (_last_live.get("spot") or {})
+        if (top_spot.get("price") or 0) > 0:
+            out[_SPOT_ALIASES.get("NIFTY", "NIFTY")] = float(top_spot["price"])
         return out
     except Exception:
         log.exception("spot board failed")
