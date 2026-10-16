@@ -40,3 +40,14 @@ calibrate per-group profiles from real paper tape. Paper-only. No real orders.
 1. FUT subs streaming (CRUDEOIL/NATURALGAS/GOLD confirmed resolving).
 2. NATGASMINI/GOLDM books warming; crude Nov chain quotes back.
 3. First call prints ONCE in messages. 4. Equity live spreads re-pull.
+
+## Engine changes 2026-10-16 night (204d515, live)
+- Removed fire cap (was dead code) + scratch→silent rule (b2e0390).
+- NEW location witness: backend/day_location.py — IB (first 60 bars) +
+  developing POC/VAH/VAL (70% volume profile); 6th fusion witness, confirms
+  only (abstains on thin tape <65 bars). Ballot shows Location row.
+- Signal expiry: scratched-fire reentry expires after 30 bars
+  (REENTRY_SIGNAL_BARS); breakout cooldown-jump is episode-based — jumps
+  only if no breakout fired in last 30 min (BREAKOUT_EPISODE_SECS).
+- First live test Monday 2026-10-19 (NIFTY weekly expiry): watch call
+  frequency (governors off) + Location row on ballot.
