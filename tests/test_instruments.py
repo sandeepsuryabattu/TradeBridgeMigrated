@@ -150,3 +150,21 @@ def test_followups_ignored():
     ).status == "ignored"
     assert parse_instrument_signal("1135 »»» 1147 +++KPRMILL").status == "ignored"
     assert parse_instrument_signal("SL HIT 🎯").status == "ignored"
+
+
+def test_single_stock_equity_option():
+    s = parse_instrument_signal(
+        "AUTOTRENDER\nINFY\n1160CE\nPRICE @ 28.71-29.89\nSTOPLOSS\n27.98\nTARGETS\n31.94"
+    )
+    assert s.status == "valid" and s.kind == "OPT"
+    assert s.underlying == "INFY" and s.exchange_segment == "nse_fo"
+    assert s.display_symbol == "INFY1160CE"
+    assert (s.entry_low, s.entry_high) == (28.71, 29.89)
+
+    t = parse_instrument_signal(
+        "AUTOTRENDER\nTCS\n2440CE\nPRICE @ 40.92-42.59\nSTOPLOSS\n39.38\nTARGETS\n45.0"
+    )
+    assert t.status == "valid" and t.underlying == "TCS"
+
+    b = parse_instrument_signal("BHARTIARTL 600CE PRICE @ 20-22 SL 18 TARGETS 26/30")
+    assert b.status == "valid" and b.underlying == "BHARTIARTL"

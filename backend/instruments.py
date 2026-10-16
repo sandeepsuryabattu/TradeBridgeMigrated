@@ -68,6 +68,8 @@ EQUITY_UNIVERSE = frozenset({
     "TATACONSUM", "NESTLEIND", "BRITANNIA", "SHRIRAMFIN", "INDUSINDBK",
     "TECHM", "HINDALCO", "JSWSTEEL", "SBILIFE", "HDFCLIFE", "TRENT", "BEL",
     "TATAPOWER", "VEDL", "GODREJCP", "DABUR", "PIDILITIND", "HAVELLS",
+    # Desk equity watch extras (not Nifty-50 but traded on nse_fo).
+    "BSE", "M&M",
 })
 
 
@@ -230,7 +232,44 @@ _NON_SYMBOLS = frozenset({
     "CRUDEOIL", "CRUDE", "NATURALGAS", "NATGAS", "GOLD", "SILVER", "COPPER",
     "ALUMINIUM", "ALUMINUM", "ZINC", "LEAD", "NICKEL", "MENTHAOIL", "COTTON",
     "MINI",
+    # Channel headers / meta words — never a stock symbol.
+    "AUTOTRENDER", "AUTOTREND", "INDEX", "OPTIONS", "OPTION", "EXPIRY",
 })
+
+
+def _find_stock_option_symbol(stripped: str, opt_start: int) -> Optional[str]:
+    """Find a single-stock symbol for an equity option (INFY 1160CE).
+
+    Looks at text BEFORE the strike match:
+    1. Prefer a known EQUITY_UNIVERSE member (last occurrence wins).
+    2. Fall back to the last ALL-CAPS token (excludes _NON_SYMBOLS).
+    Returns None when nothing stock-like precedes the strike.
+    """
+    before = stripped[:opt_start]
+    upper_before = before.upper()
+    # "M&M" contains a non-word char so word-boundary regexes can never
+    # match it — check literally first.
+    if "M&M" in upper_before:
+        return "M&M"
+    best: Optional[str] = None
+    best_pos = -1
+    for sym in EQUITY_UNIVERSE:
+        for m in re.finditer(rf"(?<![A-Z]){re.escape(sym)}(?![A-Z])", upper_before):
+            if m.start() > best_pos:
+                best, best_pos = sym, m.start()
+    if best:
+        return best
+    cands: list[tuple[int, str]] = []
+    for m in re.finditer(r"\b([A-Z][A-Z0-9]{1,13})\b", upper_before):
+        sym = m.group(1)
+        if sym in _NON_SYMBOLS:
+            continue
+        if not any(c.isalpha() for c in sym):
+            continue
+        cands.append((m.start(), sym))
+    if not cands:
+        return None
+    return cands[-1][1]
 
 _FOLLOWUP_RE = re.compile(
     r"ACHIEV|POINT'?S?\s+DONE|\bDONE\b|\bHIT\b|\bBOOK\b|»|ACTIVATED|TARGET\s+\d+\s+DONE",
@@ -332,6 +371,26 @@ def parse_instrument_signal(text: str) -> ParsedInstrument:
             return ParsedInstrument(status="ignored", reason='Entry range not found after "price"')
         return _finish_opt(stripped, lower, canonical, segment, strike, option_type, low, high,
                            _detect_variant(stripped))
+
+    # ── 1b. Single-stock equity options: <STOCK> + strike + CE/PE (nse_fo) ──
+    # e.g. "INFY\n1160CE\nPRICE @ 28.71-29.89..." — _detect_underlying only
+    # knows indices/commodities, so stock options fell through to the
+    # "Option strike found but no known underlying" ignore (live 2026-10-16).
+    if opt_match and not und:
+        stock = _find_stock_option_symbol(stripped, opt_match.start())
+        if stock:
+            strike = opt_match.group(1)
+            option_type = opt_match.group(2).upper()
+            remaining = stripped[opt_match.end():]
+            price_kw = re.search(r"price|buy|sell|entry|@|cmp", remaining, re.IGNORECASE)
+            if not price_kw:
+                return ParsedInstrument(status="ignored", reason='"price" not found after strike')
+            after_price = remaining[price_kw.end():]
+            low, high = _parse_entry(after_price)
+            if low is None:
+                return ParsedInstrument(status="ignored", reason='Entry range not found after "price"')
+            return _finish_opt(stripped, lower, stock, "nse_fo", strike, option_type, low, high,
+                               _detect_variant(stripped))
 
     # ── 2. Index/commodity futures: underlying + FUT + price ──
     if und and re.search(r"\bFUT\b", stripped, re.IGNORECASE):
