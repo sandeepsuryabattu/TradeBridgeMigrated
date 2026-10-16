@@ -1968,10 +1968,10 @@ function updateBadge(id, connected) {
 // ── Utilities ─────────────────────────────────────────────────────────────────
 // Net P&L calculation constants (F&O Options — NSE/BSE)
 const CHARGES = {
-    stt_rate: 0.001,            // 0.1% on SELL premium only (no STT on option buys)
-    txn_rate: 0.000325,        // 0.0325% on premium, both sides
+    stt_rate: 0.0015,           // 0.15% on SELL premium only (Budget 2026 w.e.f. 1-Apr-2026; no STT on option buys)
+    txn_rate: 0.000325,        // 0.0325% on premium, both sides (BSE Sensex exact; NSE ~0.035%)
     sebi_rate: 0.000001,       // 0.0001% (₹10/crore)
-    stamp_rate: 0.00002,       // 0.002% on buy side (options)
+    stamp_rate: 0.00003,       // 0.003% on buy side (options, per NSE schedule)
     brokerage_per_side: 0.05, // ₹0.05 per side
     gst_rate: 0.18            // 18% on brokerage + txn + sebi
 };
