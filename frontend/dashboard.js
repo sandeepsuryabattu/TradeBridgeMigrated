@@ -93,6 +93,13 @@ const esc = (str) => String(str)
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
+// ── Indian number notation (lakh/crore grouping: 1,03,869.46) ────────────────
+const fmtINR = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '0.00';
+    return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
 // ── Timer tick (runs every second for countdown tags) ─────────────────────────
 let timerTickInterval = null;
 function startTimerTick() {
@@ -481,7 +488,7 @@ function handleWSMessage(msg) {
                             const sigIdx = state.signals.findIndex(s => s.id === primaryTrade.signal_id);
                             if (sigIdx !== -1) {
                                 state.signals[sigIdx].trade_status = 'filled';
-                                state.signals[sigIdx].status_note = `Filled @ ₹${(msg.data.entry_price || msg.data.fill_price || 0).toFixed(2)}`;
+                                state.signals[sigIdx].status_note = `Filled @ ₹${fmtINR(msg.data.entry_price || msg.data.fill_price || 0)}`;
                                 renderSignals();
                             }
                         }
@@ -553,7 +560,7 @@ function handleWSMessage(msg) {
                         if (incomingSymbol.startsWith(idxStr) && incomingSymbol.endsWith(suffixStr)) {
                             s.live_ltp = msg.data.ltp;
                             const el = document.getElementById(`signal-ltp-${s.id}`);
-                            if (el) el.textContent = `₹${s.live_ltp.toFixed(2)}`;
+                            if (el) el.textContent = `₹${fmtINR(s.live_ltp)}`;
                         }
                     });
                 }
@@ -568,11 +575,11 @@ function handleWSMessage(msg) {
                     if (sym === 'SENSEX') {
                         state.sensex_ltp = msg.data.ltp || 0;
                         document.querySelectorAll('.signal-sensex-ltp').forEach(el => {
-                            el.textContent = (state.sensex_ltp || 0).toFixed(2);
+                            el.textContent = fmtINR(state.sensex_ltp || 0);
                         });
                     }
                     document.querySelectorAll(`.signal-index-ltp[data-idx="${sym}"]`).forEach(el => {
-                        el.textContent = (state.index_ltp[sym] || 0).toFixed(2);
+                        el.textContent = fmtINR(state.index_ltp[sym] || 0);
                     });
                 }
                 break;
@@ -588,7 +595,7 @@ function handleWSMessage(msg) {
                 const pStatus = String(msg.data.status || '').toLowerCase();
                 if (['closed', 'cancelled', 'rejected', 'failed'].includes(pStatus)) {
                     const sym = msg.data.trading_symbol || msg.data.symbol || ('position #' + (msg.data.id ?? '?'));
-                    const pnl = msg.data.pnl != null ? ` | PnL: Rs${Number(msg.data.pnl).toFixed(2)}` : '';
+                    const pnl = msg.data.pnl != null ? ` | PnL: ₹${fmtINR(msg.data.pnl)}` : '';
                     const pType = pStatus === 'closed' ? 'info' : 'warning';
                     toast(`Position ${pStatus}: ${sym}${pnl}`, pType);
                 }
@@ -810,7 +817,7 @@ async function exitPosition(positionId) {
                     exit_reason: data.exit_reason || 'manual' };
                 renderPositions();
             }
-            toast(`Position closed${data.pnl != null ? ` | PnL: Rs${Number(data.pnl).toFixed(2)}` : ''}`, 'info');
+            toast(`Position closed${data.pnl != null ? ` | PnL: ₹${fmtINR(data.pnl)}` : ''}`, 'info');
             scheduleVerifyOnDeadSocket();
         } else if (data.status === 'ok') {
             toast('Exit submitted — awaiting confirmation', 'info');
@@ -828,7 +835,7 @@ function slControlHTML(p) {
         ? ` <span class="snap-level-badge">${getSnapLevelLabel(p)}</span>` : '';
     return `<span class="sl-stepper" data-sl-for="${p.id}">`
         + `<button class="sl-step" onclick="nudgePositionSL(${p.id},-1)" title="Lower SL">−</button>`
-        + `<span class="sl-tag sl-tap" onclick="snapPositionSL(${p.id})" title="Tap: set SL to LTP−1">SL: ₹${(p.trailing_sl || 0).toFixed(2)}${snapBadge}</span>`
+        + `<span class="sl-tag sl-tap" onclick="snapPositionSL(${p.id})" title="Tap: set SL to LTP−1">SL: ₹${fmtINR(p.trailing_sl || 0)}${snapBadge}</span>`
         + `<button class="sl-step" onclick="nudgePositionSL(${p.id},1)" title="Raise SL">+</button></span>`;
 }
 
@@ -862,7 +869,7 @@ async function savePositionSL(positionId, value) {
                 state.positions[idx] = { ...state.positions[idx], trailing_sl: data.trailing_sl ?? value };
                 renderPositions();
             }
-            toast(`SL → ₹${Number(data.trailing_sl ?? value).toFixed(2)}`, 'info');
+            toast(`SL → ₹${fmtINR(data.trailing_sl ?? value)}`, 'info');
             scheduleVerifyOnDeadSocket();
         } else {
             toast(data.message || 'SL update failed', 'error');
@@ -1429,10 +1436,10 @@ function renderSignals() {
             const tradeStatus = s.trade_status || '';
             const timerStart = s.created_at || s.timestamp;
 
-            const ltpVal = s.live_ltp ? `₹${s.live_ltp.toFixed(2)}` : '--';
+            const ltpVal = s.live_ltp ? `₹${fmtINR(s.live_ltp)}` : '--';
             const cardIdx = String(s.idx || s.index || 'SENSEX').toUpperCase();
             const cardIdxVal = state.index_ltp[cardIdx] ?? state.sensex_ltp;
-            const indexVal = cardIdxVal ? cardIdxVal.toFixed(2) : '--';
+            const indexVal = cardIdxVal ? fmtINR(cardIdxVal) : '--';
 
             let targetsText = '--';
             if (s.targets && Array.isArray(s.targets) && s.targets.length > 0) {
@@ -1562,10 +1569,10 @@ function renderPositions() {
             const net = calculateNetPnL(p);
             return sum + (net ?? p.pnl ?? 0);
         }, 0);
-        realisedEl.textContent = `₹${realisedPnl.toFixed(2)}`;
+        realisedEl.textContent = `₹${fmtINR(realisedPnl)}`;
         realisedEl.className = `pnl-value ${realisedPnl > 0 ? 'positive' : realisedPnl < 0 ? 'negative' : ''}`;
     }
-    pnlEl.textContent = `₹${totalPnl.toFixed(2)}`;
+    pnlEl.textContent = `₹${fmtINR(totalPnl)}`;
     pnlEl.className = `pnl-value ${totalPnl > 0 ? 'positive' : totalPnl < 0 ? 'negative' : ''}`;
 
     // Update closed section visibility
@@ -1603,15 +1610,15 @@ function renderPositions() {
             // [3] Patch only the volatile fields — timer node is untouched
             const pnlDiv = existing.querySelector('.pos-pnl');
             if (pnlDiv) {
-                pnlDiv.textContent = `${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(2)}`;
+                pnlDiv.textContent = `${pnl >= 0 ? '+' : ''}₹${fmtINR(pnl)}`;
                 pnlDiv.className = `pos-pnl ${pnlClass}`;
             }
             const ltpSpan = existing.querySelector('.pos-meta .mono');
-            if (ltpSpan) ltpSpan.textContent = `₹${(p.current_price || 0).toFixed(2)}`;
+            if (ltpSpan) ltpSpan.textContent = `₹${fmtINR(p.current_price || 0)}`;
             const slStepper = existing.querySelector('.sl-stepper');
             if (slStepper) slStepper.outerHTML = slControlHTML(p);
             const maxTag = existing.querySelector('.max-tag');
-            if (maxTag && p.max_ltp) maxTag.textContent = `Max: ₹${p.max_ltp.toFixed(2)}`;
+            if (maxTag && p.max_ltp) maxTag.textContent = `Max: ₹${fmtINR(p.max_ltp)}`;
         } else {
             const div = document.createElement('div');
             div.className = 'position-card';
@@ -1627,15 +1634,15 @@ function renderPositions() {
                     </div>
                     <span class="pos-meta">
                         Qty: ${p.quantity || 0} |
-                        Entry: ₹${(p.entry_price || 0).toFixed(2)} |
-                        LTP: <span class="mono">₹${(p.current_price || 0).toFixed(2)}</span>
+                        Entry: ₹${fmtINR(p.entry_price || 0)} |
+                        LTP: <span class="mono">₹${fmtINR(p.current_price || 0)}</span>
                     </span>
                     <div class="pos-strategy">
                         ${slControlHTML(p)}
-                        ${p.max_ltp ? `<span class="max-tag">Max: ₹${p.max_ltp.toFixed(2)}</span>` : ''}
+                        ${p.max_ltp ? `<span class="max-tag">Max: ₹${fmtINR(p.max_ltp)}</span>` : ''}
                     </div>
                 </div>
-                <div class="pos-pnl ${pnlClass}">${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(2)}</div>
+                <div class="pos-pnl ${pnlClass}">${pnl >= 0 ? '+' : ''}₹${fmtINR(pnl)}</div>
             `;
             container.prepend(div);
         }
@@ -1686,15 +1693,15 @@ function renderClosedPositions(closed, container) {
                 </div>
                 <span class="pos-meta">
                     Qty: ${p.quantity || 0} |
-                    In: ₹${(p.entry_price || 0).toFixed(2)} |
-                    Out: <span class="mono">₹${(p.exit_price || p.current_price || 0).toFixed(2)}</span>
+                    In: ₹${fmtINR(p.entry_price || 0)} |
+                    Out: <span class="mono">₹${fmtINR(p.exit_price || p.current_price || 0)}</span>
                 </span>
                 <div class="pos-strategy">
-                    <span class="sl-tag">SL: ₹${(p.trailing_sl || 0).toFixed(2)}</span>
-                    ${p.max_ltp ? `<span class="max-tag">Max: ₹${p.max_ltp.toFixed(2)}</span>` : ''}
+                    <span class="sl-tag">SL: ₹${fmtINR(p.trailing_sl || 0)}</span>
+                    ${p.max_ltp ? `<span class="max-tag">Max: ₹${fmtINR(p.max_ltp)}</span>` : ''}
                 </div>
             </div>
-            <div class="pos-pnl ${pnlClass}">${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(2)}</div>
+            <div class="pos-pnl ${pnlClass}">${pnl >= 0 ? '+' : ''}₹${fmtINR(pnl)}</div>
         `;
         container.appendChild(div);
     });
@@ -1747,14 +1754,14 @@ function renderTrades() {
                         <td class="mono">${esc(t.trading_symbol || '-')}</td>
                         <td>${t.transaction_type === 'B' ? '🟢 BUY' : '🔴 SELL'}</td>
                         <td class="mono">${t.quantity || '-'}</td>
-                        <td class="mono">₹${(t.price || 0).toFixed(2)}</td>
-                        <td class="mono">${t.fill_price ? '₹' + t.fill_price.toFixed(2) : '-'}</td>
-                        <td class="mono">${t.exit_price ? '₹' + Number(t.exit_price).toFixed(2) : '-'}</td>
+                        <td class="mono">₹${fmtINR(t.price || 0)}</td>
+                        <td class="mono">${t.fill_price ? '₹' + fmtINR(t.fill_price) : '-'}</td>
+                        <td class="mono">${t.exit_price ? '₹' + fmtINR(t.exit_price) : '-'}</td>
                         <td class="mono" style="color:${(t.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">
-                            ${t.pnl != null ? '₹' + t.pnl.toFixed(2) : '-'}
+                            ${t.pnl != null ? '₹' + fmtINR(t.pnl) : '-'}
                         </td>
                         <td class="mono" style="color:${(netPnL || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">
-                            ${netPnL != null ? '₹' + netPnL.toFixed(2) : '-'}
+                            ${netPnL != null ? '₹' + fmtINR(netPnL) : '-'}
                         </td>
                         <td>${t.mode === 'paper' ? '📄' : '🔴'} ${t.mode || '-'}</td>
                         <td><span class="trade-status ${t.status || ''}">${t.status || '-'}</span></td>
