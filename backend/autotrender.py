@@ -728,9 +728,14 @@ async def paper_trade_call(call_id: int) -> Dict[str, Any]:
 
 SCHED_INTERVAL_SECS = 60        # evaluate every minute (live-test cadence)
 SCHED_COOLDOWN_SECS = 900       # min gap between auto calls (same bias)
-SCHED_MAX_PER_DAY = 20          # legacy safety cap (kept for compat)
 SCHED_SCRATCH_FRAC = 0.0015     # adverse close excursion marking a scratch
                                 # (counted for stats only — never silences)
+REENTRY_SIGNAL_BARS = 30        # a scratched fire's second chance expires
+                                # after this many bars (Vtrender: signals die,
+                                # adapted to our 30-bar judge horizon)
+BREAKOUT_EPISODE_SECS = 1800    # a fresh breakout jumps cooldown only if no
+                                # breakout fired in the last 30 min (new
+                                # episode, not the same one persisting)
 REGIME_LOCK_BARS = 45           # morning label locks when the tape is this long
 REGIME_RECHECK_SECS = 900       # re-verify a trend-day thesis this often
 REGIME_MIN_DENSITY = 0.5        # bars per session-minute; thinner tapes are
@@ -811,7 +816,8 @@ _sched: Dict[str, Dict[str, Any]] = {}
 def _st(sym: str) -> Dict[str, Any]:
     return _sched.setdefault(sym, {
         "day": None, "count": 0, "last_ts": 0.0, "last_bias": None,
-        "last_breakout": False, "chain_keys": [], "prev_rows": [],
+        "last_breakout": False, "last_breakout_ts": 0.0,
+        "chain_keys": [], "prev_rows": [],
         "prev_vix": None, "log": _deque(maxlen=120),
         # Regime era: morning label + kill rules (reset daily below).
         "regime": "EARLY", "regime_dir": None, "regime_locked": False,
@@ -851,7 +857,7 @@ _tick_log: _deque = _deque(maxlen=120)
 
 
 def _ballot(trend=None, trig=None, vol=None, pos=None, fused=None,
-            v2=None, found=None, regime=None) -> List[Dict[str, Any]]:
+            v2=None, found=None, regime=None, location=None) -> List[Dict[str, Any]]:
     """Per-model votes for the latest tick: every indicator lists ALL its
     options plus the one it picked. [{model, options, vote, detail}] — never
     raises. The dashboard highlights vote within options."""
@@ -872,6 +878,22 @@ def _ballot(trend=None, trig=None, vol=None, pos=None, fused=None,
                   rg.get("label"), "EARLY")),
              f"{rg.get('label')} dir={rg.get('direction')} "
              f"scratches={rg.get('scratches', 0)}")
+        loc = location or {}
+        _loc_vote = {"ABOVE_VALUE": "ABOVE value",
+                     "BELOW_VALUE": "BELOW value",
+                     "IN_VALUE": "IN value"}.get(loc.get("location"),
+                                                 "warming up")
+
+        def _px(x):
+            try:
+                return f"{float(x):.1f}"
+            except (TypeError, ValueError):
+                return "—"
+        _row("Location", ["ABOVE value", "IN value", "BELOW value",
+                          "warming up"], _loc_vote,
+             f"poc={_px(loc.get('poc'))} vah={_px(loc.get('vah'))} "
+             f"val={_px(loc.get('val'))} "
+             f"ib={_px(loc.get('ib_low'))}-{_px(loc.get('ib_high'))}")
         tscore = int((trend or {}).get("score", 0))
         parts = (trend or {}).get("parts", {})
         _row("Trend EMA/VWAP", ["BULL", "BEAR", "FLAT"],
@@ -993,7 +1015,8 @@ def _publish_engine(moment, outcome: str, bars=None, found=None, trend=None,
                               regime={"label": S.get("regime", "EARLY"),
                                       "direction": S.get("regime_dir"),
                                       "scratches": S.get("scratches", 0),
-                                      "silent": S.get("silent", False)}),
+                                      "silent": S.get("silent", False)},
+                              location=S.get("last_location")),
             "cooldown": {"last_bias": S.get("last_bias"),
                           "remaining_secs": remaining},
             "auto_today": S.get("count", 0),
@@ -1188,15 +1211,20 @@ def _judge_shadows(S: Dict[str, Any], bars) -> None:
 def _reentry_pick(S: Dict[str, Any], bars) -> Optional[Dict[str, Any]]:
     """Most recent scratched fire whose level was reclaimed + held.
 
-    One second chance per fire (reentered/is_reentry never re-qualify).
+    One second chance per fire (reentered/is_reentry never re-qualify),
+    and the signal expires REENTRY_SIGNAL_BARS after the fire — a stale
+    read from hours ago is not a setup.
     Returns {"direction", "reason", "fire"} or None. Never raises.
     """
     from . import day_regime as rg
     try:
+        now_idx = len(bars) - 1
         for f in reversed(S.get("fires", [])):
             if not (f.get("judged") and f.get("scratched")):
                 continue
             if f.get("reentered") or f.get("is_reentry"):
+                continue
+            if now_idx - int(f.get("bar_idx", 0)) > REENTRY_SIGNAL_BARS:
                 continue
             setup = rg.reentry_setup(bars, f.get("entry"),
                                      f.get("direction"))
@@ -1337,6 +1365,16 @@ async def scheduler_tick(now: Optional[datetime] = None,
     stw = models.supertrend_witness(bars)
     v2ctx = {"strength": strength, "htf": htf, "exhaustion": exh,
              "extension": ext, "htf_exhaustion": htfx, "supertrend": stw}
+    # Location layer: auction acceptance (IB + developing VAH/VAL/POC).
+    # Votes as a confirming fusion witness; abstains on thin tape.
+    from . import day_location as dloc
+    try:
+        locctx = dloc.locate(bars)
+        loc_vote = dloc.location_vote(locctx, (trig or {}).get("direction"))
+    except Exception:
+        locctx, loc_vote = {"ready": False, "reason": "error"}, {"score": 0}
+    S["last_location"] = locctx
+    v2ctx["location"] = {**locctx, "vote": loc_vote}
 
     # Chain snapshot BEFORE the trigger gate: the dashboard must light up in
     # quiet markets too, and positioning needs rows even when we don't fire.
@@ -1429,12 +1467,13 @@ async def scheduler_tick(now: Optional[datetime] = None,
 
     ts = moment.timestamp()
     # Cooldown suppresses same-drift repeats, but a FRESH breakout episode
-    # jumps the queue once — new information, not a repeat. Persistent
-    # breakouts (same episode as the last fired call) still wait.
+    # jumps the queue — new information, not a repeat. A breakout fired
+    # within BREAKOUT_EPISODE_SECS is the same episode persisting: it waits.
     fresh_breakout = (trig["direction"] == "BULLISH" and "breakout=HIGH" in trig["reason"]) or \
                      (trig["direction"] == "BEARISH" and "breakout=LOW" in trig["reason"])
     if trig["direction"] == S["last_bias"] and ts - S["last_ts"] < P["cooldown_secs"] \
-            and not (fresh_breakout and not S["last_breakout"]) \
+            and not (fresh_breakout and
+                     ts - S.get("last_breakout_ts", 0.0) > BREAKOUT_EPISODE_SECS) \
             and pick is None:
         _publish_engine(moment, "cooldown", bars=bars,
                         found=found, trend=trend, trig=trig, vol=vol, v2=v2ctx,
@@ -1444,7 +1483,7 @@ async def scheduler_tick(now: Optional[datetime] = None,
     # Positioning already computed above for every tick; fuse for the vote.
     fused_v1 = models.fuse(trend, trig, pos, vol)
     fused = models.fuse_v2(trend, trig, pos_eff, vol, strength, htf, exh, ext,
-                           htfx, flow, skew, strad, vixr, stw,
+                           htfx, flow, skew, strad, vixr, stw, loc_vote,
                            fire_threshold=P["fire_threshold"],
                            min_witnesses=P["min_witnesses"])
     if not fused["fire"]:
@@ -1507,6 +1546,8 @@ async def scheduler_tick(now: Optional[datetime] = None,
                        "volatility": vol, "v2": v2ctx}
     S["last_ts"], S["last_bias"] = ts, direction
     S["last_breakout"] = fresh_breakout
+    if fresh_breakout:
+        S["last_breakout_ts"] = ts
     S["count"] += 1
     if pick is not None and pick["direction"] == direction:
         pick["fire"]["reentered"] = True

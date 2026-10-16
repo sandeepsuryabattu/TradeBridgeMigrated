@@ -488,6 +488,7 @@ def fuse_v2(trend: Dict[str, Any], trigger: Dict[str, Any],
             strad: Optional[Dict[str, Any]] = None,
             vixr: Optional[Dict[str, Any]] = None,
             stw: Optional[Dict[str, Any]] = None,
+            loc: Optional[Dict[str, Any]] = None,
             fire_threshold: Optional[float] = None,
             min_witnesses: Optional[int] = None) -> Dict[str, Any]:
     """Weighted v2 fusion with hard vetoes. Fires only when every gate
@@ -552,7 +553,7 @@ def fuse_v2(trend: Dict[str, Any], trigger: Dict[str, Any],
     if not agree:
         vetoes.append("trend-disagree")
     # Multi-witness agreement: neutral witnesses must not ride free. At
-    # least MIN_WITNESSES of the five must ACTIVELY support the direction
+    # least MIN_WITNESSES of the six must ACTIVELY support the direction
     # (abstain/neutral counts as silence, opposition is vetoed above).
     _bull = direction == "BULLISH"
     wit = 0
@@ -567,6 +568,12 @@ def fuse_v2(trend: Dict[str, Any], trigger: Dict[str, Any],
         wit += 1
     _f = int((flow or {}).get("score", 0))
     if (_bull and _f > 0) or (not _bull and _f < 0):
+        wit += 1
+    # Location witness: auction acceptance in the trigger direction
+    # (above value / above developing POC for longs). Abstains on thin
+    # tape — never blocks, only confirms.
+    _l = int((loc or {}).get("score", 0))
+    if (_bull and _l > 0) or (not _bull and _l < 0):
         wit += 1
     if wit < (min_witnesses if min_witnesses is not None else MIN_WITNESSES):
         vetoes.append("thin-agreement")

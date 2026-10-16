@@ -195,6 +195,19 @@ def test_fresh_breakout_jumps_queue_once(wired):
     assert len(wired.process_calls) == 1
 
 
+def test_breakout_new_episode_jumps_queue(wired):
+    # Last breakout fired >30 min ago: this is a NEW episode, not the
+    # same one persisting — cooldown yields.
+    b = _bullish_builder()
+    at._st("NIFTY").update(
+        last_bias="BULLISH", last_ts=IST_10AM.timestamp(),
+        last_breakout=True,
+        last_breakout_ts=IST_10AM.timestamp() - 3600)
+    res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=b))
+    assert res["action"] == "generated", res
+    assert at._st("NIFTY")["last_breakout_ts"] == IST_10AM.timestamp()
+
+
 def test_real_mode_never_trades(wired):
     wired.mode = "real"
     res = asyncio.run(at.scheduler_tick(now=IST_10AM, builder=_bullish_builder()))
@@ -494,6 +507,25 @@ def test_bar_raised_to_70_with_witness_rule():
     assert m.MIN_WITNESSES == 2
 
 
+def test_location_witness_confirms_acceptance():
+    # Strength alone is thin agreement; strength + accepted-above-value
+    # location is a confirmed continuation.
+    from backend import at_models as m
+    kw = dict(trend={"score": 2},
+              trigger={"fire": True, "direction": "BULLISH",
+                       "reason": "breakout=HIGH"},
+              pos={"score": 0}, vol={"ok": True},
+              strength={"trending": True}, htf={"bias": "FLAT"},
+              exh={"stretched": False}, ext={"vetoed": False}, htfx={},
+              flow={"score": 0}, strad={}, vixr={}, stw={})
+    thin = m.fuse_v2(**kw)
+    assert "thin-agreement" in thin["vetoes"], thin
+    confirmed = m.fuse_v2(loc={"score": 1}, **kw)
+    assert "thin-agreement" not in confirmed["vetoes"], confirmed
+    # Abstaining location changes nothing.
+    assert m.fuse_v2(loc={"score": 0}, **kw)["vetoes"] == thin["vetoes"]
+
+
 def test_thin_agreement_vetoed_despite_score():
     # High score built on trend+trigger alone: no witness backs it.
     from backend import at_models as m
@@ -561,6 +593,19 @@ def test_reentry_pick_second_chance_only():
 def test_reentry_pick_ignores_reentries():
     bars = _reentry_builder()._closed["NIFTY"]
     S = _fresh_state(fires=[_scratched() | {"is_reentry": True}])
+    assert at._reentry_pick(S, bars) is None
+
+
+def test_reentry_pick_expires_stale_signal():
+    # Same reclaim setup would pick a fresh scratch — but a fire 30 bars
+    # old is stale information, not a setup.
+    bars = _reentry_builder()._closed["NIFTY"]
+    t1 = bars[-1]["t"]
+    bars = bars + [{"t": t1 + (i + 1) * 60, "o": 25700.0, "h": 25701.5,
+                    "l": 25699.5, "c": 25700.5, "v": 1000}
+                   for i in range(5)]
+    S = _fresh_state(fires=[_scratched() | {"bar_idx": 0}])
+    assert len(bars) - 1 - 0 > at.REENTRY_SIGNAL_BARS
     assert at._reentry_pick(S, bars) is None
 
 
