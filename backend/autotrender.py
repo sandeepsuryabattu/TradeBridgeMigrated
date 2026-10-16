@@ -821,6 +821,32 @@ def _st(sym: str) -> Dict[str, Any]:
     })
 # Last successful live snapshot for the dashboard (GET /api/autotrender/live).
 _last_live: Dict[str, Any] = {}
+# Autotrender book key -> signal-card display name (Telegram parser canonicals).
+# Index books are skipped: live index ticks own those names on the dashboard.
+_SPOT_ALIASES = {"GOLDM": "GOLD", "NATGASMINI": "NATURALGAS",
+                 "SENSEX": None, "NIFTY": None, "BANKNIFTY": None,
+                 "FINNIFTY": None, "INDIAVIX": None}
+
+
+def get_spot_board() -> Dict[str, float]:
+    """Underlying spots for the main-dashboard signal cards.
+
+    Chain snapshots carry the true underlying (not option premium), which the
+    tick pipeline never sees for MCX/equity books. Never raises; {} when cold.
+    """
+    try:
+        out: Dict[str, float] = {}
+        for sym, payload in ((_last_live.get("symbols") or {}).items()):
+            name = _SPOT_ALIASES.get(sym, sym)
+            if not name:
+                continue
+            price = ((payload or {}).get("spot") or {}).get("price") or 0
+            if price > 0:
+                out[name] = float(price)
+        return out
+    except Exception:
+        log.exception("spot board failed")
+        return {}
 # Rolling per-tick decision log for the dashboard ballot feed (newest last).
 from collections import deque as _deque
 _tick_log: _deque = _deque(maxlen=120)

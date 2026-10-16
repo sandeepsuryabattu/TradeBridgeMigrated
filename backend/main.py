@@ -445,6 +445,32 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(timeout_checker())
 
+    # Spot board relay: autotrender chain snapshots hold the true underlying
+    # (MCX/equity books never get index ticks), so rebroadcast them as
+    # index_ltp every 15s for the dashboard signal cards. Never raises.
+    async def spot_board_relay():
+        while True:
+            try:
+                await asyncio.sleep(15)
+                try:
+                    from .autotrender import get_spot_board
+                    board = get_spot_board()
+                except Exception:
+                    board = {}
+                for name, price in (board or {}).items():
+                    try:
+                        await ws_manager.broadcast({
+                            "type": "index_ltp",
+                            "data": {"symbol": name, "ltp": price},
+                        })
+                    except Exception:
+                        pass
+            except Exception:
+                log.exception("Spot board relay error")
+                await asyncio.sleep(15)
+
+    asyncio.create_task(spot_board_relay())
+
     # ── Shared tick pipeline (lifespan scope) ────────────────────────────────
     # [FIX #30] tick pipeline is now module-level — just capture the running loop
     global _main_loop, _tick_drain_task
