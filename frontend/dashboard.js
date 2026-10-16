@@ -1549,12 +1549,12 @@ function renderSignals() {
 
 // Peak simultaneous capital deployed across a set of positions.
 // Event sweep over open/close times: opens add qty×entry, closes release it.
-// Naive "YYYY-MM-DD HH:MM:SS" stamps are server-local (IST); ISO stamps
-// carry their own zone. Missing open time counts from the start.
+// Both stamps are UTC (naive "YYYY-MM-DD HH:MM:SS" and ISO "Z" alike).
+// Missing open time counts from the start.
 function parsePosTime(s) {
     if (!s) return null;
     const t = /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]+$/.test(s)
-        ? Date.parse(s.replace(" ", "T") + "+05:30")
+        ? Date.parse(s.replace(" ", "T") + "Z")
         : Date.parse(s);
     return Number.isFinite(t) ? t : null;
 }
