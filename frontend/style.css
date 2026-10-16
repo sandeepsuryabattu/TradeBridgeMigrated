@@ -644,6 +644,20 @@ header {
     color: var(--text-muted);
 }
 
+/* Right-hand stack inside a banner (value + sub-line) */
+.pnl-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+}
+
+.pnl-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    margin-top: 1px;
+}
+
 .pnl-value.positive {
     color: var(--green);
     text-shadow: 0 0 12px rgba(16, 185, 129, 0.3);

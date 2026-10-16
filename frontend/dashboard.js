@@ -1547,6 +1547,39 @@ function renderSignals() {
     }
 }
 
+// Peak simultaneous capital deployed across a set of positions.
+// Event sweep over open/close times: opens add qty×entry, closes release it.
+// Naive "YYYY-MM-DD HH:MM:SS" stamps are server-local (IST); ISO stamps
+// carry their own zone. Missing open time counts from the start.
+function parsePosTime(s) {
+    if (!s) return null;
+    const t = /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]+$/.test(s)
+        ? Date.parse(s.replace(" ", "T") + "+05:30")
+        : Date.parse(s);
+    return Number.isFinite(t) ? t : null;
+}
+
+function peakDeployed(positions) {
+    const evts = [];
+    (positions || []).forEach((p) => {
+        const dep = (p.quantity || 0) * (p.entry_price || 0);
+        if (!(dep > 0)) return;
+        evts.push({ t: parsePosTime(p.opened_at) ?? Number.NEGATIVE_INFINITY, d: dep });
+        if (p.status === "closed" && p.closed_at) {
+            evts.push({ t: parsePosTime(p.closed_at) ?? Number.POSITIVE_INFINITY, d: -dep });
+        }
+    });
+    // Same timestamp: releases (negative) sort before new opens.
+    evts.sort((a, b) => (a.t - b.t) || (a.d - b.d));
+    let cur = 0;
+    let peak = 0;
+    evts.forEach((e) => {
+        cur += e.d;
+        if (cur > peak) peak = cur;
+    });
+    return peak;
+}
+
 function renderPositions() {
     const container = $('#positions-list');
     const count = $('#pos-count');
@@ -1568,6 +1601,10 @@ function renderPositions() {
         // today by default): open + closed, not just currently open.
         const totalDeployed = state.positions.reduce((sum, p) => sum + (p.quantity || 0) * (p.entry_price || 0), 0);
         deployedEl.textContent = `₹${fmtINR(totalDeployed)}`;
+    }
+    const peakEl = $('#pnl-deployed-max');
+    if (peakEl) {
+        peakEl.textContent = `Peak ₹${fmtINR(peakDeployed(state.positions))}`;
     }
     const realisedEl = $('#pnl-realised');
     const closed = state.positions.filter(p => p.status === 'closed');
