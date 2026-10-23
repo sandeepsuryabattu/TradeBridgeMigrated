@@ -428,7 +428,7 @@ class RealTrader:
         # Bounce 0 = fill on first touch; only missing values default to 5.
         _bp = strategy.get("bouncePoints")
         bounce_points = float(_bp if _bp is not None else DEFAULT_BOUNCE_POINTS)
-        trading_symbol = self._resolve_symbol(signal)
+        trading_symbol = await asyncio.to_thread(self._resolve_symbol, signal)
 
         entry_timer_mins = int(strategy.get("entryTimerMins") or ENTRY_TIMEOUT_MINS)
         exit_timer_mins  = int(strategy.get("exitTimerMins")  or POSITION_TIMEOUT_MINS)
