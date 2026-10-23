@@ -9,6 +9,14 @@ from backend import kotak_chain as kc
 from backend.contract_master import ContractMaster
 
 
+@pytest.fixture(autouse=True)
+def _clear_chain_state():
+    """Cache/cooldown are module state — isolate every test."""
+    kc.reset_state()
+    yield
+    kc.reset_state()
+
+
 def _row(strike, opt, token, expiry="2027-12-30"):
     return {"pTrdSymbol": f"NIFTY{strike}{opt}", "pSymbol": token,
             "pStrikePrice": str(strike), "pOptionType": opt,
@@ -176,3 +184,102 @@ def test_no_pairs_raises():
     cm._segments = {"nse_fo": [_row(25800, "CE", "TOK-CE-25800")]}
     with pytest.raises(ValueError):
         kc.chain_snapshot(_FakeClient({}), cm, spot=25800.0)
+
+
+def test_snapshot_cached_within_ttl(monkeypatch):
+    calls = {"n": 0}
+
+    class _Counting(_FakeClient):
+        def option_chain(self, **kw):
+            calls["n"] += 1
+            return _std_chain()
+
+    c = _Counting({})
+    first = kc.chain_snapshot(c, _cm(), spot=25810.0, width=1)
+    second = kc.chain_snapshot(c, _cm(), spot=25810.0, width=1)
+    assert calls["n"] == 1, "second call must come from cache"
+    assert first.get("cached") is not True
+    assert second.get("cached") is True
+    assert second["rows"] == first["rows"]
+
+
+def test_cache_expires_after_ttl(monkeypatch):
+    calls = {"n": 0}
+
+    class _Counting(_FakeClient):
+        def option_chain(self, **kw):
+            calls["n"] += 1
+            return _std_chain()
+
+    monkeypatch.setattr(kc, "CHAIN_TTL_SECS", 0.0)
+    c = _Counting({})
+    kc.chain_snapshot(c, _cm(), spot=25810.0, width=1)
+    kc.chain_snapshot(c, _cm(), spot=25810.0, width=1)
+    assert calls["n"] == 2
+
+
+def test_429_enters_cooldown_and_serves_stale(monkeypatch):
+    calls = {"n": 0}
+
+    class _Flaky(_FakeClient):
+        def option_chain(self, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _std_chain()
+            raise ValueError("option_chain error: {'code': 429, "
+                             "'error': 'Rate limit exceeded'}")
+
+    monkeypatch.setattr(kc, "CHAIN_TTL_SECS", 0.0)
+    c = _Flaky({})
+    fresh = kc.chain_snapshot(c, _cm(), spot=25810.0, width=1)
+    assert fresh["source"] == "option_chain"
+    # Throttled: no quotes fallback (would multiply the storm).
+    stale = kc.chain_snapshot(c, _cm(), spot=25810.0, width=1)
+    assert stale.get("stale") is True
+    assert stale["rows"] == fresh["rows"]
+    assert kc.cache_info()["cooldown_secs"] > 0
+    # While cooling down we don't call the broker at all.
+    before = calls["n"]
+    again = kc.chain_snapshot(c, _cm(), spot=25810.0, width=1)
+    assert again.get("stale") is True
+    assert calls["n"] == before
+
+
+def test_429_without_cache_raises(monkeypatch):
+    class _Always(_NoChainClient):
+        def quotes(self, instrument_tokens=None, quote_type=None):
+            raise ValueError("429 Too Many Requests")
+
+    with pytest.raises(ValueError):
+        kc.chain_snapshot(_Always(_std_quotes()), _cm(), spot=25800.0)
+    assert kc.cache_info()["cooldown_secs"] > 0
+
+
+def test_expiry_api_cached_per_day():
+    class _Exp(_NoChainClient):
+        def __init__(self):
+            super().__init__(_std_quotes())
+            self.n = 0
+
+        def expiries(self, exchange=None, underlying=None):
+            self.n += 1
+            return {"expiries": ["2027-12-30"]}
+
+    c = _Exp()
+    kc.chain_snapshot(c, _cm(), spot=25800.0, width=1)
+    kc.chain_snapshot(c, _cm(), spot=25850.0, width=1)
+    assert c.n == 1, "expiry lookup must be reused within the day"
+
+
+def test_contract_master_same_day_marker(tmp_path, monkeypatch):
+    from datetime import date
+    from backend import contract_master as cmmod
+    monkeypatch.setattr(cmmod, "MASTER_FILE", str(tmp_path / "masters.csv"))
+    cm = ContractMaster()
+    assert cm.cache_fresh_today() is False
+    cm.mark_cache_fresh()
+    assert cm.cache_fresh_today() is True
+    (tmp_path / "masters.csv.date").write_text("2000-01-01")
+    assert cm.cache_fresh_today() is False
+    (tmp_path / "masters.csv.date").write_text(date.today().isoformat())
+    assert cm.cache_fresh_today() is True

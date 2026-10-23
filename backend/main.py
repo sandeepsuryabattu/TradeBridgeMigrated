@@ -652,7 +652,8 @@ async def lifespan(app: FastAPI):
                     _tick_drain_task.append(new_task)
                     log.info("daily_contract_refresh: tick pipeline restarted")
 
-                    await loop.run_in_executor(None, manager.download_contracts)
+                    await loop.run_in_executor(
+                        None, lambda: manager.download_contracts(force=True))
                     await manager.resubscribe_recent_signals(limit=100)
                     manager.real_trader.reset_eod_flag()
                     log.info("Daily contract master refresh complete")
@@ -877,6 +878,25 @@ async def get_status():
     status["ws_clients"]  = len(ws_manager.active)
     status["stop_trading"] = _stop_trading
     return status
+
+
+@app.get("/api/health")
+async def get_health():
+    """Cheap liveness probe for the watchdog — in-memory only.
+
+    /api/status aggregates broker/feed/DB state and can be slow exactly
+    when the system is busy; using it as a kill-switch caused restart
+    storms (858 restarts). If this handler answers, the event loop is
+    alive and the process is worth keeping.
+    """
+    try:
+        from . import kotak_chain as chain
+        oc = chain.cache_info()
+    except Exception:
+        oc = {}
+    return {"ok": True, "mode": getattr(manager, "mode", "?"),
+            "market_feed": bool(getattr(manager, "market_feed", None)),
+            "option_chain": oc}
 
 
 @app.get("/api/messages")

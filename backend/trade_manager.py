@@ -680,8 +680,12 @@ class TradeManager:
             self._start_real_background_tasks()
         return result
 
-    def download_contracts(self):
+    def download_contracts(self, force: bool = False):
         if self.kotak.is_authenticated:
+            if (not force and self.contract_master.cache_fresh_today()
+                    and self.contract_master.is_loaded):
+                log.info("Contract masters: same-day cache — skipping re-download")
+                return
             try:
                 success = self.contract_master.download(self.kotak)
                 if success:
@@ -699,6 +703,8 @@ class TradeManager:
             try:
                 seg_results = self.contract_master.download_all(self.kotak)
                 log.info("Multi-segment masters: %s", seg_results)
+                if any(seg_results.values()):
+                    self.contract_master.mark_cache_fresh()
             except Exception:
                 log.exception("download_all failed")
 

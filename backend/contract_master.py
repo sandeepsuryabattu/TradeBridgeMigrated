@@ -111,6 +111,28 @@ class ContractMaster:
         """Load contracts from the saved CSV file (called on startup before first live download)."""
         return self._load_from_csv()
 
+    # ── Same-day download guard ──────────────────────────────────────────────
+    # Restart storms (858 pm2 restarts on 2026-10-23) re-downloaded 4 scrip
+    # masters (~30MB) on every boot, burning the broker's rate-limit budget.
+    # A download is genuinely needed once per day; restarts reuse the cache.
+
+    def cache_fresh_today(self) -> bool:
+        """True when masters were downloaded successfully today. Never raises."""
+        try:
+            with open(MASTER_FILE + ".date", "r") as f:
+                return f.read().strip() == date.today().isoformat()
+        except (OSError, ValueError):
+            return False
+
+    def mark_cache_fresh(self) -> None:
+        """Stamp today's download. Never raises."""
+        try:
+            os.makedirs(os.path.dirname(MASTER_FILE), exist_ok=True)
+            with open(MASTER_FILE + ".date", "w") as f:
+                f.write(date.today().isoformat())
+        except OSError:
+            log.exception("contract master: could not write freshness marker")
+
     # Row slimming: scrip-master CSVs carry 30+ columns per contract and
     # 150k+ rows across segments (~650MB as full DictReader rows — live
     # OOM-adjacent finding 2026-10-15). Only these keys are ever read

@@ -11,6 +11,7 @@ Dashboard state (last chain/engine/ballot/decisions + calls) persists across
 restarts; same-session snapshots reload on boot, yesterday's are ignored.
 No DB migration: flat JSON files only.
 """
+import asyncio
 import json
 import logging
 import os
@@ -501,11 +502,10 @@ async def chain_probe(underlying: str = "CRUDEOIL", segment: str = "mcx_fo",
         cm = getattr(_manager, "contract_master", None)
         if kotak is None or cm is None:
             return {"ok": False, "error": "no kotak/contract-master"}
-        snap = chain.chain_snapshot(kotak.client, cm, underlying=underlying,
-                                    segment=segment,
-                                    spot=(spot or None), width=width,
-                                    count=(count or 20),
-                                    expiry_hint=(expiry or None))
+        snap = await asyncio.to_thread(
+            chain.chain_snapshot, kotak.client, cm, underlying=underlying,
+            segment=segment, spot=(spot or None), width=width,
+            count=(count or 20), expiry_hint=(expiry or None))
         rows = snap.get("rows", [])
         sample = []
         strikes = []
@@ -516,7 +516,8 @@ async def chain_probe(underlying: str = "CRUDEOIL", segment: str = "mcx_fo",
         try:
             exp = getattr(kotak.client, "expiries", None)
             if exp:
-                expiries = exp(exchange=segment, underlying=underlying.upper())
+                expiries = await asyncio.to_thread(
+                    exp, exchange=segment, underlying=underlying.upper())
         except Exception:
             pass
         out = {"ok": True, "underlying": snap.get("underlying"),
@@ -1387,10 +1388,15 @@ async def scheduler_tick(now: Optional[datetime] = None,
         return {"action": "skip", "reason": "kotak not authenticated"}
     spot = bars[-1]["c"]
     try:
-        snap = chain.chain_snapshot(kotak.client, cm, underlying=sym,
-                                    segment=cfg.get("segment", "nse_fo"),
-                                    spot=spot, width=cfg.get("width", 9),
-                                    count=cfg.get("count", 20))
+        # Broker REST is synchronous (httpx + a 30s SDK rate-limiter wait).
+        # Calling it inline blocked the event loop for minutes on a 429
+        # storm, which starved /api/status and made the watchdog restart
+        # the whole process every 5 minutes. Keep it off the loop.
+        snap = await asyncio.to_thread(
+            chain.chain_snapshot, kotak.client, cm, underlying=sym,
+            segment=cfg.get("segment", "nse_fo"),
+            spot=spot, width=cfg.get("width", 9),
+            count=cfg.get("count", 20))
     except Exception:
         log.exception("scheduler chain snapshot failed")
         _publish_engine(moment, "chain snapshot failed", bars=bars,

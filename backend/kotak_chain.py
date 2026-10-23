@@ -18,24 +18,112 @@ Honest limits (verified against installed kotakneoapi 3.0.7 + official docs):
 Nothing here trades. Output rows are engine-ready
 (strike/callOI/putOI/callLTP/putLTP/atm) for autotrender_engine.
 """
+import copy
 import logging
+import os
+import time
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
+
+# Live-rest quota protection. 19 books × 1 chain/min burned through Kotak's
+# option-chain allowance by ~10:00 every day; every later call was a 429 and
+# the quotes fallback poured more requests on top. Broker calls are
+# synchronous, so the retry storm also blocked the event loop until the
+# watchdog killed the process (858 restarts). Cache snapshots briefly and
+# cool down exponentially on 429 instead of hammering.
+CHAIN_TTL_SECS = float(os.getenv("CHAIN_TTL_SECS", "120"))
+RL_BASE_SECS = float(os.getenv("CHAIN_RL_BASE_SECS", "60"))
+RL_MAX_SECS = float(os.getenv("CHAIN_RL_MAX_SECS", "300"))
+
+_snap_cache: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
+_expiry_cache: Dict[Tuple[str, str], Tuple[date, Optional[date]]] = {}
+_rl_until = 0.0
+_rl_level = 0
+_rl_last_log = 0.0
+_rl_hits = 0
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return "429" in s or "rate limit" in s or "too many request" in s
+
+
+def _note_rate_limit() -> None:
+    """Enter/extend exponential cooldown after a 429. Never raises."""
+    global _rl_until, _rl_level, _rl_last_log, _rl_hits
+    try:
+        _rl_hits += 1
+        _rl_level = min(_rl_level + 1, 3)
+        wait = min(RL_MAX_SECS, RL_BASE_SECS * (2 ** (_rl_level - 1)))
+        _rl_until = time.time() + wait
+        if time.time() - _rl_last_log > 60:
+            log.warning("chain: broker rate limit (429) — cooling down %.0fs "
+                        "(level %d, hits %d)", wait, _rl_level, _rl_hits)
+            _rl_last_log = time.time()
+    except Exception:
+        pass
+
+
+def _note_success() -> None:
+    global _rl_until, _rl_level
+    _rl_until, _rl_level = 0.0, 0
+
+
+def reset_state() -> None:
+    """Clear cache + cooldown (tests, and after a fresh login)."""
+    global _rl_until, _rl_level, _rl_last_log, _rl_hits
+    _snap_cache.clear()
+    _expiry_cache.clear()
+    _rl_until, _rl_level, _rl_last_log, _rl_hits = 0.0, 0, 0.0, 0
+
+
+def cache_info() -> Dict[str, Any]:
+    """Read-only state for health/diagnostics. Never raises."""
+    now = time.time()
+    return {"entries": len(_snap_cache),
+            "cooldown_secs": max(0.0, round(_rl_until - now, 1)),
+            "level": _rl_level, "hits": _rl_hits,
+            "ttl_secs": CHAIN_TTL_SECS}
+
+
+def _cached(key: Tuple[Any, ...], stale: bool = False) -> Optional[Dict[str, Any]]:
+    """Copy of a cached snapshot (never hand out the shared dict)."""
+    hit = _snap_cache.get(key)
+    if not hit:
+        return None
+    out = copy.deepcopy(hit[1])
+    out["cached"] = True
+    out["cache_age_secs"] = round(time.time() - hit[0], 1)
+    if stale:
+        out["stale"] = True
+    return out
+
+
+def _remember(key: Tuple[Any, ...], snap: Dict[str, Any]) -> None:
+    try:
+        _snap_cache[key] = (time.time(), copy.deepcopy(snap))
+    except Exception:
+        pass
 
 
 def _nearest_expiry_via_api(kotak_client: Any, segment: str, und: str) -> Optional[date]:
     """Nearest live expiry from the expiries API (clean ISO dates, no 2FA
     needed). The scrip-master expiry *fields* are stale (2016 timestamps),
-    so this is the trustworthy source when the master can't deliver."""
+    so this is the trustworthy source when the master can't deliver.
+    Cached per day — the answer changes once a week, not once a minute."""
+    key = (str(segment), str(und).upper())
+    today = date.today()
+    hit = _expiry_cache.get(key)
+    if hit and hit[0] == today:
+        return hit[1]
     try:
         fn = getattr(kotak_client, "expiries", None)
         if fn is None:
             return None
         resp = fn(exchange=segment, underlying=und)
         dates = (resp or {}).get("expiries", []) if isinstance(resp, dict) else []
-        today = date.today()
         parsed = []
         for s in dates:
             try:
@@ -44,9 +132,14 @@ def _nearest_expiry_via_api(kotak_client: Any, segment: str, und: str) -> Option
                 continue
             if d >= today:
                 parsed.append(d)
-        return min(parsed) if parsed else None
-    except Exception:
-        log.exception("chain_snapshot: expiries API failed")
+        out = min(parsed) if parsed else None
+        _expiry_cache[key] = (today, out)
+        return out
+    except Exception as exc:
+        if _is_rate_limited(exc):
+            _note_rate_limit()
+        else:
+            log.exception("chain_snapshot: expiries API failed")
         return None
 
 
@@ -192,15 +285,39 @@ def chain_snapshot(kotak_client: Any, contract_master: Any, *,
     Returns {"underlying","segment","expiry","spot","atm","rows","warnings",
     "quote_keys"}. Preferred source is the native option_chain endpoint
     (real ChgOI); falls back to quotes (ChgOI = 0 — use total-OI PCR only).
+
+    Every snapshot is cached for CHAIN_TTL_SECS. While a 429 cooldown is
+    active the last snapshot is served (marked stale=True) instead of
+    calling the broker again; with no cache the call raises.
     """
+    key = ((underlying or "").upper().strip(), segment,
+           str(expiry_hint or ""), int(count), int(width))
+    hit = _snap_cache.get(key)
+    if hit and time.time() - hit[0] <= CHAIN_TTL_SECS:
+        return _cached(key) or {}
+    if time.time() < _rl_until:
+        stale = _cached(key, stale=True)
+        if stale is not None:
+            return stale
+        raise ValueError("chain: broker rate-limit cooldown active")
     try:
         snap = _snapshot_via_option_chain(kotak_client, underlying=underlying,
                                           segment=segment, spot=spot,
                                           width=width, count=count,
                                           expiry=expiry_hint or None)
         if snap.get("rows"):
+            _note_success()
+            _remember(key, snap)
             return snap
-    except Exception:
+    except Exception as exc:
+        if _is_rate_limited(exc):
+            # Do NOT fall through to quotes: that multiplies the request
+            # storm that caused the 429 in the first place.
+            _note_rate_limit()
+            stale = _cached(key, stale=True)
+            if stale is not None:
+                return stale
+            raise
         log.exception("chain_snapshot: option_chain failed, falling back to quotes")
     und = (underlying or "").upper().strip()
     cm = contract_master
@@ -275,10 +392,21 @@ def chain_snapshot(kotak_client: Any, contract_master: Any, *,
                            "instrument_token": by_strike[s][side]["token"]})
     try:
         raw = kotak_client.quotes(instrument_tokens=tokens, quote_type="all")
-    except Exception:
+    except Exception as exc:
+        if _is_rate_limited(exc):
+            _note_rate_limit()
+            stale = _cached(key, stale=True)
+            if stale is not None:
+                return stale
+            raise
         log.exception("chain_snapshot: quotes call failed")
         raise ValueError("Kotak quotes call failed — see logs")
     if isinstance(raw, dict) and ("error" in raw or "Error" in raw):
+        if _is_rate_limited(ValueError(str(raw))):
+            _note_rate_limit()
+            stale = _cached(key, stale=True)
+            if stale is not None:
+                return stale
         raise ValueError(f"Kotak quotes error: {raw}")
 
     items = raw if isinstance(raw, list) else raw.get("data", raw.get("result", []))
@@ -305,7 +433,9 @@ def chain_snapshot(kotak_client: Any, contract_master: Any, *,
                      "callChgOI": 0, "putChgOI": 0,  # quotes carry no ChgOI
                      "callLTP": ce["ltp"], "putLTP": pe["ltp"],
                      "atm": s == atm})
-    return {"underlying": und, "segment": segment, "expiry": expiry,
-            "spot": spot, "atm": atm, "rows": rows,
-            "warnings": warnings, "quote_keys": quote_keys,
-            "source": "quotes"}
+    out = {"underlying": und, "segment": segment, "expiry": expiry,
+           "spot": spot, "atm": atm, "rows": rows,
+           "warnings": warnings, "quote_keys": quote_keys,
+           "source": "quotes"}
+    _remember(key, out)
+    return out
