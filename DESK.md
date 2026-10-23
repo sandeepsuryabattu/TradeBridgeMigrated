@@ -51,3 +51,21 @@ calibrate per-group profiles from real paper tape. Paper-only. No real orders.
   only if no breakout fired in last 30 min (BREAKOUT_EPISODE_SECS).
 - First live test Monday 2026-10-19 (NIFTY weekly expiry): watch call
   frequency (governors off) + Location row on ballot.
+
+## Stability fix 2026-10-23 (dbf9da6) — restart storm
+Diagnosis: watchdog restarted the process ~159×/day (859 total) because
+/api/status could not answer within 10s. Root: synchronous Kotak REST
+(chain_snapshot, 30s SDK rate-limiter wait + 30s HTTP timeout) ran inline
+in async scheduler_tick; a 429 storm (option-chain quota) blocked the
+event loop for minutes every sweep.
+- chain_snapshot now runs via asyncio.to_thread (scheduler + /chain-probe).
+- kotak_chain: 120s snapshot cache (CHAIN_TTL_SECS), per-day expiry cache,
+  429 → exponential cooldown 60→300s serving stale snapshots, no quotes
+  fallback while throttled; state visible at /api/health.
+- Contract masters: same-day marker (data/sensex_contracts.csv.date) skips
+  the 4-CSV re-download on restarts; daily 08:50 refresh forces.
+- Watchdog: probes /api/health, needs 2 consecutive misses, max 4 restarts
+  per hour, state in data/watchdog-{fails,restarts}. Repo copy:
+  scripts/watchdog.sh; VM copy installed at repo root (backup .bak-*).
+- Verify next session: pm2 restart counter flat, data/watchdog.log clean,
+  /api/health option_chain.hits only rises briefly on throttle.
